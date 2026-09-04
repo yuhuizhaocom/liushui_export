@@ -284,12 +284,14 @@ class LiushuiApp:
             bar.grid_columnconfigure(c, weight=1)
         bar.grid_rowconfigure(0, weight=1)
         bar.grid_rowconfigure(1, weight=1)
+        bar.grid_rowconfigure(2, weight=1)
 
         others = [
             ("首次登录", self._action_login_all, BG_BUTTON, 0, 0),
             ("检查登录状态", self._action_check_status, BG_WARN, 0, 1),
             ("打开下载文件夹", self._action_open_folder, "#7f8c8d", 1, 0),
             ("使用说明", self._action_help, "#16a085", 1, 1),
+            ("平台管理", self._open_platform_manager, "#8e44ad", 2, 0),
         ]
         for t, cmd, col, r, c in others:
             tk.Button(bar, text=t, command=cmd, bg=col, fg="white",
@@ -533,6 +535,16 @@ class LiushuiApp:
             "- 勾选框控制哪些平台/商户参与本次操作\n"
             "- 可随时点\"检查登录状态\"确认是否已登录\n"
             "- 导出文件在 downloads 目录,按 平台/商户/日期 存放")
+
+    def _open_platform_manager(self):
+        """打开平台管理弹窗(新增/编辑脚本)。"""
+        from core.platform_admin import PlatformManagerDialog
+
+        def _refresh():
+            self.platforms = discover_platforms()
+            return self.platforms
+
+        PlatformManagerDialog(self.root, self.platforms, on_refresh=_refresh)
 
     def _copy_export_outputs(self, start_date, end_date):
         """导出完成后,把各平台各商户该日期区间的最新文件复制汇总到 downloads/时间文件夹

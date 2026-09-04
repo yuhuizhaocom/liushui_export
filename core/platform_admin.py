@@ -6,8 +6,12 @@
 import os
 import re
 import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+import py_compile
 
 from core.loader import PLATFORMS_DIR
+from core.logger import log
 
 _KEY_RE = re.compile(r"^[a-z0-9_]+$")
 
@@ -131,3 +135,126 @@ class DebugProbe:
 
     def get_page_info(self):
         return self._call("get_page_info", self.inner.get_page_info, (), {})
+
+
+class PlatformWizard(tk.Toplevel):
+    """新增平台表单向导: 填元信息生成骨架, 完成后回调刷新。"""
+
+    FIELDS = [("key", "平台标识(字母数字下划线)"), ("name", "平台名称"),
+              ("login_url", "登录页地址"), ("export_url", "导出页地址"),
+              ("guide", "操作指引")]
+
+    def __init__(self, master, on_created=None):
+        super().__init__(master)
+        self.on_created = on_created
+        self.title("新增平台")
+        self.geometry("460x300")
+        self.transient(master)
+        self.grab_set()
+        self.vars = {}
+        for col, (k, label) in enumerate(self.FIELDS):
+            tk.Label(self, text=label, font=("Microsoft YaHei", 9)).grid(
+                row=col, column=0, sticky="w", padx=8, pady=4)
+            v = tk.StringVar()
+            tk.Entry(self, textvariable=v, width=38, font=("Microsoft YaHei", 9)).grid(
+                row=col, column=1, padx=8, pady=4)
+            self.vars[k] = v
+        tk.Button(self, text="生成", command=self._do_create,
+                  font=("Microsoft YaHei", 9)).grid(row=len(self.FIELDS), column=0, pady=10)
+        tk.Button(self, text="取消", command=self.destroy,
+                  font=("Microsoft YaHei", 9)).grid(row=len(self.FIELDS), column=1, pady=10)
+
+    def _do_create(self):
+        data = {k: v.get().strip() for k, v in self.vars.items()}
+        try:
+            generate_platform_skeleton(
+                data["key"], data["name"], data["login_url"],
+                data["export_url"], data["guide"])
+        except ValueError as e:
+            messagebox.showwarning("无法创建", str(e), parent=self)
+            return
+        log(f"已新增平台 {data.get('key')}({data.get('name')})", callback=None)
+        if self.on_created:
+            self.on_created()
+        self.destroy()
+
+
+class PlatformEditor(tk.Toplevel):
+    """内置脚本编辑器: 编辑 platforms/<key>/export.py, 保存时语法检查。"""
+
+    def __init__(self, master, key, on_saved=None):
+        super().__init__(master)
+        self.key = key
+        self.on_saved = on_saved
+        import os as _os
+        from core.loader import PLATFORMS_DIR as _PD
+        self.path = _os.path.join(_PD, key, "export.py")
+        self.title(f"编辑脚本 - {key}")
+        self.geometry("640x480")
+        self.transient(master)
+        self.grab_set()
+        tk.Label(self, text=f"文件: {self.path}", font=("Microsoft YaHei", 8),
+                 fg="#666").pack(anchor="w", padx=8, pady=(6, 2))
+        self.text = tk.Text(self, font=("Consolas", 10), undo=True)
+        self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self.status = tk.Label(self, text="", font=("Microsoft YaHei", 9), fg="#e74c3c")
+        self.status.pack(anchor="w", padx=8)
+        tk.Button(self, text="保存", command=self._save,
+                  font=("Microsoft YaHei", 9)).pack(pady=6)
+        self.text.insert("1.0", _os.path.exists(self.path) and open(self.path, encoding="utf-8").read() or "")
+
+    def _save(self):
+        content = self.text.get("1.0", "end-1c")
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(content)
+            py_compile.compile(self.path, doraise=True)
+        except Exception as e:
+            self.status.config(text=f"保存失败(语法错误): {e}")
+            return
+        self.status.config(text="已保存 ✓", fg="#27ae60")
+        log(f"平台脚本已保存: {self.key}", callback=None)
+        if self.on_saved:
+            self.on_saved()
+
+
+class PlatformManagerDialog(tk.Toplevel):
+    """平台管理: 平台列表 + 新增(向导) + 编辑(编辑器)。"""
+
+    def __init__(self, master, platforms, on_refresh):
+        super().__init__(master)
+        self.on_refresh = on_refresh
+        self.platforms = platforms
+        self.title("平台管理")
+        self.geometry("420x360")
+        self.transient(master)
+        self.grab_set()
+        tk.Button(self, text="+ 新增平台", command=self._wizard,
+                  font=("Microsoft YaHei", 9)).pack(anchor="w", padx=8, pady=6)
+        self.tree = ttk.Treeview(self, columns=("key", "name"), show="headings", height=10)
+        self.tree.heading("key", text="key")
+        self.tree.heading("name", text="名称")
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=8)
+        self._reload()
+        tk.Button(self, text="编辑选中脚本", command=self._edit,
+                  font=("Microsoft YaHei", 9)).pack(pady=6)
+
+    def _reload(self):
+        self.tree.delete(*self.tree.get_children())
+        for key, plat in self.platforms.items():
+            self.tree.insert("", "end", iid=key, values=(key, plat.name))
+
+    def _wizard(self):
+        PlatformWizard(self, on_created=self._after_change)
+
+    def _edit(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个平台", parent=self)
+            return
+        PlatformEditor(self, sel[0], on_saved=self._after_change)
+
+    def _after_change(self):
+        refreshed = self.on_refresh() or {}
+        self.platforms = refreshed
+        self._reload()

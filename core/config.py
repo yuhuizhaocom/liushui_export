@@ -21,6 +21,8 @@ SETTINGS_FILE = os.path.join(ROOT_DIR, "settings.json")
 DEFAULT_SETTINGS = {
     "show_browser": True,        # 是否显示浏览器窗口(取消勾选=后台运行)
     "download_name_mode": "unified",  # 下载文件名: unified=统一命名 / original=保留原始名称(非UUID)
+    "enable_keepalive": True,        # 登录保活开关
+    "keepalive_interval_min": 30,    # 保活巡检间隔(分钟)
 }
 
 

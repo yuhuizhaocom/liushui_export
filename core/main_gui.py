@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, load_settings, save_settings
 from core.loader import discover_platforms
 from core.logger import log
+from core.keepalive import KeepAliveService
 
 
 def discover_merchants(platform_keys):
@@ -61,6 +62,7 @@ class LiushuiApp:
         self.log_lines = []
         self.platforms = discover_platforms()
         self.settings = load_settings()
+        self.login_urls = {key: plat.login_url for key, plat in self.platforms.items()}
         self.merchant_vars = {}   # platform_key -> {商户名: BooleanVar}
         self.merchants = discover_merchants(self.platforms.keys())
         self._login_confirm = threading.Event()  # 登录弹窗确认事件(等待用户)
@@ -71,6 +73,14 @@ class LiushuiApp:
         self._build_left_panel()
         self._build_middle_panel()
         self._refresh_summary()   # 初始化概览条
+
+        # 登录保活服务: 后台线程周期刷新各商户登录态
+        self.keepalive = KeepAliveService(
+            self,
+            interval_min=int(self.settings.get("keepalive_interval_min", 30)),
+            enabled=bool(self.settings.get("enable_keepalive", True)),
+        )
+        self.keepalive.start()
 
     def _setup_window(self):
         self.root.title("流水自动导出工具 v1.0")
@@ -245,6 +255,23 @@ class LiushuiApp:
                        font=("Microsoft YaHei", 9), activebackground=BG_PANEL
                        ).pack(side=tk.LEFT, padx=(6, 0))
 
+        # 登录保活设置行
+        ka_row = tk.Frame(middle, bg=BG_PANEL)
+        ka_row.pack(fill=tk.X, pady=(2, 0))
+        self.enable_ka_var = tk.BooleanVar(value=bool(self.settings.get("enable_keepalive", True)))
+        self.enable_ka_var.trace_add("write", self._on_ka_setting)
+        tk.Checkbutton(ka_row, variable=self.enable_ka_var, text="登录保活",
+                       bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
+                       activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(ka_row, text="间隔(分钟):", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.ka_interval = tk.Spinbox(ka_row, from_=5, to=600, increment=5, width=5,
+                                      font=("Microsoft YaHei", 9))
+        self.ka_interval.delete(0, tk.END)
+        self.ka_interval.insert(0, str(int(self.settings.get("keepalive_interval_min", 30))))
+        self.ka_interval.bind("<FocusOut>", lambda *_: self._on_ka_setting())
+        self.ka_interval.pack(side=tk.LEFT)
+
         # 概览条(已选商户/平台/日期,位于设置区与按钮区之间)
         self.summary_var = tk.StringVar(value="")
         tk.Label(middle, textvariable=self.summary_var, bg=BG_PANEL, fg="#2d6cdf",
@@ -346,6 +373,25 @@ class LiushuiApp:
 
     def _get_selected(self):
         return [k for k, v in self.platform_vars.items() if v.get()]
+
+    def _on_ka_setting(self, *_):
+        """保活设置变化即时保存并应用到运行中的服务。"""
+        enabled = bool(self.enable_ka_var.get())
+        try:
+            interval = max(1, int(self.ka_interval.get()))
+        except Exception:
+            interval = 30
+        save_settings({"enable_keepalive": enabled, "keepalive_interval_min": interval})
+        self.keepalive.enabled = enabled
+        self.keepalive.interval_min = interval
+
+    def __iter_merchants(self):
+        """供保活复用的迭代: (platform_key, merchant)。"""
+        for key in self._get_selected():
+            for m in self._get_selected_merchants(key):
+                yield (key, m)
+
+    iter_selected_merchants = __iter_merchants
 
     def _run_async(self, target):
         if self.running:
@@ -772,7 +818,13 @@ def main():
             return
         root = tk.Tk()
         app = LiushuiApp(root)
-        root.protocol("WM_DELETE_WINDOW", lambda: (app.cleanup(), root.destroy()))
+
+        def _on_close(app, root):
+            app.keepalive.stop()
+            app.cleanup()
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", lambda: _on_close(app, root))
         root.mainloop()
     except Exception as e:
         # 业务用户容错: 任何异常都记录日志并以弹窗展示,不让程序静默崩溃

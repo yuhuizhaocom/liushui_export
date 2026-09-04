@@ -126,7 +126,8 @@ liushui_export/
 | `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典。                                                                                                           |
 | `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`。                      |
 | `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；提供 `load_settings()/save_settings()` 读写 `settings.json`。 |
-| `core/logger.py` | **日志模块**。统一日志入口 `log(msg, level, callback)`：同时输出到控制台、`logs/run_YYYYMMDD.log` 文件，并转发给 GUI 回调（显示在日志区）。 |
+| `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀），系统日志与用户操作统一记录这个通道。 |
+| `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
 | `platforms/*/export.py`  | **平台插件**。每个文件定义一个继承 `PlatformBase` 的导出类，实现该平台的登录与导出流程；平台专项逻辑（如有赞的 URL 日期参数）直接写在平台脚本内，不放入 `core/`（见 [第 8 章](#8-平台插件体系)）。 |
 | `start.bat` / `启动工具.vbs` | **启动脚本**。以 `python -m core.main_gui` 方式启动：前者用控制台 Python（错误可见）；后者用 `pythonw` 免控制台，并在首次运行时自动 `pip install playwright` + 安装 Chromium。                                    |
 
@@ -289,7 +290,18 @@ liushui_export/
 | `export(start, end, timeout)`       | 主流程：填日期 → 点查询 → `begin_wait_download` → 点导出 → `wait_download`；未捕获到下载则尝试确认弹窗再等一次；仍失败则截图 `manual_<时间戳>.png` 并返回 `"manual"`。 |
 | `quick_export(start, end, timeout)` | 快速导出：不填日期，直接点导出（用于页面已有默认日期的场景）。                                                                                           |
 
-### 5.5 模块级关键函数
+### 5.5 KeepAliveService（core/keepalive.py）— 登录保活服务
+
+| 方法/属性 | 说明 |
+|-----------|------|
+| `start()` | 启动后台守护线程，按间隔周期巡检（`stop` 事件驱动退出）。 |
+| `stop()` | 置停止标志并等待线程退出（窗口关闭时由主程序调用）。 |
+| `run_once()` | 巡检一轮：遍历 `app.iter_selected_merchants()`，逐个用独立 `BrowserManager` 打开 `login_url` 刷新会话，URL/标题含 login 或「登录」即标红（`app.set_platform_status(key,"error")`），否则标绿。 |
+| `enabled` / `interval_min` | 可运行时调整；间隔改动即时生效。 |
+
+> 并发约定：巡检轮询时若 `app.running == True`（正在导出/调试）立即跳过本轮，绝不与任务并发；`make_browser` 工厂注入便于单元测试。
+
+### 5.6 模块级关键函数
 
 | 函数                                    | 位置                 | 说明                                                                                                           |
 | ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
@@ -541,6 +553,9 @@ python -m playwright install chromium
 | `core/loader.py`         | 50 行          | 平台加载器                           |
 | `core/config.py`         | 47 行          | 配置与设置读写                         |
 | `core/logger.py`         | 38 行          | 日志模块                            |
+| `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
+| `tests/` | — | pytest 测试（test_logger、test_keepalive） |
+| `requirements-dev.txt` | — | 开发依赖（pytest） |
 | `platforms/*/export.py` | 约 110 行 | 平台导出脚本（**当前仅 `youzan` 已实现**，含有赞专项的 URL 日期参数方法；其余平台为待实现模板） |
 | `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |

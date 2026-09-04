@@ -16,7 +16,7 @@ from tkinter import ttk, messagebox, scrolledtext
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS, load_settings, save_settings
-from core.loader import discover_platforms
+from core.loader import discover_platforms, reload_platforms
 from core.logger import log
 from core.keepalive import KeepAliveService
 
@@ -144,56 +144,76 @@ class LiushuiApp:
 
         list_frame.bind("<Configure>", _on_canvas_configure)
 
+        self.list_frame = list_frame   # 供 _rebuild_platform_list 重建使用
+
         self.merchant_frames = {}   # platform_key -> Frame(商户 checkbox 容器)
         for key, plat in self.platforms.items():
             if not getattr(plat, "enabled", True):
                 continue
-            var = tk.BooleanVar(value=True)
-            self.platform_vars[key] = var
-            var.trace_add("write", lambda *_: self._refresh_summary())
+            self._build_platform_row(key, plat)
 
-            # 第一行: 平台勾选(联动其商户) + 状态标识 + 添加商户
-            row = tk.Frame(list_frame, bg=BG_PANEL)
-            row.pack(fill=tk.X, pady=(4, 0))
+    def _build_platform_row(self, key, plat):
+        """构建单个平台的行(勾选+状态+添加商户)与其商户多选容器。"""
+        var = tk.BooleanVar(value=True)
+        self.platform_vars[key] = var
+        var.trace_add("write", lambda *_: self._refresh_summary())
 
-            def _toggle_platform(k=key, v=var, p=plat):
-                on = v.get()
-                for mv in self.merchant_vars.get(k, {}).values():
-                    mv.set(on)
+        # 第一行: 平台勾选(联动其商户) + 状态标识 + 添加商户
+        row = tk.Frame(self.list_frame, bg=BG_PANEL)
+        row.pack(fill=tk.X, pady=(4, 0))
 
-            cb = tk.Checkbutton(row, variable=var, text=plat.name,
-                                bg=BG_PANEL, fg=FG_MAIN,
+        def _toggle_platform(k=key, v=var, p=plat):
+            on = v.get()
+            for mv in self.merchant_vars.get(k, {}).values():
+                mv.set(on)
+
+        cb = tk.Checkbutton(row, variable=var, text=plat.name,
+                            bg=BG_PANEL, fg=FG_MAIN,
+                            font=("Microsoft YaHei", 10),
+                            activebackground=BG_PANEL,
+                            command=_toggle_platform)
+        cb.pack(side=tk.LEFT)
+        # 商户数徽标(灰字小计数,便于一眼看清)
+        merch_cnt = len(self.merchants.get(key, []))
+        tk.Label(row, text=str(merch_cnt),
+                 bg="#eeeeee", fg="#7f8c8d",
+                 font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=(3, 0))
+        status_label = tk.Label(row, text="●", fg="#bdc3c7",
                                 font=("Microsoft YaHei", 10),
-                                activebackground=BG_PANEL,
-                                command=_toggle_platform)
-            cb.pack(side=tk.LEFT)
-            # 商户数徽标(灰字小计数,便于一眼看清)
-            merch_cnt = len(self.merchants.get(key, []))
-            tk.Label(row, text=str(merch_cnt),
-                     bg="#eeeeee", fg="#7f8c8d",
-                     font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=(3, 0))
-            status_label = tk.Label(row, text="●", fg="#bdc3c7",
-                                    font=("Microsoft YaHei", 10),
-                                    bg=BG_PANEL)
-            status_label.pack(side=tk.RIGHT)
-            plat.status_label = status_label
-            tk.Button(row, text="+", width=2, relief=tk.FLAT, fg="#ffffff",
-                      bg="#8e44ad", cursor="hand2",
-                      font=("Microsoft YaHei", 8, "bold"),
-                      command=lambda k=key, n=plat.name: self._prompt_add_merchant(k, n)
-                      ).pack(side=tk.RIGHT, padx=(4, 2))
+                                bg=BG_PANEL)
+        status_label.pack(side=tk.RIGHT)
+        plat.status_label = status_label
+        tk.Button(row, text="+", width=2, relief=tk.FLAT, fg="#ffffff",
+                  bg="#8e44ad", cursor="hand2",
+                  font=("Microsoft YaHei", 8, "bold"),
+                  command=lambda k=key, n=plat.name: self._prompt_add_merchant(k, n)
+                  ).pack(side=tk.RIGHT, padx=(4, 2))
 
-            # 商户多选容器
-            mer_frame = tk.Frame(list_frame, bg=BG_PANEL)
-            mer_frame.pack(fill=tk.X, pady=(0, 2))
-            self.merchant_frames[key] = mer_frame
-            self.merchant_vars[key] = {}
-            merch = self.merchants.get(key, [])
-            if merch:
-                for m in merch:
-                    self._add_merchant_checkbox(key, m, True)
-            else:
-                self._append_log(f"平台[{plat.name}]暂无商户,请先\"+\"添加并登录")
+        # 商户多选容器
+        mer_frame = tk.Frame(self.list_frame, bg=BG_PANEL)
+        mer_frame.pack(fill=tk.X, pady=(0, 2))
+        self.merchant_frames[key] = mer_frame
+        self.merchant_vars[key] = {}
+        merch = self.merchants.get(key, [])
+        if merch:
+            for m in merch:
+                self._add_merchant_checkbox(key, m, True)
+        else:
+            self._append_log(f"平台[{plat.name}]暂无商户,请先\"+\"添加并登录")
+
+    def _rebuild_platform_list(self):
+        """新增/编辑平台后重建左侧勾选列表(重新发现商户,平台/商户可即时反映变更)。"""
+        self.merchants = discover_merchants(self.platforms.keys())
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        self.platform_vars = {}
+        self.merchant_vars = {}
+        self.merchant_frames = {}
+        for key, plat in self.platforms.items():
+            if not getattr(plat, "enabled", True):
+                continue
+            self._build_platform_row(key, plat)
+        self._refresh_summary()
 
     def _build_right_panel(self):
         right = tk.Frame(self.root, bg=BG_PANEL, padx=15, pady=15)
@@ -595,7 +615,12 @@ class LiushuiApp:
         from core.platform_admin import PlatformManagerDialog
 
         def _refresh():
-            self.platforms = discover_platforms()
+            # 清空平台模块缓存重新发现, 使脚本修改/新增平台立即(无需重启)生效
+            self.platforms = reload_platforms()
+            try:
+                self._rebuild_platform_list()
+            except Exception:
+                pass
             return self.platforms
 
         PlatformManagerDialog(self.root, self.platforms, on_refresh=_refresh)

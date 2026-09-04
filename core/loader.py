@@ -48,3 +48,20 @@ def discover_platforms():
         except Exception as e:
             print(f"[加载失败] 平台 {folder}: {e}")
     return platforms
+
+
+def reload_platforms():
+    """清除平台模块缓存后重新发现。
+
+    通过平台管理修改/新增 export.py 后调用, 使改动无需重启立即生效
+    (importlib 会将模块缓存于 sys.modules, 必须显式删除)。
+    """
+    if os.path.isdir(PLATFORMS_DIR):
+        for folder in os.listdir(PLATFORMS_DIR):
+            dirpath = os.path.join(PLATFORMS_DIR, folder)
+            if not os.path.isdir(dirpath) or folder.startswith("_"):
+                continue
+            for mod_name in (f"platforms.{folder}", f"platforms.{folder}.export"):
+                if mod_name in sys.modules:
+                    del sys.modules[mod_name]
+    return discover_platforms()

@@ -129,6 +129,7 @@ liushui_export/
 | `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀），系统日志与用户操作统一记录这个通道。 |
 | `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
 | `platforms/*/export.py`  | **平台插件**。每个文件定义一个继承 `PlatformBase` 的导出类，实现该平台的登录与导出流程；平台专项逻辑（如有赞的 URL 日期参数）直接写在平台脚本内，不放入 `core/`（见 [第 8 章](#8-平台插件体系)）。 |
+| `core/platform_admin.py` | **平台管理/脚本调试**。`generate_platform_skeleton()` 生成骨架（key 校验）、`DebugProbe` 包装浏览器逐步记录调用、`PlatformManagerDialog`（向导+内置编辑器+列表）与 `DebugDialog`（试运行）三个 Tkinter 弹窗。 |
 | `start.bat` / `启动工具.vbs` | **启动脚本**。以 `python -m core.main_gui` 方式启动：前者用控制台 Python（错误可见）；后者用 `pythonw` 免控制台，并在首次运行时自动 `pip install playwright` + 安装 Chromium。                                    |
 
 ***
@@ -299,7 +300,15 @@ liushui_export/
 
 > 并发约定：巡检轮询时若 `app.running == True`（正在导出/调试）立即跳过本轮，绝不与任务并发；`make_browser` 工厂注入便于单元测试。
 
-### 5.6 模块级关键函数
+### 5.7 PlatformAdmin（core/platform_admin.py）— 平台管理与调试
+
+- `generate_platform_skeleton(key, name, login_url, export_url, guide)`：按模板生成 `platforms/<key>/`（`__init__.py` + `export.py`），重名/非法 key 抛 `ValueError`。
+- `validate_platform_key(key)`：小写字母/数字/下划线校验。
+- `DebugProbe`：包装 `BrowserManager`，拦截 `navigate`/`click_text`/`fill_*`/`wait_download` 等 13 个方法，每步记录 `{i, action, args, ok, error}`；以 browser 参数传入平台 `export()` 即可逐步调试，平台脚本零改动。
+- `PlatformManagerDialog`：平台列表 + 新增（`PlatformWizard` 表单）+ 编辑（`PlatformEditor` 内置编辑器，保存即 py_compile 语法检查）。
+- `DebugDialog`：平台/日期选择 + 试运行，经 `_run_async` 线程执行，步骤流经统一日志视图输出。
+
+### 5.8 模块级关键函数
 
 | 函数                                    | 位置                 | 说明                                                                                                           |
 | ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
@@ -447,6 +456,14 @@ end_wait_download(): 清队列、归位残留、清理临时目录
                      否则 → 已登录(绿)，显示页面标题前 20 字符
 ```
 
+### 7.6 平台新增与调试流程
+
+① **新增**：`PlatformWizard` 表单填写平台元信息 → `generate_platform_skeleton()` 生成 `platforms/<key>/`（`__init__.py` + `export.py`）→ `discover_platforms()` 刷新左侧列表立即出现。
+
+② **编辑**：`PlatformEditor` 内置编辑器修改 `export.py` → 保存即 `py_compile` 语法检查（错误不离屏）→ 重新 `discover_platforms()` 载入最新脚本。
+
+③ **调试**：`DebugProbe` 包装 browser → `plat.export(probe, ...)` 试运行 → 每步记录 `{i, action, args, ok, error}` → 日志视图逐条展示 `#N 动作`，失败步骤标红并显示异常。
+
 ***
 
 ## 8. 平台插件体系
@@ -551,7 +568,8 @@ python -m playwright install chromium
 | `core/config.py`         | 47 行          | 配置与设置读写                         |
 | `core/logger.py`         | 38 行          | 日志模块                            |
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
-| `tests/` | — | pytest 测试（test_logger、test_keepalive） |
+| `core/platform_admin.py` | 约 310 行 | 平台管理/脚本调试（骨架生成 + DebugProbe + 三个弹窗） |
+| `tests/` | — | pytest 测试（test_logger、test_keepalive、test_platform_admin） |
 | `requirements-dev.txt` | — | 开发依赖（pytest） |
 | `platforms/*/export.py` | 约 110 行 | 平台导出脚本（**当前仅 `youzan` 已实现**，含有赞专项的 URL 日期参数方法；其余平台为待实现模板） |
 | `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |

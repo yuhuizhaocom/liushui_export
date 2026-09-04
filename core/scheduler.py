@@ -8,8 +8,10 @@ import json
 import os
 import threading
 import time
+import tkinter as tk
 import uuid
 from datetime import datetime, timedelta
+from tkinter import ttk, messagebox
 
 
 class CronExpr:
@@ -211,3 +213,163 @@ class CronScheduler:
         finally:
             job.last_run = now.isoformat()
             self.store.save()
+
+
+class SchedulerDialog(tk.Toplevel):
+    """定时任务管理: 列表 + 新增/编辑/删除/启停。"""
+
+    def __init__(self, master, scheduler, rebuild_cb):
+        super().__init__(master)
+        self.scheduler = scheduler
+        self.rebuild_cb = rebuild_cb  # 配置变化后刷新(保存 store)
+        self.title("定时任务")
+        self.geometry("560x400")
+        self.transient(master)
+        self.grab_set()
+        btns = tk.Frame(self)
+        btns.pack(fill=tk.X, padx=8, pady=6)
+        for t, cmd in [("+ 新增", self._add), ("编辑", self._edit),
+                       ("删除", self._delete), ("启用/停用", self._toggle)]:
+            tk.Button(btns, text=t, command=cmd, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=3)
+        self.tree = ttk.Treeview(self, columns=("name", "cron", "objects", "enabled"),
+                                 show="headings", height=12)
+        for cid, txt, w in [("name", "任务名", 120), ("cron", "cron", 100),
+                            ("objects", "对象", 180), ("enabled", "启用", 60)]:
+            self.tree.heading(cid, text=txt)
+            self.tree.column(cid, width=w, anchor="center")
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=8)
+        self.tree.bind("<Double-1>", lambda e: self._edit())
+        self._reload()
+
+    def _reload(self):
+        self.tree.delete(*self.tree.get_children())
+        for job in self.scheduler.store.jobs:
+            objs = f"{len(job.platforms)}平台 × {len(job.merchants)}商户"
+            self.tree.insert("", "end", iid=job.job_id,
+                             values=(job.name, job.cron, objs, "✓" if job.enabled else "✗"))
+
+    def _save(self):
+        self.scheduler.store.save()
+        self.rebuild_cb()
+
+    def _add(self):
+        JobEditDialog(self, self.scheduler, job=None, on_saved=self._after)
+
+    def _edit(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        job = self._find(sel[0])
+        JobEditDialog(self, self.scheduler, job=job, on_saved=self._after)
+
+    def _find(self, job_id):
+        for j in self.scheduler.store.jobs:
+            if j.job_id == job_id:
+                return j
+        return None
+
+    def _delete(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        self.scheduler.store.jobs = [j for j in self.scheduler.store.jobs
+                                     if j.job_id != sel[0]]
+        self._after()
+
+    def _toggle(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        job = self._find(sel[0])
+        if job:
+            job.enabled = not job.enabled
+            self._after()
+
+    def _after(self):
+        self._save()
+        self._reload()
+
+
+class JobEditDialog(tk.Toplevel):
+    """新建/编辑定时任务: 名称、cron、平台、商户。"""
+
+    def __init__(self, master, scheduler, job=None, on_saved=None):
+        super().__init__(master)
+        self.scheduler = scheduler
+        self.job = job
+        self.on_saved = on_saved
+        self.title("定时任务编辑" if job else "新增定时任务")
+        self.geometry("460x300")
+        self.transient(master)
+        self.grab_set()
+        self.name_var = tk.StringVar(value=job.name if job else "")
+        self.cron_var = tk.StringVar(value=job.cron if job else "0 9 * * *")
+        platforms = {}
+        for key, plat in getattr(scheduler.app, "platforms", {}).items():
+            platforms[key] = plat.name
+        rows = [
+            ("任务名称", self.name_var, None),
+            ("cron 表达式", self.cron_var,
+             {"values": ["0 9 * * *", "0 18 * * 1-5", "0 */2 * * *", "0 9 * * 1"],
+              "width": 22}),
+        ]
+        for i, (label, var, extra) in enumerate(rows):
+            tk.Label(self, text=label, font=("Microsoft YaHei", 9)).grid(
+                row=i, column=0, sticky="w", padx=8, pady=6)
+            if extra:
+                tk.ttk.Combobox(self, textvariable=var, state="normal",
+                                values=extra["values"], width=extra["width"]).grid(
+                    row=i, column=1, sticky="w", padx=8, pady=6)
+            else:
+                tk.Entry(self, textvariable=var, width=24,
+                         font=("Microsoft YaHei", 9)).grid(
+                    row=i, column=1, sticky="w", padx=8, pady=6)
+        # 平台多选(Checkbutton, 横向)
+        plat_row = rows and len(rows) or 0
+        self.plat_vars = {}
+        tk.Label(self, text="平台:", font=("Microsoft YaHei", 9)).grid(
+            row=plat_row, column=0, sticky="nw", padx=8, pady=6)
+        pf = tk.Frame(self)
+        pf.grid(row=plat_row, column=1, sticky="w", padx=8, pady=6)
+        sel_plats = job.platforms if job else []
+        for key in sorted(platforms):
+            v = tk.BooleanVar(value=key in sel_plats)
+            self.plat_vars[key] = v
+            tk.Checkbutton(pf, text=platforms[key], variable=v,
+                           font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        # 商户(逗号分隔文本)
+        tk.Label(self, text="商户(逗号分隔):", font=("Microsoft YaHei", 9)).grid(
+            row=plat_row + 1, column=0, sticky="w", padx=8, pady=6)
+        self.merch_var = tk.StringVar(value=",".join(job.merchants) if job else "")
+        tk.Entry(self, textvariable=self.merch_var, width=24,
+                 font=("Microsoft YaHei", 9)).grid(
+            row=plat_row + 1, column=1, sticky="w", padx=8, pady=6)
+        tk.Button(self, text="保存", command=self._save,
+                  font=("Microsoft YaHei", 9)).grid(row=plat_row + 2, column=0, pady=8)
+        tk.Button(self, text="取消", command=self.destroy,
+                  font=("Microsoft YaHei", 9)).grid(row=plat_row + 2, column=1, pady=8)
+
+    def _save(self):
+        name = self.name_var.get().strip()
+        cron = self.cron_var.get().strip()
+        plats = [k for k, v in self.plat_vars.items() if v.get()]
+        merchants = [m.strip() for m in self.merch_var.get().split(",") if m.strip()]
+        if not name or not plats:
+            messagebox.showwarning("提示", "任务名称与至少一个平台必填", parent=self)
+            return
+        try:
+            CronExpr(cron)
+        except ValueError as e:
+            messagebox.showwarning("cron 非法", str(e), parent=self)
+            return
+        if self.job is None:
+            job = CronJob(job_id=uuid.uuid4().hex[:8], name=name, cron=cron,
+                          platforms=plats, merchants=merchants)
+            self.scheduler.store.jobs.append(job)
+        else:
+            self.job.name, self.job.cron = name, cron
+            self.job.platforms, self.job.merchants = plats, merchants
+        self.scheduler.store.save()
+        if self.on_saved:
+            self.on_saved()
+        self.destroy()

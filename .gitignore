@@ -10,6 +10,7 @@
 /browser_data/
 /logs/
 /settings.json
+/scheduled_tasks.json
 
 # Python 缓存
 __pycache__/

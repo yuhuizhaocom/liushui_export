@@ -99,6 +99,11 @@ class LiushuiApp:
         )
         self.keepalive.start()
 
+        # 定时任务调度器: 后台线程到期触发 self.trigger_job
+        from core.scheduler import CronScheduler
+        self.scheduler = CronScheduler(self, poll_interval=30)
+        self.scheduler.start()
+
     def _setup_window(self):
         self.root.title("流水自动导出工具 v1.0")
         self.root.geometry("1100x700")
@@ -289,6 +294,23 @@ class LiushuiApp:
         self.ka_interval.bind("<FocusOut>", lambda *_: self._on_ka_setting())
         self.ka_interval.pack(side=tk.LEFT)
 
+        # 失败重试设置行
+        retry_row = tk.Frame(middle, bg=BG_PANEL)
+        retry_row.pack(fill=tk.X, pady=(2, 0))
+        self.enable_retry_var = tk.BooleanVar(value=int(self.settings.get("retry_times", 2)) > 0)
+        self.enable_retry_var.trace_add("write", self._on_retry_setting)
+        tk.Checkbutton(retry_row, variable=self.enable_retry_var, text="失败重试",
+                       bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
+                       activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(retry_row, text="次数(0-5):", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.retry_times = tk.Spinbox(retry_row, from_=0, to=5, width=5,
+                                      font=("Microsoft YaHei", 9))
+        self.retry_times.delete(0, tk.END)
+        self.retry_times.insert(0, str(int(self.settings.get("retry_times", 2))))
+        self.retry_times.bind("<FocusOut>", lambda *_: self._on_retry_setting())
+        self.retry_times.pack(side=tk.LEFT)
+
         # 概览条(已选商户/平台/日期,位于设置区与按钮区之间)
         self.summary_var = tk.StringVar(value="")
         tk.Label(middle, textvariable=self.summary_var, bg=BG_PANEL, fg="#2d6cdf",
@@ -302,6 +324,7 @@ class LiushuiApp:
         bar.grid_rowconfigure(0, weight=1)
         bar.grid_rowconfigure(1, weight=1)
         bar.grid_rowconfigure(2, weight=1)
+        bar.grid_rowconfigure(3, weight=1)
 
         others = [
             ("首次登录", self._action_login_all, BG_BUTTON, 0, 0),
@@ -310,6 +333,7 @@ class LiushuiApp:
             ("使用说明", self._action_help, "#16a085", 1, 1),
             ("平台管理", self._open_platform_manager, "#8e44ad", 2, 0),
             ("脚本调试", self._open_debug_dialog, "#16a085", 2, 1),
+            ("定时任务", self._open_scheduler_dialog, "#2c3e50", 3, 0),
         ]
         for t, cmd, col, r, c in others:
             tk.Button(bar, text=t, command=cmd, bg=col, fg="white",
@@ -404,6 +428,18 @@ class LiushuiApp:
         save_settings({"enable_keepalive": enabled, "keepalive_interval_min": interval})
         self.keepalive.enabled = enabled
         self.keepalive.interval_min = interval
+
+    def _on_retry_setting(self, *_):
+        """失败重试设置变化即时保存(运行时从 settings 读取,无需运行时状态)。"""
+        enabled = bool(self.enable_retry_var.get())
+        try:
+            times = int(self.retry_times.get())
+        except Exception:
+            times = 2
+        times = max(0, min(5, times))
+        retry_times = times if enabled else 0
+        save_settings({"retry_times": retry_times,
+                       "retry_interval_s": int(DEFAULT_SETTINGS.get("retry_interval_s", 30))})
 
     def __iter_merchants(self):
         """供保活复用的迭代: (platform_key, merchant)。"""
@@ -601,6 +637,27 @@ class LiushuiApp:
             self._run_async(_task)
 
         DebugDialog(self.root, self.platforms, on_run=_run)
+
+    def _open_scheduler_dialog(self):
+        """定时任务管理弹窗。"""
+        from core.scheduler import SchedulerDialog
+        SchedulerDialog(self.root, self.scheduler, rebuild_cb=lambda: None)
+
+    def trigger_job(self, job):
+        """CronScheduler 回调: 按任务对象执行导出(昨天~今天)。"""
+        tasks = []
+        for key in job.platforms:
+            plat = self.platforms.get(key)
+            if not plat:
+                continue
+            for m in job.merchants:
+                tasks.append((key, plat, m))
+        if not tasks:
+            return
+        end = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        log(f"定时任务触发: {job.name} ({len(tasks)} 项)", callback=self._append_log)
+        self._run_async(lambda: self._execute_export_tasks(tasks, start, end, label=f"定时任务[{job.name}]"))
 
     def _copy_export_outputs(self, start_date, end_date):
         """导出完成后,把各平台各商户该日期区间的最新文件复制汇总到 downloads/时间文件夹
@@ -925,6 +982,7 @@ def main():
         app = LiushuiApp(root)
 
         def _on_close(app, root):
+            app.scheduler.stop()
             app.keepalive.stop()
             app.cleanup()
             root.destroy()

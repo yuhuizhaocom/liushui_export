@@ -26,6 +26,8 @@ DEFAULT_SETTINGS = {
     "download_name_mode": "unified",  # 下载文件名: unified=统一命名 / original=保留原始名称(非UUID)
     "enable_keepalive": True,        # 登录保活开关
     "keepalive_interval_min": 30,    # 保活巡检间隔(分钟)
+    "retry_times": 2,                # 失败自动重试次数(0=不重试)
+    "retry_interval_s": 30,          # 首次重试间隔秒(后续递增×2)
 }
 
 

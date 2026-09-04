@@ -15,7 +15,7 @@ from tkinter import ttk, messagebox, scrolledtext
 # 项目根目录: 将根加入 sys.path,保证从任意位置启动都能定位 core/ platforms/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, load_settings, save_settings
+from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS, load_settings, save_settings
 from core.loader import discover_platforms
 from core.logger import log
 from core.keepalive import KeepAliveService
@@ -39,6 +39,23 @@ def discover_merchants(platform_keys):
     except Exception:
         pass
     return result
+
+
+def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):
+    """通用重试: fn 返回非 "failed" 视为成功; 失败按 retry_times 重试, 间隔递增(×2)。
+    retry_times=0 表示失败一次即返回, 不重试。"""
+    interval = max(0, int(retry_interval_s))
+    result = fn()
+    attempt = 0
+    while result == "failed" and attempt < retry_times:
+        attempt += 1
+        wait = interval * (2 ** (attempt - 1))
+        if log:
+            log(f"  [重试] 第 {attempt}/{retry_times} 次重试({wait}s 后)")
+        time.sleep(wait)
+        result = fn()
+    return result
+
 
 # 颜色定义
 BG_MAIN = "#f5f6fa"
@@ -745,55 +762,92 @@ class LiushuiApp:
             plat = self.platforms[key]
             for m in self._get_selected_merchants(key):
                 tasks.append((key, plat, m))
+        self._execute_export_tasks(tasks, start_date, end_date, label="导出")
+        self._record_job_done("导出", start_date, end_date)
+
+    def _execute_export_tasks(self, tasks, start_date, end_date, label="导出"):
+        """对 tasks((key,plat,merchant)) 依次执行导出(含失败重试), 日志/状态由这里统一驱动。"""
+        if not tasks:
+            self._append_log("[提示] 未勾选任何平台商户,请先添加/勾选商户。")
+            return
+        st = load_settings()
+        retry_times = int(st.get("retry_times", DEFAULT_SETTINGS.get("retry_times", 2)))
+        retry_interval_s = int(st.get("retry_interval_s", DEFAULT_SETTINGS.get("retry_interval_s", 30)))
+        date_str = f"{start_date} 至 {end_date}"
         self._set_status(f"正在导出({date_str})...")
         self.progress.config(maximum=len(tasks), value=0)
-        exported = 0
-        manual = 0
-        failed = 0
+        exported = manual = failed = 0
         for i, (key, plat, merchant) in enumerate(tasks):
             self._append_log(f">>> 正在导出 {plat.name}({merchant}) 流水...")
             self._set_platform_status(key, "warn")
             try:
-                self._append_log(f"日期范围: {date_str}")
-                # 每个商户使用独立浏览器 profile(登录态隔离);下载目录含商户层
-                self._ensure_browser(plat, merchant)
-                self.browser.set_export_context(plat.name, start_date, end_date, merchant)
-                result = plat.export(self.browser, start_date, end_date)
-                if result == "success":
-                    self._append_log(f"[完成] {plat.name} 流水导出成功")
-                    self._set_platform_status(key, "ok")
-                    exported += 1
-                elif result == "manual":
-                    self._append_log(f"[提示] {plat.name} 需要手动完成导出")
-                    self._set_platform_status(key, "warn")
-                    manual += 1
-                    self.root.after(0, lambda n=plat.name, d=date_str, g=plat.guide: messagebox.showinfo(
-                        "请手动导出",
-                        f"【{n}】自动导出未完全成功\n\n"
-                        f"日期范围: {d}\n"
-                        f"操作指引: {g}\n\n"
-                        f"请在浏览器中手动完成导出,下载完成后点击确定继续。"))
-                else:
-                    self._append_log(f"[失败] {plat.name} 导出失败")
-                    self._set_platform_status(key, "error")
-                    failed += 1
+                result = run_with_retry(
+                    lambda k=key, p=plat, m=merchant: self._run_single_export(p, m, start_date, end_date),
+                    retry_times=retry_times,
+                    retry_interval_s=retry_interval_s,
+                    log=self._append_log,
+                )
             except Exception as e:
+                result = "failed"
                 self._append_log(f"[失败] {plat.name} 导出异常: {e}")
-                self._set_platform_status(key, "error")
+            self._apply_export_result(key, plat, result, date_str)
+            if result == "success":
+                exported += 1
+            elif result == "manual":
+                manual += 1
+            else:
                 failed += 1
             self.progress.config(value=i + 1)
         self._append_log(f"导出流程完成: 成功{exported} / 手动{manual} / 失败{failed}")
-        log(f"导出完成: 成功{exported} / 手动{manual} / 失败{failed}", callback=self._append_log)
-        if exported + manual > 0:
-            # 导出完成后,把本次导出的文件汇总复制到 downloads/时间文件夹,并自动打开
-            ts_dir = self._copy_export_outputs(start_date, end_date)
-            if ts_dir:
-                try:
-                    os.startfile(ts_dir)
-                    self._append_log(f"[汇总] 已自动打开文件夹: {ts_dir}")
-                except Exception:
-                    pass
         self._set_status(f"导出完成(成功{exported}/手动{manual}/失败{failed})")
+        return exported, manual, failed
+
+    def _run_single_export(self, plat, merchant, start_date, end_date):
+        """单个商户导出(给 run_with_retry 调用): 返回 "success"/"manual"/"failed"。"""
+        date_str = f"{start_date} 至 {end_date}"
+        self._append_log(f"日期范围: {date_str}")
+        # 每个商户使用独立浏览器 profile(登录态隔离);下载目录含商户层
+        self._ensure_browser(plat, merchant)
+        self.browser.set_export_context(plat.name, start_date, end_date, merchant)
+        result = plat.export(self.browser, start_date, end_date)
+        if result == "success":
+            self._append_log(f"[完成] {plat.name} 流水导出成功")
+        elif result == "manual":
+            self._append_log(f"[提示] {plat.name} 需要手动完成导出")
+        else:
+            self._append_log(f"[失败] {plat.name} 导出失败")
+        return result
+
+    def _apply_export_result(self, key, plat, result, date_str):
+        """结果状态灯与弹窗(manual 时弹窗)。"""
+        if result == "success":
+            self._set_platform_status(key, "ok")
+        elif result == "manual":
+            self._set_platform_status(key, "warn")
+            self.root.after(0, lambda n=plat.name, d=date_str, g=plat.guide: messagebox.showinfo(
+                "请手动导出",
+                f"【{n}】自动导出未完全成功\n\n"
+                f"日期范围: {d}\n"
+                f"操作指引: {g}\n\n"
+                f"请在浏览器中手动完成导出,下载完成后点击确定继续。"))
+        else:
+            self._set_platform_status(key, "error")
+
+    def _record_job_done(self, label, start_date, end_date):
+        """导出任务收尾: 汇总复制文件、打开文件夹与操作日志。"""
+        log(f"{label}完成", callback=self._append_log)
+        if self.progress["value"] >= 0:
+            # 导出完成后,把本次导出的文件汇总复制到 downloads/时间文件夹,并自动打开
+            try:
+                ts_dir = self._copy_export_outputs(start_date, end_date)
+                if ts_dir:
+                    try:
+                        os.startfile(ts_dir)
+                        self._append_log(f"[汇总] 已自动打开文件夹: {ts_dir}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     def _do_check(self, selected):
         tasks = []

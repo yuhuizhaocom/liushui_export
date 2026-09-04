@@ -292,6 +292,7 @@ class LiushuiApp:
             ("打开下载文件夹", self._action_open_folder, "#7f8c8d", 1, 0),
             ("使用说明", self._action_help, "#16a085", 1, 1),
             ("平台管理", self._open_platform_manager, "#8e44ad", 2, 0),
+            ("脚本调试", self._open_debug_dialog, "#16a085", 2, 1),
         ]
         for t, cmd, col, r, c in others:
             tk.Button(bar, text=t, command=cmd, bg=col, fg="white",
@@ -545,6 +546,44 @@ class LiushuiApp:
             return self.platforms
 
         PlatformManagerDialog(self.root, self.platforms, on_refresh=_refresh)
+
+    def _open_debug_dialog(self):
+        """脚本调试弹窗。"""
+        from core.platform_admin import DebugDialog, DebugProbe
+
+        def _run(key, start_date, end_date):
+            plat = self.platforms.get(key)
+            if not plat:
+                return
+            if not start_date:
+                start_date = self.date_start.get().strip()
+            if not end_date:
+                end_date = self.date_end.get().strip()
+
+            def _task():
+                self.progress.config(maximum=100, value=0)
+                self._set_status(f"调试 {plat.name}…")
+                steps = []
+                try:
+                    self._ensure_browser(plat)
+                    probe = DebugProbe(self.browser, steps=steps)
+                    result = plat.export(probe, start_date, end_date)
+                    for s in steps:
+                        line = f"  #{s['i']} {s['action']}{s['args']}"
+                        if not s["ok"]:
+                            line += f"  [出错] {s['error']}"
+                            self._append_log(line)
+                            continue
+                        self._append_log(line)
+                    self._append_log(f"[调试完成] {plat.name}: {result}")
+                    self._set_status(f"调试完成: {result}")
+                except Exception as e:
+                    self._append_log(f"[调试异常] {e}")
+                    self._set_status(f"调试异常: {e}")
+
+            self._run_async(_task)
+
+        DebugDialog(self.root, self.platforms, on_run=_run)
 
     def _copy_export_outputs(self, start_date, end_date):
         """导出完成后,把各平台各商户该日期区间的最新文件复制汇总到 downloads/时间文件夹

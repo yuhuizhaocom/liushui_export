@@ -258,3 +258,53 @@ class PlatformManagerDialog(tk.Toplevel):
         refreshed = self.on_refresh() or {}
         self.platforms = refreshed
         self._reload()
+
+
+class DebugDialog(tk.Toplevel):
+    """脚本调试: 选择平台/日期, 试运行其 export() 并流式输出步骤。"""
+
+    def __init__(self, master, platforms, on_run):
+        super().__init__(master)
+        self.on_run = on_run
+        self.title("脚本调试")
+        self.geometry("420x240")
+        self.transient(master)
+        self.grab_set()
+        row = 0
+        tk.Label(self, text="平台:", font=("Microsoft YaHei", 9)).grid(
+            row=row, column=0, sticky="w", padx=8, pady=6)
+        self.key_var = tk.StringVar()
+        keys = [k for k, p in platforms.items() if getattr(p, "enabled", True)]
+        cb = ttk.Combobox(self, textvariable=self.key_var, values=keys,
+                          state="readonly", font=("Microsoft YaHei", 9))
+        cb.grid(row=row, column=1, sticky="w", padx=8)
+        if keys:
+            self.key_var.set(keys[0])
+        row += 1
+        tk.Label(self, text="开始日期:", font=("Microsoft YaHei", 9)).grid(
+            row=row, column=0, sticky="w", padx=8, pady=6)
+        self.start_var = tk.StringVar(value="")
+        self.end_var = tk.StringVar(value="")
+        tk.Entry(self, textvariable=self.start_var, width=14,
+                 font=("Microsoft YaHei", 9)).grid(row=row, column=1, sticky="w", padx=8)
+        tk.Label(self, text="结束日期:", font=("Microsoft YaHei", 9)).grid(
+            row=row, column=2, sticky="w", padx=8)
+        tk.Entry(self, textvariable=self.end_var, width=14,
+                 font=("Microsoft YaHei", 9)).grid(row=row, column=3, sticky="w", padx=8)
+        row += 1
+        self.status = tk.Label(self, text="", font=("Microsoft YaHei", 9), fg="#27ae60")
+        self.status.grid(row=row, column=0, columnspan=4, sticky="w", padx=8, pady=4)
+        row += 1
+        tk.Button(self, text="试运行", command=self._run,
+                  font=("Microsoft YaHei", 9)).grid(row=row, column=0, pady=8)
+        tk.Button(self, text="关闭", command=self.destroy,
+                  font=("Microsoft YaHei", 9)).grid(row=row, column=1, pady=8)
+
+    def _run(self):
+        key = self.key_var.get()
+        if not key:
+            return
+        start = self.start_var.get().strip() or None
+        end = self.end_var.get().strip() or None
+        self.status.config(text="调试中…")
+        self.on_run(key, start, end)

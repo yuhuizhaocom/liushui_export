@@ -176,15 +176,13 @@ liushui_export/
 | `_thread_wrapper(target)`                        | 线程入口：执行任务 → 捕获异常写入日志 → `finally` 重置运行锁/进度条并**自动关闭浏览器**（避免残留进程）。                                           |
 | `_ensure_browser(plat, merchant, force_visible)` | 关闭旧浏览器 → 按 headless 配置创建 `BrowserManager` → 设置平台+商户 profile → `start()`。登录流程 `force_visible=True` 强制显示窗口。 |
 
-#### 状态/日志/历史
+#### 状态/日志
 
 | 方法                                  | 说明                                                                                 |
 | ----------------------------------- | ---------------------------------------------------------------------------------- |
 | `_append_log(line)`                 | 追加日志到右侧日志区，最多保留 300 条。                                                             |
 | `_set_status(text)`                 | 更新右侧状态栏。                                                                           |
 | `_set_platform_status(key, status)` | 置平台状态灯颜色：`ok`绿 / `warn`橙 / `error`红 / `idle`灰。                                     |
-| `_record_action(text)`              | 记录用户操作：追加写入 `logs/operation_history.txt`（跨启动累积）并刷新界面历史区（线程安全，经 `root.after` 切主线程）。 |
-| `_load_history()`                   | 启动时加载历史文件最近 500 条显示。                                                               |
 | `_refresh_summary()`                | 实时刷新概览条「已选 X 个商户 · Y 个平台 \[日期]」。                                                   |
 
 #### 其他
@@ -536,9 +534,8 @@ python -m playwright install chromium
 | `downloads/<平台名>/<商户>/<起_止>/临时/` | 是              | 单次任务下载临时暂存，结束后清空                                                                       |
 | `downloads/<起_止>_<时间戳>/`         | 是              | 导出完成后全平台汇总目录（`_copy_export_outputs` 生成）                                                |
 | `browser_data/<平台key>/<商户>/`     | 是（点 `+` 添加商户时） | Chromium 持久化 profile，保存登录态                                                             |
-| `logs/run_YYYYMMDD.log`          | 是              | 当日运行日志（DEBUG 级）                                                                        |
-| `logs/operation_history.txt`     | 是              | 用户操作历史（跨启动累积，界面显示最近 500 条）                                                             |
-| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名） |
+| `logs/run_YYYYMMDD.log`          | 是              | 当日统一日志（系统+操作，DEBUG 级）                                                                        |
+| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟） |
 
 ***
 

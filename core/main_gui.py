@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, load_settings, save_settings
 from core.loader import discover_platforms
+from core.logger import log
 
 
 def discover_merchants(platform_keys):
@@ -50,11 +51,6 @@ BG_LOG = "#1e1e2e"
 FG_LOG = "#cdd6f4"
 FG_MAIN = "#2d3436"
 FG_MUTED = "#636e72"
-
-# 操作历史持久化文件(跨启动累积记录,位于项目根 logs/ 下)
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "logs", "operation_history.txt")
-
 
 class LiushuiApp:
     def __init__(self, root):
@@ -189,19 +185,10 @@ class LiushuiApp:
         self.progress.pack(fill=tk.X, pady=(8, 0))
 
     def _build_middle_panel(self):
-        """中间栏: 设置区(概览/日期/浏览器/文件名) + 操作历史"""
+        """中间栏: 设置区(概览/日期/浏览器/文件名) + 操作按钮"""
         middle = tk.Frame(self.root, bg=BG_PANEL, width=400, padx=15, pady=15)
         middle.pack(side=tk.LEFT, fill=tk.Y, padx=(4, 4))
         middle.pack_propagate(False)
-
-        # 操作历史(占弹性空间,在上)
-        tk.Label(middle, text="操作历史", bg=BG_PANEL, fg=FG_MAIN,
-                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 2))
-        self.history_text = scrolledtext.ScrolledText(
-            middle, bg="#f7f8fa", fg="#2d3436", font=("Microsoft YaHei", 9),
-            wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT)
-        self.history_text.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
-        self._load_history()   # 加载跨启动的历史记录
 
         # 导出日期
         tk.Label(middle, text="导出日期", bg=BG_PANEL, fg=FG_MAIN,
@@ -335,50 +322,6 @@ class LiushuiApp:
         except Exception:
             pass
 
-    def _record_action(self, text):
-        """记录一条用户操作: 追加到历史文件(跨启动累积),并刷新界面"""
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {text}"
-        # 1) 写入文件(日志目录)
-        try:
-            os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
-            with open(HISTORY_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
-        # 2) 刷新界面(切到主线程,后台线程安全)
-        def _append_ui():
-            try:
-                self.history_text.config(state=tk.NORMAL)
-                self.history_text.insert(tk.END, line + "\n")
-                self.history_text.see(tk.END)
-                self.history_text.config(state=tk.DISABLED)
-            except Exception:
-                pass
-
-        try:
-            self.root.after(0, _append_ui)
-        except Exception:
-            pass
-
-    def _load_history(self):
-        """启动时加载历史操作记录(最多显示最近 500 条)"""
-        try:
-            if not os.path.isfile(HISTORY_FILE):
-                return
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if not lines:
-                return
-            lines = lines[-500:]
-            self.history_text.config(state=tk.NORMAL)
-            self.history_text.delete("1.0", tk.END)
-            self.history_text.insert(tk.END, "".join(lines))
-            self.history_text.see(tk.END)
-            self.history_text.config(state=tk.DISABLED)
-        except Exception:
-            pass
-
     def _append_log(self, line):
         self.log_lines.append(line)
         self.log_text.config(state=tk.NORMAL)
@@ -483,7 +426,7 @@ class LiushuiApp:
             return
         cnt = sum(len(self._get_selected_merchants(k)) for k in selected)
         if cnt > 0:
-            self._record_action(f"首次登录: {cnt} 个商户")
+            log(f"首次登录: {cnt} 个商户", callback=self._append_log)
         self._run_async(lambda: self._do_login(selected))
 
     def _action_export_all(self):
@@ -512,7 +455,7 @@ class LiushuiApp:
             f"日期: {date_str}\n{lines}")
         if not ok:
             return
-        self._record_action(f"开始导出: {len(tasks)} 个商户 [{date_str}]")
+        log(f"开始导出: {len(tasks)} 个商户 [{date_str}]", callback=self._append_log)
         self._run_async(lambda: self._do_export(selected))
 
     def _action_check_status(self):
@@ -522,7 +465,7 @@ class LiushuiApp:
         if not selected:
             messagebox.showwarning("提示", "请至少选择一个平台。")
             return
-        self._record_action("检查登录状态")
+        log("检查登录状态", callback=self._append_log)
         self._run_async(lambda: self._do_check(selected))
 
     def _action_open_folder(self):
@@ -743,7 +686,7 @@ class LiushuiApp:
                 failed += 1
             self.progress.config(value=i + 1)
         self._append_log(f"导出流程完成: 成功{exported} / 手动{manual} / 失败{failed}")
-        self._record_action(f"导出完成: 成功{exported} / 手动{manual} / 失败{failed}")
+        log(f"导出完成: 成功{exported} / 手动{manual} / 失败{failed}", callback=self._append_log)
         if exported + manual > 0:
             # 导出完成后,把本次导出的文件汇总复制到 downloads/时间文件夹,并自动打开
             ts_dir = self._copy_export_outputs(start_date, end_date)

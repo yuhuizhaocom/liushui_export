@@ -130,6 +130,7 @@ liushui_export/
 | `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
 | `platforms/*/export.py`  | **平台插件**。每个文件定义一个继承 `PlatformBase` 的导出类，实现该平台的登录与导出流程；平台专项逻辑（如有赞的 URL 日期参数）直接写在平台脚本内，不放入 `core/`（见 [第 8 章](#8-平台插件体系)）。 |
 | `core/platform_admin.py` | **平台管理/脚本调试**。`generate_platform_skeleton()` 生成骨架（key 校验）、`DebugProbe` 包装浏览器逐步记录调用、`PlatformManagerDialog`（向导+内置编辑器+列表）与 `DebugDialog`（试运行）三个 Tkinter 弹窗。 |
+| `core/scheduler.py` | **定时任务**。`CronExpr`（5 字段 cron 轻量解析/匹配/next-run）、`CronJob`/`TaskStore`（`scheduled_tasks.json` 持久化）、`CronScheduler`（后台线程到期触发 `app.trigger_job`）、`SchedulerDialog`/`JobEditDialog`（任务管理界面）；导出失败自动重试（`run_with_retry`）亦由本批提供。 |
 | `start.bat` / `启动工具.vbs` | **启动脚本**。以 `python -m core.main_gui` 方式启动：前者用控制台 Python（错误可见）；后者用 `pythonw` 免控制台，并在首次运行时自动 `pip install playwright` + 安装 Chromium。                                    |
 
 ***
@@ -308,7 +309,15 @@ liushui_export/
 - `PlatformManagerDialog`：平台列表 + 新增（`PlatformWizard` 表单）+ 编辑（`PlatformEditor` 内置编辑器，保存即 py_compile 语法检查）。
 - `DebugDialog`：平台/日期选择 + 试运行，经 `_run_async` 线程执行，步骤流经统一日志视图输出。
 
-### 5.7 模块级关键函数
+### 5.7 CronScheduler（core/scheduler.py）— 定时任务
+
+- `CronExpr(expr)`：支持 `*`/`*/n`/`a-b`/`a,b`/`?`；`match(dt)` 按分时日月周匹配（dom 与 dow 同时受限为 OR）；`next_run(after)` 返回下一个匹配分钟（一年内）。
+- `CronJob`/`TaskStore`：任务模型与 `scheduled_tasks.json`（version 1）读写；损坏条目跳过。
+- `CronScheduler(app, store, poll_interval=30)`：后台线程轮询；`should_trigger` 基于「上次运行后的 next_run <= now」（从未运行为到期）；触发经 `app.trigger_job(job)` 后更新 `last_run` 并保存；错过不补跑。
+- `SchedulerDialog`/`JobEditDialog`：任务新增/编辑/删除/启停；cron 带常用模板与校验。
+- 失败重试：`run_with_retry(fn, retry_times, retry_interval_s, log)` 与 `_execute_export_tasks`（自 `_do_export` 提炼）；settings `retry_times`(默认 2)/`retry_interval_s`(默认 30，递增 ×2)；`retry_times=0` 关闭。
+
+### 5.8 模块级关键函数
 
 | 函数                                    | 位置                 | 说明                                                                                                           |
 | ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
@@ -551,6 +560,7 @@ python -m playwright install chromium
 | `downloads/<平台名>/<商户>/<起_止>/临时/` | 是              | 单次任务下载临时暂存，结束后清空                                                                       |
 | `downloads/<起_止>_<时间戳>/`         | 是              | 导出完成后全平台汇总目录（`_copy_export_outputs` 生成）                                                |
 | `browser_data/<平台key>/<商户>/`     | 是（点 `+` 添加商户时） | Chromium 持久化 profile，保存登录态                                                             |
+| `scheduled_tasks.json`            | 是              | 定时任务持久化（新增/编辑后自动保存）                                                                        |
 | `logs/run_YYYYMMDD.log`          | 是              | 当日统一日志（系统+操作，DEBUG 级）                                                                        |
 | `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟） |
 
@@ -569,7 +579,8 @@ python -m playwright install chromium
 | `core/logger.py`         | 38 行          | 日志模块                            |
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
 | `core/platform_admin.py` | 约 310 行 | 平台管理/脚本调试（骨架生成 + DebugProbe + 三个弹窗） |
-| `tests/` | — | pytest 测试（test_logger、test_keepalive、test_platform_admin） |
+| `core/scheduler.py` | 约 360 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
+| `tests/` | — | pytest 测试（test_logger、test_keepalive、test_platform_admin、test_scheduler、test_retry） |
 | `requirements-dev.txt` | — | 开发依赖（pytest） |
 | `platforms/*/export.py` | 约 110 行 | 平台导出脚本（**当前仅 `youzan` 已实现**，含有赞专项的 URL 日期参数方法；其余平台为待实现模板） |
 | `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |

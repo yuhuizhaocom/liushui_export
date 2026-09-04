@@ -6,7 +6,10 @@ import os
 import logging
 from datetime import datetime
 
-LOG_DIR = "logs"
+from .config import ROOT_DIR
+
+# 日志目录(基于项目根的绝对路径,不依赖运行目录)
+LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 log_file = os.path.join(LOG_DIR, f"run_{datetime.now().strftime('%Y%m%d')}.log")

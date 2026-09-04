@@ -98,4 +98,4 @@ If pyw <> "" Then
 Else
     run = py
 End If
-sh.Run Chr(34) & run & Chr(34) & " main_gui.py", 0, False
+sh.Run Chr(34) & run & Chr(34) & " -m core.main_gui", 0, False

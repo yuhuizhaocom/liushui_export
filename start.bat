@@ -29,7 +29,7 @@ echo Python: %PYTHON%
 echo.
 
 REM Run the GUI directly (console stays open so errors are visible)
-"%PYTHON%" main_gui.py
+"%PYTHON%" -m core.main_gui
 
 if %errorlevel% neq 0 (
     echo.

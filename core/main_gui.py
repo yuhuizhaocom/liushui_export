@@ -6,18 +6,17 @@
 
 import os
 import sys
-import time
 import threading
+import time
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
 from datetime import datetime, timedelta
+from tkinter import ttk, messagebox, scrolledtext
 
 # 项目根目录: 将根加入 sys.path,保证从任意位置启动都能定位 core/ platforms/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, load_settings, save_settings
 from core.loader import discover_platforms
-from core.logger import log
 
 
 def discover_merchants(platform_keys):

@@ -17,7 +17,7 @@ PLATFORMS_DIR = os.path.join(ROOT, "platforms")
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core.platform_base import PlatformBase
+from .platform_base import PlatformBase
 
 
 def discover_platforms():

@@ -2,7 +2,8 @@
 有赞平台导出脚本 - 完整示例
 
 这个脚本演示了如何编写平台导出脚本。
-你可以直接修改 export 方法中的逻辑,适配有赞后台的实际页面。
+有赞专项逻辑(带日期参数的流水页 URL、确认弹窗处理)直接在本平台脚本内实现,
+不放入 core/ 通用模块。
 
 辅助方法速查(通过 browser 调用):
     browser.navigate(url)                    # 打开页面
@@ -21,6 +22,9 @@
     "failed"  - 导出失败
 """
 
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
 from core.platform_base import PlatformBase
 
 
@@ -31,9 +35,35 @@ class YouzanExporter(PlatformBase):
     export_url = "https://www.youzan.com/v4/assets/record?accountType=&active=&bizType=&chooseDays=7&dateType=SETTLE_TIME&endTime=1788364799999&page=1&pageSize=10&payMethod=&startTime=1787760000000&tradeChannel=&waterNo="
     guide = "进入后台 → 数据 → 交易明细 → 选择日期 → 导出"
 
+    # ===== 有赞专项: 带日期参数的流水页 URL =====
+
+    def _build_youzan_url(self, url, start_date, end_date):
+        """构造带日期参数的有赞流水页 URL(UTC+8 毫秒时间戳),不执行跳转"""
+        try:
+            cst = timezone(timedelta(hours=8))
+            start_ts = int(datetime.strptime(start_date[:10], "%Y-%m-%d")
+                           .replace(tzinfo=cst).timestamp() * 1000)
+            end_ts = int(datetime.strptime(end_date[:10], "%Y-%m-%d")
+                         .replace(hour=23, minute=59, second=59,
+                                  microsecond=999000, tzinfo=cst).timestamp() * 1000)
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            qs["startTime"] = [str(start_ts)]
+            qs["endTime"] = [str(end_ts)]
+            qs["dateType"] = ["SETTLE_TIME"]
+            new_query = urlencode(qs, doseq=True)
+            return urlunparse(parsed._replace(query=new_query))
+        except Exception:
+            return url
+
+    def open_youzan_record(self, browser, url, start_date, end_date):
+        """一次性打开已带日期参数的有赞流水页(仅导航一次,不再二次跳转)"""
+        target = self._build_youzan_url(url, start_date, end_date)
+        return browser.navigate(target)
+
     def export(self, browser, start_date, end_date):
         # ===== 一次性打开导出页面并带上日期参数(不再二次跳转) =====
-        browser.open_youzan_record(self.export_url, start_date, end_date)
+        self.open_youzan_record(browser, self.export_url, start_date, end_date)
         browser.sleep(3)  # 等待页面加载
 
         # ===== 关闭弹窗(有就关,没有自动跳过) =====
@@ -44,12 +74,12 @@ class YouzanExporter(PlatformBase):
 
         # browser.click_text("进入工作台")
         # browser.sleep(2)
-        # 
+        #
         # browser.click_text("对账单明细")
         # browser.sleep(2)
 
         browser.click_text("筛选")
-        browser.sleep(3)  
+        browser.sleep(3)
 
         browser.click_text("导出报表")
         browser.sleep(10)

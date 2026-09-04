@@ -1,2 +1,16 @@
+# IDE
 /.idea/
+*.iml
+
+# 虚拟环境
 /.venv/
+
+# 运行时数据(自动生成)
+/downloads/
+/browser_data/
+/logs/
+/settings.json
+
+# Python 缓存
+__pycache__/
+*.py[cod]

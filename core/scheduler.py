@@ -148,3 +148,66 @@ class TaskStore:
 def _default_tasks_path():
     from core.config import SCHEDULED_TASKS_FILE
     return SCHEDULED_TASKS_FILE
+
+
+class CronScheduler:
+    """后台线程轮询已启用任务, 到点通过 app.trigger_job(job) 触发。
+    触发后更新 last_run 并保存; 错过的触发在下次轮询自动跳过(不补跑)。"""
+
+    def __init__(self, app, store=None, poll_interval=30):
+        self.app = app
+        self.store = store or TaskStore()
+        self.poll_interval = max(10, int(poll_interval))
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self):
+        while not self._stop.wait(self.poll_interval):
+            try:
+                self.check_all(datetime.now())
+            except Exception:
+                continue
+
+    def check_all(self, now):
+        """轮询一轮: 触发所有到期任务。now 可注入便于测试。"""
+        self.store.load()
+        for job in self.store.jobs:
+            if self.should_trigger(job, now):
+                self.trigger(job, now)
+
+    def should_trigger(self, job, now):
+        if not job.enabled:
+            return False
+        try:
+            expr = CronExpr(job.cron)
+        except ValueError:
+            return False
+        last = None
+        if job.last_run:
+            try:
+                last = datetime.fromisoformat(job.last_run)
+            except ValueError:
+                last = None
+        if last is None:
+            return True  # 从未运行过,视为到期
+        nxt = expr.next_run(last)
+        return nxt is not None and nxt <= now
+
+    def trigger(self, job, now):
+        try:
+            self.app.trigger_job(job)
+        finally:
+            job.last_run = now.isoformat()
+            self.store.save()

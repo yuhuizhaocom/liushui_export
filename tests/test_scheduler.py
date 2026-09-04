@@ -1,9 +1,9 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
-from core.scheduler import CronExpr, CronJob, TaskStore
+from core.scheduler import CronExpr, CronJob, TaskStore, CronScheduler
 
 
 def _dt(s):
@@ -84,3 +84,63 @@ def test_taskstore_ignores_corrupt_file(tmp_path):
         f.write("{broken json")
     store = TaskStore(path)
     assert store.load() == []
+
+
+def _job(name="t", cron="* * * * *", last_run=None, enabled=True):
+    return CronJob(job_id="j1", name=name, cron=cron,
+                   platforms=["youzan"], merchants=["m1"],
+                   enabled=enabled, last_run=last_run)
+
+
+def test_should_trigger_when_next_run_passed():
+    now = datetime(2026, 9, 4, 18, 0)
+    s = CronScheduler(app=object())
+    job = _job(cron="*/5 * * * *", last_run="2026-09-04T17:50:00")
+    assert s.should_trigger(job, now) is True
+
+
+def test_should_not_trigger_when_not_due():
+    now = datetime(2026, 9, 4, 18, 0)
+    s = CronScheduler(app=object())
+    job = _job(cron="*/5 * * * *", last_run="2026-09-04T18:00:00")
+    assert s.should_trigger(job, now) is False
+
+
+def test_should_not_trigger_when_disabled():
+    now = datetime(2026, 9, 4, 18, 0)
+    s = CronScheduler(app=object())
+    job = _job(enabled=False, last_run=None)
+    assert s.should_trigger(job, now) is False
+
+
+def test_check_all_triggers_due_job_and_updates_last_run(tmp_path):
+    calls = []
+
+    class FakeApp:
+        def trigger_job(self, job):
+            calls.append(job.name)
+
+    store = TaskStore(str(tmp_path / "t.json"))
+    now = datetime(2026, 9, 4, 18, 0)
+    job = _job(name="due", cron="* * * * *", last_run=None)
+    store.save([job])
+    s = CronScheduler(app=FakeApp(), store=store)
+    s.check_all(now)
+    assert calls == ["due"]
+    assert store.load()[0].last_run == now.isoformat()
+
+
+def test_check_all_skips_undue_job(tmp_path):
+    calls = []
+
+    class FakeApp:
+        def trigger_job(self, job):
+            calls.append(job.name)
+
+    store = TaskStore(str(tmp_path / "t.json"))
+    job = _job(name="ok", cron="0 9 * * *", last_run="2026-09-04T09:00:00")
+    store.save([job])
+    s = CronScheduler(app=FakeApp(), store=store)
+    now = datetime(2026, 9, 4, 18, 0)
+    s.check_all(now)
+    assert calls == []

@@ -300,7 +300,7 @@ liushui_export/
 
 > 并发约定：巡检轮询时若 `app.running == True`（正在导出/调试）立即跳过本轮，绝不与任务并发；`make_browser` 工厂注入便于单元测试。
 
-### 5.7 PlatformAdmin（core/platform_admin.py）— 平台管理与调试
+### 5.6 PlatformAdmin（core/platform_admin.py）— 平台管理与调试
 
 - `generate_platform_skeleton(key, name, login_url, export_url, guide)`：按模板生成 `platforms/<key>/`（`__init__.py` + `export.py`），重名/非法 key 抛 `ValueError`。
 - `validate_platform_key(key)`：小写字母/数字/下划线校验。
@@ -308,7 +308,7 @@ liushui_export/
 - `PlatformManagerDialog`：平台列表 + 新增（`PlatformWizard` 表单）+ 编辑（`PlatformEditor` 内置编辑器，保存即 py_compile 语法检查）。
 - `DebugDialog`：平台/日期选择 + 试运行，经 `_run_async` 线程执行，步骤流经统一日志视图输出。
 
-### 5.8 模块级关键函数
+### 5.7 模块级关键函数
 
 | 函数                                    | 位置                 | 说明                                                                                                           |
 | ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |

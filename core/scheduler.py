@@ -74,3 +74,77 @@ class CronExpr:
                 return nxt
             nxt += timedelta(minutes=1)
         return None
+
+
+class CronJob:
+    """定时导出任务。"""
+
+    def __init__(self, job_id, name, cron, platforms, merchants,
+                 enabled=True, last_run=None):
+        self.job_id = job_id
+        self.name = name
+        self.cron = cron
+        self.platforms = list(platforms)
+        self.merchants = list(merchants)
+        self.enabled = bool(enabled)
+        self.last_run = last_run  # ISO 字符串或 None
+
+    def to_dict(self):
+        return {
+            "id": self.job_id,
+            "name": self.name,
+            "cron": self.cron,
+            "platforms": self.platforms,
+            "merchants": self.merchants,
+            "enabled": self.enabled,
+            "last_run": self.last_run,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(job_id=d.get("id") or uuid.uuid4().hex[:8],
+                   name=d.get("name") or "",
+                   cron=d.get("cron") or "* * * * *",
+                   platforms=d.get("platforms") or [],
+                   merchants=d.get("merchants") or [],
+                   enabled=d.get("enabled", True),
+                   last_run=d.get("last_run"))
+
+
+class TaskStore:
+    """scheduled_tasks.json 持久化。"""
+
+    def __init__(self, path=None):
+        self.path = path or _default_tasks_path()
+        self.jobs = []
+
+    def load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+            jobs = []
+            for item in data.get("jobs", []):
+                try:
+                    jobs.append(CronJob.from_dict(item))
+                except Exception:
+                    continue  # 跳过损坏条目
+            self.jobs = jobs
+        except Exception:
+            self.jobs = []
+        return self.jobs
+
+    def save(self, jobs=None):
+        if jobs is not None:
+            self.jobs = jobs
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "jobs": [j.to_dict() for j in self.jobs]},
+                          f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+def _default_tasks_path():
+    from core.config import SCHEDULED_TASKS_FILE
+    return SCHEDULED_TASKS_FILE

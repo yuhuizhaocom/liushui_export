@@ -1,8 +1,9 @@
+import json
 from datetime import datetime
 
 import pytest
 
-from core.scheduler import CronExpr
+from core.scheduler import CronExpr, CronJob, TaskStore
 
 
 def _dt(s):
@@ -52,3 +53,34 @@ def test_invalid_expr_raises():
         CronExpr("0 9 * *")          # 只有 4 字段
     with pytest.raises(ValueError):
         CronExpr("70 * * * *")       # 分钟越界
+
+
+def test_cronjob_roundtrip():
+    job = CronJob(job_id="abc", name="每日导出", cron="0 9 * * *",
+                  platforms=["youzan"], merchants=["旗舰店A"],
+                  enabled=True, last_run="2026-09-01T09:00:00")
+    d = job.to_dict()
+    assert d["name"] == "每日导出"
+    assert d["platforms"] == ["youzan"]
+    job2 = CronJob.from_dict(d)
+    assert job2.cron == "0 9 * * *"
+    assert job2.last_run == "2026-09-01T09:00:00"
+
+
+def test_taskstore_save_load(tmp_path):
+    path = str(tmp_path / "tasks.json")
+    store = TaskStore(path)
+    store.jobs = [CronJob(job_id="x1", name="A", cron="* * * * *",
+                          platforms=["p"], merchants=["m"])]
+    store.save()
+    store2 = TaskStore(path)
+    assert len(store2.load()) == 1
+    assert store2.load()[0].name == "A"
+
+
+def test_taskstore_ignores_corrupt_file(tmp_path):
+    path = str(tmp_path / "tasks.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("{broken json")
+    store = TaskStore(path)
+    assert store.load() == []

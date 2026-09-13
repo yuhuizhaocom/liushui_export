@@ -4,6 +4,7 @@
 平台通过 core.loader 动态发现加载,新增平台只需在 platforms/ 下建文件夹
 """
 
+import json
 import os
 import sys
 import threading
@@ -15,9 +16,10 @@ from tkinter import ttk, messagebox, scrolledtext
 # 项目根目录: 将根加入 sys.path,保证从任意位置启动都能定位 core/ platforms/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.config import DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS, load_settings, save_settings
+from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
+                         SELECTION_FILE, load_settings, save_settings)
 from core.loader import discover_platforms, reload_platforms
-from core.logger import log
+from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
 from core.keepalive import KeepAliveService
 
 
@@ -82,6 +84,7 @@ class LiushuiApp:
         self.login_urls = {key: plat.login_url for key, plat in self.platforms.items()}
         self.merchant_vars = {}   # platform_key -> {商户名: BooleanVar}
         self.merchants = discover_merchants(self.platforms.keys())
+        self.selection = self._load_selection()   # 上次勾选状态(重启后恢复)
         self._login_confirm = threading.Event()  # 登录弹窗确认事件(等待用户)
 
         self._setup_window()
@@ -154,9 +157,11 @@ class LiushuiApp:
 
     def _build_platform_row(self, key, plat):
         """构建单个平台的行(勾选+状态+添加商户)与其商户多选容器。"""
-        var = tk.BooleanVar(value=True)
+        default = self.selection.get("platform", {}).get(key, True)
+        var = tk.BooleanVar(value=bool(default))
         self.platform_vars[key] = var
         var.trace_add("write", lambda *_: self._refresh_summary())
+        var.trace_add("write", lambda *_: self._save_selection())
 
         # 第一行: 平台勾选(联动其商户) + 状态标识 + 添加商户
         row = tk.Frame(self.list_frame, bg=BG_PANEL)
@@ -200,9 +205,15 @@ class LiushuiApp:
                 self._add_merchant_checkbox(key, m, True)
         else:
             self._append_log(f"平台[{plat.name}]暂无商户,请先\"+\"添加并登录")
+        # 若存在已勾选的商户,平台保持勾选(保证 UI 与状态一致)
+        if any(mv.get() for mv in self.merchant_vars.get(key, {}).values()):
+            if not var.get():
+                var.set(True)
 
     def _rebuild_platform_list(self):
         """新增/编辑平台后重建左侧勾选列表(重新发现商户,平台/商户可即时反映变更)。"""
+        self._save_selection()   # 保存当前勾选,重建后从文件恢复
+        self.selection = self._load_selection()
         self.merchants = discover_merchants(self.platforms.keys())
         for child in self.list_frame.winfo_children():
             child.destroy()
@@ -223,6 +234,19 @@ class LiushuiApp:
         header.pack(fill=tk.X, pady=(0, 8))
         tk.Label(header, text="操作日志", bg=BG_PANEL, fg=FG_MAIN,
                  font=("Microsoft YaHei", 13, "bold")).pack(side=tk.LEFT)
+        # 右侧按钮组: 历史日志 / 清空屏 / 复制日志
+        tk.Button(header, text="清空屏", width=6, relief=tk.FLAT,
+                  fg="#ffffff", bg="#7f8c8d", cursor="hand2",
+                  font=("Microsoft YaHei", 9),
+                  command=self._clear_log_screen).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(header, text="历史日志", width=8, relief=tk.FLAT,
+                  fg="#ffffff", bg="#16a085", cursor="hand2",
+                  font=("Microsoft YaHei", 9),
+                  command=self._view_log_history).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(header, text="复制日志", width=8, relief=tk.FLAT,
+                  fg="#ffffff", bg=BG_BUTTON, cursor="hand2",
+                  font=("Microsoft YaHei", 9),
+                  command=self._copy_log).pack(side=tk.RIGHT, padx=(6, 0))
         self.status_var = tk.StringVar(value="状态: 就绪")
         tk.Label(header, textvariable=self.status_var, bg=BG_PANEL,
                  fg=FG_MUTED, font=("Microsoft YaHei", 10)).pack(side=tk.RIGHT)
@@ -331,6 +355,16 @@ class LiushuiApp:
         self.retry_times.bind("<FocusOut>", lambda *_: self._on_retry_setting())
         self.retry_times.pack(side=tk.LEFT)
 
+        # 单步调试开关(脚本调试时开启,导出流程每步暂停弹"继续/中止")
+        debug_row = tk.Frame(middle, bg=BG_PANEL)
+        debug_row.pack(fill=tk.X, pady=(2, 0))
+        self.step_debug_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(debug_row, variable=self.step_debug_var, text="单步调试",
+                       bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
+                       activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(debug_row, text="(开启后每个关键步骤弹确认,排查用)", bg=BG_PANEL, fg="#95a5a6",
+                 font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
+
         # 概览条(已选商户/平台/日期,位于设置区与按钮区之间)
         self.summary_var = tk.StringVar(value="")
         tk.Label(middle, textvariable=self.summary_var, bg=BG_PANEL, fg="#2d6cdf",
@@ -345,6 +379,7 @@ class LiushuiApp:
         bar.grid_rowconfigure(1, weight=1)
         bar.grid_rowconfigure(2, weight=1)
         bar.grid_rowconfigure(3, weight=1)
+        bar.grid_rowconfigure(4, weight=1)
 
         others = [
             ("首次登录", self._action_login_all, BG_BUTTON, 0, 0),
@@ -354,6 +389,8 @@ class LiushuiApp:
             ("平台管理", self._open_platform_manager, "#8e44ad", 2, 0),
             ("脚本调试", self._open_debug_dialog, "#16a085", 2, 1),
             ("定时任务", self._open_scheduler_dialog, "#2c3e50", 3, 0),
+            ("录制→脚本", self._open_recording_dialog, "#8e44ad", 3, 1),
+            ("稳定性看板", self._open_stats_dialog, "#16a085", 4, 0),
         ]
         for t, cmd, col, r, c in others:
             tk.Button(bar, text=t, command=cmd, bg=col, fg="white",
@@ -390,13 +427,59 @@ class LiushuiApp:
         frame = self.merchant_frames.get(key)
         if frame is None:
             return
-        mv = tk.BooleanVar(value=checked)
+        default = self.selection.get("merchant", {}).get(key, {}).get(name, checked)
+        mv = tk.BooleanVar(value=bool(default))
         mv.trace_add("write", lambda *_: self._refresh_summary())
+        mv.trace_add("write", lambda *_: self._save_selection())
+        # 勾选任一商户时,自动勾选其所属平台(反向联动)
+        mv.trace_add("write", lambda *_, k=key: self._sync_platform_on_merchant(k))
         self.merchant_vars.setdefault(key, {})[name] = mv
+        # 每商户一行: 勾选 + 右侧"打开"按钮(打开该商户浏览器,供手工测试页面元素)
+        mrow = tk.Frame(frame, bg=BG_PANEL)
+        mrow.pack(anchor="w", fill=tk.X, padx=(26, 0))
         tk.Checkbutton(
-            frame, variable=mv, text=name,
+            mrow, variable=mv, text=name,
             bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
-            activebackground=BG_PANEL).pack(anchor="w", padx=(26, 0))
+            activebackground=BG_PANEL).pack(side=tk.LEFT)
+        tk.Button(mrow, text="打开", width=4, relief=tk.FLAT,
+                  fg="#ffffff", bg="#e67e22", cursor="hand2",
+                  font=("Microsoft YaHei", 8),
+                  command=lambda k=key, m=name: self._action_open_merchant(k, m)
+                  ).pack(side=tk.RIGHT, padx=(4, 2))
+
+    def _sync_platform_on_merchant(self, key, *_):
+        """商户被勾选时自动勾选平台(平台未勾选且存在已勾选商户时补勾)。"""
+        pv = self.platform_vars.get(key)
+        if pv is None or pv.get():
+            return
+        for mv in self.merchant_vars.get(key, {}).values():
+            if mv.get():
+                pv.set(True)
+                break
+
+    def _load_selection(self):
+        """读取上次保存的平台/商户勾选状态,返回 {"platform": {}, "merchant": {}}"""
+        try:
+            with open(SELECTION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {"platform": {}, "merchant": {}}
+
+    def _save_selection(self, *_):
+        """持久化当前平台/商户勾选状态到文件(重启后自动恢复)。"""
+        try:
+            data = {
+                "platform": {k: bool(v.get()) for k, v in self.platform_vars.items()},
+                "merchant": {k: {n: bool(mv.get()) for n, mv in mvs.items()}
+                             for k, mvs in self.merchant_vars.items()},
+            }
+            with open(SELECTION_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _refresh_summary(self, *_):
         """刷新左侧概览条: 已选商户/平台数与日期"""
@@ -421,6 +504,109 @@ class LiushuiApp:
         self.log_text.config(state=tk.DISABLED)
         if len(self.log_lines) > 500:
             self.log_lines = self.log_lines[-300:]
+
+    def _copy_log(self):
+        """复制当前全部日志文本到系统剪贴板,便于复制给我排查问题。"""
+        try:
+            text = "\n".join(self.log_lines)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()   # 确保剪贴板写入生效
+            self._set_status(f"已复制 {len(self.log_lines)} 行日志到剪贴板")
+        except Exception as e:
+            self._set_status(f"复制日志失败: {e}")
+
+    def _clear_log_screen(self):
+        """清空当前日志输出屏(仅清显示,历史日志文件不受影响,新日志继续追加显示)"""
+        self.log_lines = []
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.config(state=tk.DISABLED)
+        self._set_status("日志屏已清空(历史日志文件保留)")
+
+    def _view_log_history(self):
+        """打开历史日志窗口: 左侧列表选择某次运行,右侧显示该次完整日志。"""
+        win = tk.Toplevel(self.root)
+        win.title("历史日志")
+        win.geometry("900x550")
+        win.configure(bg=BG_MAIN)
+        win.transient(self.root)
+        win.grab_set()
+
+        top = tk.Frame(win, bg=BG_PANEL)
+        top.pack(fill=tk.X, padx=8, pady=8)
+        tk.Label(top, text="双击左侧某次运行查看完整日志", bg=BG_PANEL, fg=FG_MUTED,
+                font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+
+        body = tk.Frame(win, bg=BG_PANEL)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        # 左侧列表
+        left_pane = tk.Frame(body, bg=BG_PANEL, width=240)
+        left_pane.pack(side=tk.LEFT, fill=tk.Y)
+        left_pane.pack_propagate(False)
+        tk.Label(left_pane, text="运行记录", bg=BG_PANEL, fg=FG_MAIN,
+                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        listbox = tk.Listbox(left_pane, font=("Microsoft YaHei", 9),
+                            activestyle="dotbox", selectbackground="#d6e4ff")
+        listbox.pack(fill=tk.BOTH, expand=True)
+        vsb = tk.Scrollbar(left_pane, orient=tk.VERTICAL, command=listbox.yview)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.config(yscrollcommand=vsb.set)
+
+        # 右侧日志显示
+        right_pane = tk.Frame(body, bg=BG_PANEL)
+        right_pane.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        btn_row = tk.Frame(right_pane, bg=BG_PANEL)
+        btn_row.pack(fill=tk.X, pady=(0, 4))
+        copy_btn = tk.Button(btn_row, text="复制此日志", relief=tk.FLAT,
+                             fg="#ffffff", bg=BG_BUTTON, cursor="hand2",
+                             font=("Microsoft YaHei", 9))
+        copy_btn.pack(side=tk.LEFT)
+        viewer = scrolledtext.ScrolledText(
+            right_pane, bg=BG_LOG, fg=FG_LOG, font=("Consolas", 9),
+            wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT)
+        viewer.pack(fill=tk.BOTH, expand=True)
+
+        # 加载历史日志列表(按修改时间倒序)
+        logs = list_history_logs()
+        if not logs:
+            listbox.insert(tk.END, "(暂无历史日志)")
+            listbox.config(state=tk.DISABLED)
+            return
+
+        def _show(idx):
+            if idx < 0 or idx >= len(logs):
+                return
+            _, path, _ = logs[idx]
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except Exception as e:
+                content = f"读取日志失败: {e}"
+            viewer.config(state=tk.NORMAL)
+            viewer.delete("1.0", tk.END)
+            viewer.insert(tk.END, content)
+            viewer.config(state=tk.DISABLED)
+            viewer.see("1.0")
+            def _do_copy(c=content):
+                self.root.clipboard_clear()
+                self.root.clipboard_append(c)
+                self.root.update()
+            copy_btn.config(command=_do_copy)
+
+        for i, (name, _, mtime) in enumerate(logs):
+            # 文件名形如 run_20260913_203000.log → 显示为 09-13 20:30:00
+            label = f"{mtime}"
+            listbox.insert(tk.END, label)
+        listbox.selection_set(0)
+        _show(0)
+
+        def _on_select(_evt=None):
+            sel = listbox.curselection()
+            if sel:
+                _show(sel[0])
+        listbox.bind("<<ListboxSelect>>", _on_select)
+        listbox.bind("<Double-Button-1>", _on_select)
 
     def _set_status(self, text):
         self.status_var.set(f"状态: {text}")
@@ -595,6 +781,37 @@ class LiushuiApp:
         os.makedirs(path, exist_ok=True)
         os.startfile(path)
 
+    def _action_open_merchant(self, key, merchant):
+        """打开指定商户的浏览器窗口(已恢复登录态),供手工测试页面元素,操作完手工关闭即可。"""
+        plat = self.platforms.get(key)
+        if plat is None:
+            return
+        self._append_log(f">>> 正在打开 {plat.name}({merchant}) 浏览器窗口(手工测试用)...")
+        self._run_async(lambda: self._open_merchant_browser(plat, merchant))
+
+    def _open_merchant_browser(self, plat, merchant):
+        """后台: 用该商户独立 profile 启动浏览器并打开导出页,不执行自动化,等待用户手工操作。
+        线程保持存活直到用户手工关闭浏览器窗口,防止任务结束逻辑自动关闭浏览器。"""
+        try:
+            self._ensure_browser(plat, merchant, force_visible=True)
+            # 开启操作追踪: 记录页面上的点击/输入元素信息到日志,辅助编写脚本
+            self.browser.enable_action_trace()
+            self.browser.navigate(plat.export_url)
+            self.browser.sleep(3)
+            self._append_log(f"已打开 {plat.name}({merchant}) 页面(已恢复登录态)")
+            self._append_log("请手工操作测试,日志会记录点击/输入的元素信息;完成后直接关闭浏览器窗口即可")
+            # 轮询等待用户手工关闭浏览器窗口(page 关闭后访问会抛异常)
+            while True:
+                self.browser.sleep(2)
+                try:
+                    self.browser.page.title()
+                except Exception:
+                    break
+            self._append_log(f"{plat.name}({merchant}) 浏览器窗口已关闭")
+        except Exception as e:
+            self._append_log(f"打开商户浏览器失败: {e}")
+            self._set_platform_status(plat.key, "error")
+
     def _action_help(self):
         """弹出简要使用说明"""
         messagebox.showinfo(
@@ -663,6 +880,220 @@ class LiushuiApp:
 
         DebugDialog(self.root, self.platforms, on_run=_run)
 
+    def _open_recording_dialog(self):
+        """录制 → 脚本骨架弹窗: 列出 recordings/*.jsonl,选中后生成骨架预览/保存。"""
+        from tools.recording_to_script import list_recordings, load_records, render_skeleton
+
+        win = tk.Toplevel(self.root)
+        win.title("录制 → 脚本骨架")
+        win.geometry("900x600")
+        win.configure(bg=BG_MAIN)
+        win.transient(self.root)
+        win.grab_set()
+
+        top = tk.Frame(win, bg=BG_PANEL)
+        top.pack(fill=tk.X, padx=8, pady=8)
+        tk.Label(top, text="用\"打开商户\"操作一遍后会生成录制文件,在此可生成脚本骨架",
+                bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+
+        body = tk.Frame(win, bg=BG_PANEL)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        left_pane = tk.Frame(body, bg=BG_PANEL, width=260)
+        left_pane.pack(side=tk.LEFT, fill=tk.Y)
+        left_pane.pack_propagate(False)
+        tk.Label(left_pane, text="录制文件", bg=BG_PANEL, fg=FG_MAIN,
+                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        listbox = tk.Listbox(left_pane, font=("Microsoft YaHei", 9))
+        listbox.pack(fill=tk.BOTH, expand=True)
+        vsb = tk.Scrollbar(left_pane, orient=tk.VERTICAL, command=listbox.yview)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.config(yscrollcommand=vsb.set)
+
+        right_pane = tk.Frame(body, bg=BG_PANEL)
+        right_pane.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        btn_row = tk.Frame(right_pane, bg=BG_PANEL)
+        btn_row.pack(fill=tk.X, pady=(0, 4))
+        save_btn = tk.Button(btn_row, text="保存为骨架文件", relief=tk.FLAT,
+                             fg="#ffffff", bg=BG_SUCCESS, cursor="hand2",
+                             font=("Microsoft YaHei", 9))
+        save_btn.pack(side=tk.LEFT)
+        copy_btn = tk.Button(btn_row, text="复制骨架", relief=tk.FLAT,
+                             fg="#ffffff", bg=BG_BUTTON, cursor="hand2",
+                             font=("Microsoft YaHei", 9))
+        copy_btn.pack(side=tk.LEFT, padx=(4, 0))
+        viewer = scrolledtext.ScrolledText(
+            right_pane, bg=BG_LOG, fg=FG_LOG, font=("Consolas", 9),
+            wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT)
+        viewer.pack(fill=tk.BOTH, expand=True)
+
+        files = list_recordings()
+        if not files:
+            listbox.insert(tk.END, "(暂无录制文件)")
+            listbox.config(state=tk.DISABLED)
+            save_btn.config(state=tk.DISABLED)
+            copy_btn.config(state=tk.DISABLED)
+            return
+
+        for f in files:
+            mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M:%S")
+            listbox.insert(tk.END, f"{mtime}  {os.path.basename(f)}")
+        listbox.selection_set(0)
+
+        def _gen(idx):
+            if idx < 0 or idx >= len(files):
+                return ""
+            recs = load_records(files[idx])
+            if not recs:
+                return "# 录制文件为空"
+            return render_skeleton(recs, platform_name="某平台",
+                                   class_name="XxxExporter", platform_key="xxx")
+
+        current_code = {"text": _gen(0)}
+
+        def _refresh_viewer():
+            viewer.config(state=tk.NORMAL)
+            viewer.delete("1.0", tk.END)
+            viewer.insert(tk.END, current_code["text"])
+            viewer.config(state=tk.DISABLED)
+        _refresh_viewer()
+
+        def _on_select(_evt=None):
+            sel = listbox.curselection()
+            if sel:
+                current_code["text"] = _gen(sel[0])
+                _refresh_viewer()
+        listbox.bind("<<ListboxSelect>>", _on_select)
+
+        def _save():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(
+                title="保存脚本骨架",
+                defaultextension=".py",
+                initialdir=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "platforms"),
+                initialfile="export_skeleton.py",
+                filetypes=[("Python", "*.py"), ("All", "*.*")])
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(current_code["text"])
+                self._set_status(f"骨架已保存到 {path}")
+                self._append_log(f"[录制→脚本] 骨架已保存: {path}")
+                messagebox.showinfo("已保存", f"骨架已保存:\n{path}\n\n需手工调整日期/弹窗等复杂控件。")
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e))
+        save_btn.config(command=_save)
+
+        def _copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(current_code["text"])
+            self.root.update()
+            self._set_status("骨架已复制到剪贴板")
+        copy_btn.config(command=_copy)
+
+    def _open_stats_dialog(self):
+        """稳定性看板弹窗: 上方按平台汇总成功率,下方最近 N 次明细记录。"""
+        win = tk.Toplevel(self.root)
+        win.title("稳定性看板")
+        win.geometry("900x600")
+        win.configure(bg=BG_MAIN)
+        win.transient(self.root)
+        win.grab_set()
+
+        # 上方: 汇总表
+        top = tk.Frame(win, bg=BG_PANEL)
+        top.pack(fill=tk.X, padx=8, pady=8)
+        tk.Label(top, text="按平台汇总(成功率 = success / total)",
+                bg=BG_PANEL, fg=FG_MAIN, font=("Microsoft YaHei", 10, "bold")
+                ).pack(anchor="w", pady=(0, 4))
+
+        cols = ("平台", "总次数", "成功", "手动", "失败", "成功率%")
+        tree = ttk.Treeview(top, columns=cols, show="headings", height=8)
+        for c in cols:
+            tree.column(c, anchor="center", width=120)
+            tree.heading(c, text=c)
+        tree.pack(fill=tk.X, padx=4)
+        # 给成功率列加颜色: <60 红,<85 橙,其他绿
+        tree.tag_configure("bad", background="#fadbd8")
+        tree.tag_configure("warn", background="#fdf2cf")
+        tree.tag_configure("good", background="#d5f5e3")
+
+        summary = summarize_stats()
+        for plat, total, succ, man, fail, rate in summary:
+            tag = "bad" if rate < 60 else ("warn" if rate < 85 else "good")
+            tree.insert("", tk.END,
+                        values=(plat, total, succ, man, fail, rate), tags=(tag,))
+
+        # 下方: 最近 200 条明细
+        bottom = tk.Frame(win, bg=BG_PANEL)
+        bottom.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 8))
+        tk.Label(bottom, text="最近导出记录(最新在前)", bg=BG_PANEL, fg=FG_MAIN,
+                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        dcols = ("时间", "平台", "商户", "日期范围", "结果", "耗时(s)", "错误")
+        dtree = ttk.Treeview(bottom, columns=dcols, show="headings", height=12)
+        dcol_widths = [140, 100, 100, 160, 60, 70, 200]
+        for i, c in enumerate(dcols):
+            dtree.column(c, anchor="center", width=dcol_widths[i])
+            dtree.heading(c, text=c)
+        dtree.tag_configure("success", background="#d5f5e3")
+        dtree.tag_configure("manual", background="#fdf2cf")
+        dtree.tag_configure("failed", background="#fadbd8")
+        vsb2 = ttk.Scrollbar(bottom, orient=tk.VERTICAL, command=dtree.yview)
+        vsb2.pack(side=tk.RIGHT, fill=tk.Y)
+        dtree.configure(yscrollcommand=vsb2.set)
+        dtree.pack(fill=tk.BOTH, expand=True)
+
+        records = load_stats(limit=200)
+        for r in records:
+            date_range = f"{r.get('start_date','')}~{r.get('end_date','')}"
+            dtree.insert("", tk.END,
+                         values=(r.get("ts", ""), r.get("platform", ""),
+                                 r.get("merchant", ""), date_range,
+                                 r.get("result", ""), r.get("duration_s", ""),
+                                 r.get("error", "")),
+                         tags=(r.get("result", "failed"),))
+
+        btn_row = tk.Frame(win, bg=BG_MAIN)
+        btn_row.pack(fill=tk.X, padx=8, pady=(0, 8))
+        def _refresh():
+            # 刷新数据(用户跑完新任务后想看最新)
+            for i in tree.get_children():
+                tree.delete(i)
+            for i in dtree.get_children():
+                dtree.delete(i)
+            for plat, total, succ, man, fail, rate in summarize_stats():
+                tag = "bad" if rate < 60 else ("warn" if rate < 85 else "good")
+                tree.insert("", tk.END,
+                            values=(plat, total, succ, man, fail, rate), tags=(tag,))
+            for r in load_stats(limit=200):
+                date_range = f"{r.get('start_date','')}~{r.get('end_date','')}"
+                dtree.insert("", tk.END,
+                             values=(r.get("ts", ""), r.get("platform", ""),
+                                     r.get("merchant", ""), date_range,
+                                     r.get("result", ""), r.get("duration_s", ""),
+                                     r.get("error", "")),
+                             tags=(r.get("result", "failed"),))
+        tk.Button(btn_row, text="刷新", command=_refresh, relief=tk.FLAT,
+                  fg="#ffffff", bg=BG_BUTTON, cursor="hand2",
+                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        def _copy_stats():
+            # 汇总表文本(便于复制沟通)
+            lines = ["平台\t总次数\t成功\t手动\t失败\t成功率%"]
+            for plat, total, succ, man, fail, rate in summarize_stats():
+                lines.append(f"{plat}\t{total}\t{succ}\t{man}\t{fail}\t{rate}")
+            text = "\n".join(lines)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+            self._set_status("稳定性汇总已复制")
+        tk.Button(btn_row, text="复制汇总", command=_copy_stats, relief=tk.FLAT,
+                  fg="#ffffff", bg=BG_SUCCESS, cursor="hand2",
+                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 0))
+
     def _open_scheduler_dialog(self):
         """定时任务管理弹窗。"""
         from core.scheduler import SchedulerDialog
@@ -728,6 +1159,7 @@ class LiushuiApp:
         if copied:
             self._append_log(f"[汇总] 已将 {copied} 个导出文件复制到: {ts_dir}")
         else:
+            self._append_log("[汇总] 未找到可汇总的导出文件,跳过打开文件夹")
             ts_dir = None
         return ts_dir
 
@@ -818,6 +1250,26 @@ class LiushuiApp:
                                 self._show_login_prompt(n, m, g))
                 if not self._login_confirm.wait(timeout=600):
                     self._append_log(f"[提示] {plat.name}({merchant}) 等待登录超时,已跳过")
+                else:
+                    # 用户确认登录后,用平台自身的 check_login 轮询确认页面真正进入后台
+                    # (而非停留在扫码/中转页)。确认成功才关闭浏览器,保证登录态已写入持久化目录。
+                    self._append_log(f"正在确认 {plat.name}({merchant}) 登录状态...")
+                    confirmed = False
+                    try:
+                        for _ in range(8):
+                            if plat.check_login(self.browser):
+                                confirmed = True
+                                break
+                            self.browser.sleep(5)
+                    except Exception:
+                        pass
+                    if confirmed:
+                        self._append_log(f"  登录态确认有效,正在导出登录态...")
+                        # 主动导出 cookie + localStorage(含 session cookie),
+                        # 否则微信支付这类 session cookie 平台关闭浏览器后登录态会丢失
+                        self.browser.save_login_state()
+                    else:
+                        self._append_log(f"  [警告] 未能确认登录成功(页面仍在登录/扫码页),请重新执行首次登录")
             except Exception as e:
                 self._append_log(f"打开 {plat.name}({merchant}) 失败: {e}")
                 self._set_platform_status(key, "error")
@@ -852,6 +1304,14 @@ class LiushuiApp:
         if not tasks:
             self._append_log("[提示] 未勾选任何平台商户,请先添加/勾选商户。")
             return
+        # 需人工操作(扫码/确认)的平台排到最后: 先自动跑完自动化平台,避免人工被打断。
+        # 用稳定排序,同一平台的多个商户保持相邻/相对顺序不变。
+        tasks.sort(key=lambda t: int(t[1].manual_intervention))
+        manual_tasks = [(k, p, m) for k, p, m in tasks if p.manual_intervention]
+        if manual_tasks:
+            hints = sorted({p.intervention_hint or f"{p.name} 需人工操作" for _, p, _ in manual_tasks})
+            self._append_log(
+                f"[提示] 以下平台需人工操作,已排到最后执行: {'; '.join(hints)}")
         st = load_settings()
         retry_times = int(st.get("retry_times", DEFAULT_SETTINGS.get("retry_times", 2)))
         retry_interval_s = int(st.get("retry_interval_s", DEFAULT_SETTINGS.get("retry_interval_s", 30)))
@@ -891,9 +1351,68 @@ class LiushuiApp:
         # 每个商户使用独立浏览器 profile(登录态隔离);下载目录含商户层
         self._ensure_browser(plat, merchant)
         self.browser.set_export_context(plat.name, start_date, end_date, merchant)
-        result = plat.export(self.browser, start_date, end_date)
+        # 注入"等待用户手动操作"回调(如微信扫码确认),生产环境始终启用。
+        # 后台线程调用 browser.wait_user() 时,切到 UI 线程弹窗提醒并阻塞等待用户完成。
+        def _user_wait_cb(prompt, n=plat.name, m=merchant):
+            evt = threading.Event()
+            def _ask():
+                try:
+                    messagebox.showinfo(
+                        "需要您操作确认",
+                        f"平台: {n} / 商户: {m}\n\n{prompt}\n\n请按提示在浏览器中完成操作(如微信扫码),完成后点击\"确定\"继续。")
+                except Exception:
+                    pass
+                evt.set()
+            self.root.after(0, _ask)
+            evt.wait(timeout=3600)
+        self.browser.set_user_wait_callback(_user_wait_cb)
+        # 单步调试模式: 注入回调,平台脚本调用 step_pause() 时弹"继续/中止"
+        if self.step_debug_var.get():
+            def _step_cb(name, n=plat.name, m=merchant):
+                # 通过主线程弹窗,后台线程阻塞等待用户选择
+                evt = threading.Event()
+                choice = {"v": True}
+                def _ask():
+                    try:
+                        choice["v"] = messagebox.askyesno(
+                            "单步调试",
+                            f"已到达步骤: {name}\n平台: {n} / 商户: {m}\n\n是=继续 / 否=中止本次导出")
+                    except Exception:
+                        choice["v"] = True
+                    evt.set()
+                self.root.after(0, _ask)
+                evt.wait(timeout=3600)
+                return bool(choice["v"])
+            self.browser.set_step_debug(True, _step_cb)
+        else:
+            self.browser.set_step_debug(False)
+        # 登录态预检: 失效则直接返回 manual,避免空等 90s 下载并误计入失败统计
+        try:
+            if not plat.check_login(self.browser):
+                self._append_log(
+                    f"[预检] {plat.name}({merchant}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
+                return "manual"
+        except Exception as e:
+            self._append_log(f"[预检] {plat.name} 登录状态检查异常,继续尝试导出: {str(e)[:80]}")
+        # 记录起始时间,用于统计耗时
+        t0 = time.time()
+        err_msg = ""
+        try:
+            result = plat.export(self.browser, start_date, end_date)
+        except Exception as e:
+            result = "failed"
+            err_msg = str(e)[:200]
+            self._append_log(f"[失败] {plat.name} 导出异常: {err_msg}")
+        finally:
+            # 导出结束关闭单步调试/用户等待回调,避免影响后续任务
+            self.browser.set_step_debug(False)
+            self.browser.set_user_wait_callback(None)
+        # 落稳定性统计(每次导出一条 JSON,供看板汇总)
+        duration = time.time() - t0
+        record_stat(plat.name, merchant, start_date, end_date, result,
+                    duration_s=duration, error=err_msg if result == "failed" else "")
         if result == "success":
-            self._append_log(f"[完成] {plat.name} 流水导出成功")
+            self._append_log(f"[完成] {plat.name} 流水导出成功({duration:.1f}s)")
         elif result == "manual":
             self._append_log(f"[提示] {plat.name} 需要手动完成导出")
         else:
@@ -918,18 +1437,17 @@ class LiushuiApp:
     def _record_job_done(self, label, start_date, end_date):
         """导出任务收尾: 汇总复制文件、打开文件夹与操作日志。"""
         log(f"{label}完成", callback=self._append_log)
-        if self.progress["value"] >= 0:
-            # 导出完成后,把本次导出的文件汇总复制到 downloads/时间文件夹,并自动打开
-            try:
-                ts_dir = self._copy_export_outputs(start_date, end_date)
-                if ts_dir:
-                    try:
-                        os.startfile(ts_dir)
-                        self._append_log(f"[汇总] 已自动打开文件夹: {ts_dir}")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        # 直接汇总并打开文件夹(不再依赖 progress,避免 Tk 字符串类型比较等引发静默中断)
+        try:
+            ts_dir = self._copy_export_outputs(start_date, end_date)
+            if ts_dir:
+                try:
+                    os.startfile(ts_dir)
+                    self._append_log(f"[汇总] 已自动打开文件夹: {ts_dir}")
+                except Exception as e:
+                    self._append_log(f"[汇总] 打开文件夹失败: {e}")
+        except Exception as e:
+            self._append_log(f"[汇总] 复制汇总失败: {e}")
 
     def _do_check(self, selected):
         tasks = []
@@ -944,16 +1462,13 @@ class LiushuiApp:
             try:
                 # 每个商户独立 profile 检查
                 self._ensure_browser(plat, merchant)
-                self.browser.navigate(plat.login_url)
-                time.sleep(3)
-                page_info = self.browser.get_page_info()
-                url = page_info.get("url", "").lower()
-                title = page_info.get("title", "")
-                if "login" in url or "登录" in title:
+                logged_in = plat.check_login(self.browser)
+                if not logged_in:
                     self._append_log(f"  {plat.name}({merchant}): 未登录")
                     self._set_platform_status(key, "error")
                 else:
-                    self._append_log(f"  {plat.name}({merchant}): 已登录 ({title[:20]})")
+                    info = self.browser.get_page_info()
+                    self._append_log(f"  {plat.name}({merchant}): 已登录 ({info.get('title', '')[:20]})")
                     self._set_platform_status(key, "ok")
             except Exception as e:
                 self._append_log(f"  {plat.name}({merchant}): 检查失败 - {e}")
@@ -964,6 +1479,7 @@ class LiushuiApp:
         self._set_status("检查完成")
 
     def cleanup(self):
+        self._save_selection()   # 退出前保存勾选状态
         if self.browser:
             self.browser.close()
 

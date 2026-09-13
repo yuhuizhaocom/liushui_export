@@ -2,11 +2,14 @@
 浏览器管理模块 - 持久化上下文 + 容错重试
 """
 
+import csv
+import glob
+import json
 import os
 import re
 import shutil
 import time
-import glob
+import zipfile
 from datetime import datetime
 
 PW_BROWSERS_PATH = r"C:\pw_browsers"
@@ -14,7 +17,7 @@ if os.path.isdir(PW_BROWSERS_PATH):
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PW_BROWSERS_PATH
 
 from playwright.sync_api import sync_playwright
-from .config import BROWSER_DATA_DIR, DOWNLOAD_DIR
+from .config import BROWSER_DATA_DIR, DOWNLOAD_DIR, ROOT_DIR
 from .logger import log
 
 class BrowserManager:
@@ -34,6 +37,10 @@ class BrowserManager:
         self._dl_capture_on = False  # 当前是否处于下载捕获模式
         self._dl_capture_t0 = 0.0    # 开始捕获的时刻(用于判断新文件)
         self._dl_temp_dir = ""       # 本次任务临时下载目录(完成后清空)
+        self._recording_file = ""    # 操作录制文件路径(开启追踪后写入)
+        self._step_debug = False     # 单步调试模式(开启后 step_pause() 会暂停等待)
+        self._step_callback = None   # 单步暂停回调(由 GUI 注入,用于弹"继续"确认框)
+        self._user_wait_callback = None  # "等待用户手动操作"回调(如扫码确认,由 GUI 注入)
         self._setup_dirs()
 
     @staticmethod
@@ -123,7 +130,8 @@ class BrowserManager:
                     args=[
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
-                        "--start-fullscreen",   # 全屏显示,便于操作查看
+                        "--start-maximized",   # 最大化窗口启动(替代 --start-fullscreen,避免内容只显示左上角)
+                        "--window-size=1920,1080",  # 兜底窗口尺寸,确保 viewport 足够大
                         "--disable-features=Translate",
                     ],
                 )
@@ -133,10 +141,22 @@ class BrowserManager:
                     self.page = self.context.new_page()
                 # 监听浏览器下载事件,推入队列(即使文件先写完也不丢事件)
                 self.context.on("download", self._on_download)
+                # 恢复上次保存的登录态(session cookie 也能跨会话保留,如微信支付)
+                self._restore_login_state()
                 self._log("浏览器启动成功")
                 return self.page
             except Exception as e:
                 self._log(f"浏览器启动失败(第{attempt}次): {str(e)[:100]}", "warning")
+                # 失败后必须停掉已启动的 playwright,否则其事件循环仍处于运行状态,
+                # 下一次 start() 会被误判为 "Sync API inside asyncio loop" 而掩盖真实错误
+                if self.playwright:
+                    try:
+                        self.playwright.stop()
+                    except Exception:
+                        pass
+                    self.playwright = None
+                self.context = None
+                self.page = None
                 self._cleanup_lock_files()
                 if attempt < 3:
                     time.sleep(3)
@@ -144,8 +164,16 @@ class BrowserManager:
                     self._log("浏览器启动最终失败", "error")
                     raise
 
-    def navigate(self, url, retries=3):
-        """带重试的页面导航"""
+    def navigate(self, url, retries=3, skip_if_same=True):
+        """带重试的页面导航。skip_if_same 时,若当前页已在该地址则跳过重复加载
+        (用于登录预检刚导航完导出页、export 又导航同一地址的场景,省掉一次完整加载)。"""
+        if skip_if_same:
+            try:
+                if self._same_target(self.page.url, url):
+                    self._log(f"已在目标页(跳过重复导航): {url[:60]}")
+                    return True
+            except Exception:
+                pass
         for attempt in range(1, retries + 1):
             try:
                 self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -160,8 +188,21 @@ class BrowserManager:
                     return False
         return False
 
+    @staticmethod
+    def _same_target(cur, target):
+        """判断当前页面 URL 与目标是否指向同一地址。
+        比较 scheme/netloc/path/query(忽略 fragment/hash),query 不同则算不同地址,
+        避免"预检含默认参数、导出含具体日期参数"的页面(如有赞)被误判为相同而跳过导航。"""
+        try:
+            from urllib.parse import urlsplit
+            c, t = urlsplit(cur or ""), urlsplit(target or "")
+            return (c.scheme, c.netloc, c.path, c.query) == \
+                   (t.scheme, t.netloc, t.path, t.query)
+        except Exception:
+            return False
+
     def safe_click(self, selector, description="", retries=3):
-        """安全点击元素,带重试和等待"""
+        """安全点击元素,带重试和等待;失败后 JS 回退(绕过遮挡/不可见拦截)"""
         for attempt in range(1, retries + 1):
             try:
                 el = self.page.wait_for_selector(selector, timeout=10000)
@@ -171,6 +212,15 @@ class BrowserManager:
                     return True
             except Exception as e:
                 self._log(f"点击失败(第{attempt}次): {description or selector} - {e}", "warning")
+                # JS 回退
+                try:
+                    el = self.page.wait_for_selector(selector, timeout=3000)
+                    if el:
+                        el.evaluate("e => e.click()")
+                        self._log(f"点击成功(JS回退): {description or selector}")
+                        return True
+                except Exception:
+                    pass
                 if attempt < retries:
                     time.sleep(2)
         self._log(f"点击最终失败: {description or selector}", "error")
@@ -340,10 +390,9 @@ class BrowserManager:
                 if not tmp_path:
                     tmp_path = self._take_new_download(root, deadline)
                 if tmp_path:
-                    final = self._finalize_download(tmp_path)
+                    final = self._accept_download(tmp_path)
                     if final:
                         self.end_wait_download()
-                        self._log(f"下载完成: {os.path.basename(final)}")
                         return final
                 # 文件还未就绪则继续轮询等待
             # 2) 兜底: 目录中"等待开始后"新出现且已写完整的文件
@@ -352,16 +401,122 @@ class BrowserManager:
                 if name.endswith((".crdownload", ".tmp", ".part", ".download", ".dat")):
                     continue
                 if self._is_stable(fp):
-                    final = self._finalize_download(fp)
+                    final = self._accept_download(fp)
                     if final:
                         self.end_wait_download()
-                        self._log(f"下载完成: {os.path.basename(final)}")
                         return final
             time.sleep(1.5)
         self.end_wait_download()
         self._log("等待下载超时", "warning")
         self._cleanup_stale_files(root)
         return None
+
+    def _accept_download(self, final):
+        """把下载文件归档到正式位置后再做完整性校验。
+        校验通过返回最终路径,失败则删除并返回 None。
+        必须先归档——否则文件只留临时目录,随后 end_wait_download 清临时目录会把文件一起删掉,
+        造成"日志显示下载完成但磁盘上找不到文件"。且避免"日志写 success 实为空表"这类问题。"""
+        if not final or not os.path.isfile(final):
+            return None
+        final = self._finalize_download(final)
+        if not final or not os.path.isfile(final):
+            return None
+        ok = self._validate_download(final)
+        if ok:
+            self._log(f"下载完成并校验通过: {os.path.basename(final)}")
+            return final
+        self._log(f"下载文件校验未通过,已清除: {os.path.basename(final)}", "warning")
+        try:
+            os.remove(final)
+        except Exception:
+            pass
+        return None
+
+    # ===== 下载文件完整性/内容校验(避免"下完了但实为空表") =====
+
+    # 命中即判定为 manual/无效的错误文案
+    _VALIDATE_ERROR_KEYWORDS = [
+        "登录失效", "重新登录", "请登录", "系统繁忙", "操作失败", "请求超时",
+        "出错了", "无权限", "参数错误", "<html", "<!doctype",
+    ]
+
+    def _validate_download(self, path):
+        """校验下载文件: 非错误页文案、表格可读且有数据行;极小文件需能解析出数据。
+        返回 True(正常) / False(需人工确认)。"""
+        if not path or not os.path.isfile(path):
+            return False
+        try:
+            size = os.path.getsize(path)
+        except Exception:
+            return False
+        # 1) 内容/文案检查(错误页、登录失效等识别)
+        text = self._read_text_content(path)
+        hit = self._match_error_keyword(text)
+        if hit:
+            self._log(f"[校验] 内容命中错误文案[{hit}]: {os.path.basename(path)}", "warning")
+            return False
+        # 2) 表格行数检查
+        rows = self._count_rows(path)
+        if size < 1024:
+            # 极小文件: 仅当能解析出有效数据行才算正常(空表/错误页无数据)
+            if rows is None or rows == 0:
+                self._log(f"[校验] 文件过小({size}B)且无有效数据: {os.path.basename(path)}", "warning")
+                return False
+        elif rows is not None and rows == 0:
+            self._log(f"[校验] 表格无有效数据行: {os.path.basename(path)}", "warning")
+            return False
+        self._log(f"[校验] 文件通过完整性校验({size}B)")
+        return True
+
+    def _read_text_content(self, path):
+        """读取文件文本内容(宽容解码);二进制/xlsx 等会得到近似文本,不影响关键字检查。"""
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except Exception:
+            return ""
+        for enc in ("utf-8", "utf-8-sig", "gbk", "gb18030", "latin-1"):
+            try:
+                return raw.decode(enc)
+            except Exception:
+                continue
+        return ""
+
+    def _match_error_keyword(self, text):
+        for kw in self._VALIDATE_ERROR_KEYWORDS:
+            if kw in text:
+                return kw
+        return None
+
+    def _count_rows(self, path):
+        """统计表格有效数据行数;无法解析返回 None(跳过行数校验)。"""
+        low = (os.path.basename(path) or "").lower()
+        try:
+            if low.endswith(".csv"):
+                with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                    rows = sum(1 for _ in csv.reader(f))
+                # 去掉表头: 仅有表头(rows==1)视为空表
+                return max(0, rows - 1) if rows >= 1 else 0
+            if low.endswith(".xlsx"):
+                return self._xlsx_row_count(path)
+        except Exception:
+            return None
+        return None
+
+    def _xlsx_row_count(self, path):
+        """用 zipfile 读 xlsx 首个工作表统计<row>近似行数(不引入 openpyxl 依赖)。
+        仅用于"是否为空表"判断,返回近似非空行数;解析失败返回 None。"""
+        try:
+            sheet_pat = re.compile(r"xl/worksheets/sheet\d+\.xml")
+            with zipfile.ZipFile(path) as z:
+                names = [n for n in z.namelist() if sheet_pat.match(n)]
+                if not names:
+                    return None
+                data = z.read(names[0]).decode("utf-8", errors="ignore")
+            rows = len(re.findall(r"<row[ >]", data))
+            return rows - 1 if rows >= 1 else 0
+        except Exception:
+            return None
 
     def _take_new_download(self, root, deadline):
         """取走队列中最新一次下载对应文件(等待它写完并移动到目标位置)"""
@@ -491,7 +646,7 @@ class BrowserManager:
             "original":  保留原始名称,加 商户_ 前缀(UUID/无名称用统一命名兜底)
         扩展名从原始文件名推断,默认 .xlsx
         """
-        from config import DEFAULT_SETTINGS, load_settings
+        from core.config import DEFAULT_SETTINGS, load_settings
         mode = load_settings().get("download_name_mode", DEFAULT_SETTINGS["download_name_mode"])
         merchant = merchant or self._export_merchant
         raw = os.path.basename(suggested or "")
@@ -515,7 +670,7 @@ class BrowserManager:
         return f"{base}{date_part}{ext}"
 
     def screenshot(self, name="screenshot"):
-        """截图保存"""
+        """截图保存到下载根目录(通用入口)"""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(os.path.abspath(DOWNLOAD_DIR), f"{name}_{ts}.png")
         try:
@@ -524,6 +679,37 @@ class BrowserManager:
         except Exception:
             pass
         return path
+
+    def snapshot(self, step_name="step"):
+        """步骤快照: 按当前任务上下文(平台/商户/日期)存到 snapshots/ 子目录。
+        平台脚本在关键步骤(设日期/查询/点下载/等弹窗)调用,失败时一眼看到当时页面状态。
+        返回截图完整路径(失败返回None)。"""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 存到 downloads/平台/商户/日期/snapshots/步骤_时间.png
+        snap_dir = os.path.join(self._task_base_dir(), "snapshots")
+        try:
+            os.makedirs(snap_dir, exist_ok=True)
+        except Exception:
+            snap_dir = os.path.abspath(DOWNLOAD_DIR)   # 回退到下载根目录
+        # 清理非法文件名字符
+        safe_step = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(step_name or "step")).strip() or "step"
+        path = os.path.join(snap_dir, f"{safe_step}_{ts}.png")
+        try:
+            self.page.screenshot(path=path, full_page=False)
+        except Exception as e:
+            self._log(f"步骤快照失败[{step_name}]: {str(e)[:80]}", "warning")
+            return None
+        return path
+
+    def snapshot_on_failure(self, step_name="failure"):
+        """失败现场截图: 包含页面URL/标题,便于排查"""
+        try:
+            info = self.get_page_info()
+            self._log(f"失败现场: url={info.get('url','')[:80]} title={info.get('title','')[:40]}",
+                      "warning")
+        except Exception:
+            pass
+        return self.snapshot(f"FAIL_{step_name}")
 
     def get_page_info(self):
         """获取当前页面信息"""
@@ -538,8 +724,103 @@ class BrowserManager:
         """等待指定秒数(页面加载/动画过渡)"""
         time.sleep(seconds)
 
+    def wait_for(self, selector=None, text=None, timeout=15, stable_for=1.0,
+                 network_idle=True):
+        """语义化等待,替代固定 sleep(机器快省时间,慢机器不误判)。
+        条件满足即返回:
+        - selector: 指定 CSS 选择器的元素出现
+        - text:     指定页面文字出现(忽略空白,如"确 定")
+        条件满足后可再等待网络空闲稳定(stable_for),避免"刚出现就操作"。
+        返回 True(满足) / False(超时,不抛异常)。"""
+        end = time.time() + timeout
+        while time.time() < end:
+            met = False
+            if selector:
+                try:
+                    if self.page.locator(selector).count() > 0:
+                        met = True
+                except Exception:
+                    pass
+            if text and not met:
+                met = self.is_visible_text(text, timeout=1)
+            if met:
+                if network_idle and stable_for and stable_for > 0:
+                    try:
+                        self.page.wait_for_load_state("networkidle",
+                                                      timeout=int(stable_for * 1000))
+                    except Exception:
+                        pass
+                return True
+            time.sleep(0.3)
+        self._log(f"等待超时: selector={selector or ''} text={text or ''} ({timeout}s)", "warning")
+        return False
+
+    def set_step_debug(self, enabled, callback=None):
+        """开启/关闭单步调试模式。
+        enabled=True 时,平台脚本调用 step_pause() 会在每步后暂停,
+        等待 callback 返回真值(由 GUI 弹"继续/中止"对话框触发)再继续。
+        callback(step_name) -> True 继续 / False 中止导出"""
+        self._step_debug = bool(enabled)
+        self._step_callback = callback if enabled else None
+        self._log(f"单步调试模式: {'开' if enabled else '关'}")
+
+    def step_pause(self, step_name="step"):
+        """单步暂停: 在关键步骤处调用,开启调试模式时弹出"继续"确认,关闭时直接跳过。
+        平台脚本可在 export 流程任意位置插入,排查"到底哪一步开始不对"。"""
+        if not self._step_debug:
+            return True
+        # 自动截图,便于看当前页面状态
+        self.snapshot(f"DEBUG_{step_name}")
+        self._log(f"[单步] 已暂停: {step_name}(确认后继续)")
+        if self._step_callback:
+            try:
+                cont = self._step_callback(step_name)
+                if not cont:
+                    self._log(f"[单步] 用户中止于: {step_name}", "warning")
+                    raise RuntimeError(f"用户中止单步调试: {step_name}")
+                return True
+            except RuntimeError:
+                raise
+            except Exception as e:
+                self._log(f"[单步] 回调异常,继续执行: {str(e)[:60]}")
+                return True
+        # 无回调时只截一张图、不阻塞(开发环境用)
+        return True
+
+    def set_user_wait_callback(self, callback):
+        """注入"等待用户手动操作"回调(由 GUI 在 UI 线程弹窗提醒并阻塞,等用户完成)。
+        用于资金流水导出需要微信扫码确认等场景。callback(prompt) 在用户确认后返回。"""
+        self._user_wait_callback = callback
+
+    def wait_user(self, prompt, timeout=600):
+        """停留等待用户手动操作(如微信扫码确认资金流水)。
+        提醒用户 + 阻塞等待,直到用户完成确认才能继续后续下载。
+        有注入回调时: 由 GUI 弹窗提醒并阻塞; 无回调时: 打日志并按 timeout 停留兜底。
+        返回 True(继续导出)。"""
+        self.snapshot("等待用户确认")
+        self._log(f"[待处理] {prompt}", "warning")
+        if self._user_wait_callback:
+            try:
+                self._user_wait_callback(prompt)
+                self._log("[待处理] 用户已确认,继续")
+                return True
+            except Exception as e:
+                self._log(f"[待处理] 用户确认回调异常: {str(e)[:60]}", "warning")
+        # 无回调兜底: 静默停留,给用户手动操作时间
+        deadline = time.time() + max(1, int(timeout))
+        while time.time() < deadline:
+            time.sleep(2)
+        return True
+
+    @staticmethod
+    def _text_pattern(text):
+        """把文本转成可忽略任意空白的正则,解决"确 定"这类按钮文案匹配不到的问题"""
+        return re.compile(r"\s*".join(re.escape(ch) for ch in text))
+
     def click_text(self, text, exact=False, retries=3):
-        """点击包含指定文字的按钮/链接"""
+        """点击包含指定文字的按钮/链接
+        匹配优先级: 普通文本 → 忽略空白(确 定)→ JS 直接触发。
+        后两种可绕过遮挡/视口外/不可见及文案含空格导致的点击失败。"""
         for attempt in range(1, retries + 1):
             try:
                 loc = self.page.get_by_text(text, exact=exact)
@@ -549,6 +830,23 @@ class BrowserManager:
                     return True
             except Exception as e:
                 self._log(f"点击文字失败(第{attempt}次): {text} - {str(e)[:60]}", "warning")
+                # 回退1: 忽略空白匹配("确 定" → /确\s*定/)
+                try:
+                    loc = self.page.get_by_text(self._text_pattern(text), exact=False)
+                    if loc.count() > 0:
+                        loc.first.click(timeout=5000)
+                        self._log(f"点击文字成功(忽略空格): {text}")
+                        return True
+                except Exception as e2:
+                    self._log(f"点击文字忽略空格失败: {text} - {str(e2)[:60]}", "warning")
+                # 回退2: JS 直接触发点击
+                try:
+                    loc = self.page.get_by_text(text, exact=exact).first
+                    loc.evaluate("el => el.click()")
+                    self._log(f"点击文字成功(JS回退): {text}")
+                    return True
+                except Exception as e3:
+                    self._log(f"点击文字JS回退失败: {text} - {str(e3)[:60]}", "warning")
                 if attempt < retries:
                     time.sleep(2)
         self._log(f"点击文字最终失败: {text}", "error")
@@ -579,7 +877,14 @@ class BrowserManager:
         return self.safe_fill(selector, value, description=selector, retries=retries)
 
     def is_visible_text(self, text, timeout=3):
-        """判断页面上是否出现指定文字"""
+        """判断页面上是否出现指定文字(支持忽略空白,如"确 定")。
+        先按忽略空白正则匹配(能命中"确 定"),失败再按普通文本匹配,避免白等。"""
+        try:
+            self.page.get_by_text(self._text_pattern(text), exact=False).first.wait_for(
+                timeout=timeout * 1000)
+            return True
+        except Exception:
+            pass
         try:
             self.page.get_by_text(text, exact=False).first.wait_for(timeout=timeout * 1000)
             return True
@@ -591,7 +896,12 @@ class BrowserManager:
         关闭页面上的弹窗(广告/公告/引导弹窗)
         没有弹窗时自动跳过,不会误操作
         返回: True(关闭了弹窗) / False(没有弹窗)
+
+        注意: 当前各平台导出流程均无引导/公告弹窗,为使每次导出不再空扫描,
+        此特性先暂停(直接返回 False)。**后续若出现弹窗需关闭,删掉下面一行
+        `return False` 即可恢复下方扫描逻辑。**
         """
+        return False  # [已暂停] 无弹窗,跳过 close_popup 扫描;需要时删除本行恢复
         # 常见弹窗关闭按钮选择器(按优先级)
         popup_selectors = [
             ".zent-dialog__close",          # 有赞 zent 对话框
@@ -619,12 +929,16 @@ class BrowserManager:
             for sel in popup_selectors:
                 try:
                     loc = self.page.locator(sel)
-                    if loc.count() > 0:
-                        loc.first.click(timeout=2000)
-                        self._log(f"已关闭弹窗: {sel}")
-                        self.sleep(1)
-                        closed = True
-                        break
+                    el = loc.first
+                    # 只点"可见"的关闭按钮: DOM 中常驻但隐藏的图标(.el-icon-close 等)
+                    # 会占用 click 的 2s 超时等待,逐个累积成十几秒空转,这里用 is_visible 快速过滤
+                    if loc.count() == 0 or not el.is_visible():
+                        continue
+                    el.click(timeout=1500)
+                    self._log(f"已关闭弹窗: {sel}")
+                    self.sleep(1)
+                    closed = True
+                    break
                 except Exception:
                     continue
             if closed:
@@ -633,22 +947,26 @@ class BrowserManager:
             for sel in icon_selectors:
                 try:
                     loc = self.page.locator(sel)
-                    if loc.count() > 0:
-                        loc.first.click(timeout=2000)
-                        self._log(f"已关闭弹窗: {sel}")
-                        self.sleep(1)
-                        return True
+                    el = loc.first
+                    if loc.count() == 0 or not el.is_visible():
+                        continue
+                    el.click(timeout=1500)
+                    self._log(f"已关闭弹窗: {sel}")
+                    self.sleep(1)
+                    return True
                 except Exception:
                     continue
             # 3. 尝试文字按钮
             for t in text_buttons:
                 try:
                     loc = self.page.get_by_text(t, exact=True)
-                    if loc.count() > 0:
-                        loc.first.click(timeout=2000)
-                        self._log(f"已关闭弹窗: {t}")
-                        self.sleep(1)
-                        return True
+                    el = loc.first
+                    if loc.count() == 0 or not el.is_visible():
+                        continue
+                    el.click(timeout=1500)
+                    self._log(f"已关闭弹窗: {t}")
+                    self.sleep(1)
+                    return True
                 except Exception:
                     continue
             if attempt < retries:
@@ -667,6 +985,150 @@ class BrowserManager:
                 self.playwright.stop()
         except Exception:
             pass
+
+    # ===== 操作追踪(辅助编写平台脚本: 记录测试浏览器中的点击/输入元素信息) =====
+
+    TRACE_SCRIPT = r"""
+    (function() {
+      if (window.__trace_injected__) return;
+      window.__trace_injected__ = true;
+      function brief(el) {
+        if (!el) return {};
+        return {
+          tag: (el.tagName || '').toLowerCase(),
+          text: (el.innerText || el.textContent || '').trim().slice(0, 50),
+          cls: (typeof el.className === 'string' ? el.className : '').slice(0, 120),
+          id: el.id || '',
+          ph: el.getAttribute && el.getAttribute('placeholder') || '',
+          name: el.getAttribute && el.getAttribute('name') || '',
+          href: el.getAttribute && el.getAttribute('href') || ''
+        };
+      }
+      document.addEventListener('click', function(e) {
+        var el = e.target.closest('a,button,input,select,textarea,[role=button],[class*=btn],[class*=button]') || e.target;
+        console.log('[TRACE_CLICK] ' + JSON.stringify(brief(el)));
+      }, true);
+      document.addEventListener('change', function(e) {
+        var el = e.target;
+        if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA')) {
+          console.log('[TRACE_CHANGE] ' + JSON.stringify(brief(el)));
+        }
+      }, true);
+    })();
+    """
+
+    def enable_action_trace(self, record_to_file=True):
+        """开启操作追踪: 向浏览器注入脚本,把用户在页面上的点击/输入元素信息
+        通过 console 消息回传,记录到日志,辅助编写平台脚本。
+        仅用于"打开商户"手工测试模式。
+        record_to_file=True 时同时把结构化步骤追加到 recordings/*.jsonl,
+        可用 tools/recording_to_script.py 转成 export.py 骨架。"""
+        try:
+            if not self.context:
+                return False
+            self.context.add_init_script(self.TRACE_SCRIPT)
+            if self.page and not self.page.is_closed():
+                self.page.on("console", self._on_trace_console)
+            # 准备录制文件路径(用 平台_商户_时间戳 命名)
+            if record_to_file:
+                rec_dir = os.path.join(ROOT_DIR, "recordings")
+                try:
+                    os.makedirs(rec_dir, exist_ok=True)
+                except Exception:
+                    rec_dir = os.path.abspath(DOWNLOAD_DIR)
+                plat = self._safe_name(self._export_platform or "unknown")
+                merch = self._safe_name(self._export_merchant or "default")
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self._recording_file = os.path.join(rec_dir, f"{plat}_{merch}_{ts}.jsonl")
+            self._log("已开启操作追踪: 页面上的点击/输入会记录到日志"
+                      + (f" 并录制到 {os.path.basename(self._recording_file)}" if self._recording_file else ""))
+            return True
+        except Exception as e:
+            self._log(f"开启操作追踪失败: {e}", "warning")
+            return False
+
+    def _on_trace_console(self, msg):
+        """接收页面 console 中的操作追踪消息: 写入日志 + 追加到结构化录制文件"""
+        try:
+            text = msg.text or ""
+            if not text.startswith("[TRACE_"):
+                return
+            self._log(text)
+            # 追加到 JSONL 录制文件,供后续生成脚本骨架
+            if not self._recording_file:
+                return
+            # 解析 "[TRACE_CLICK] {json}" / "[TRACE_CHANGE] {json}"
+            try:
+                tag_end = text.index("]") + 1
+                tag = text[:tag_end]   # [TRACE_CLICK]
+                payload = text[tag_end:].strip()
+                info = json.loads(payload) if payload else {}
+            except Exception:
+                tag, info = text, {}
+            record = {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "type": tag.replace("[", "").replace("]", "").replace("TRACE_", "").lower(),
+                "url": (self.page.url if self.page else "")[:200],
+                "element": info,
+            }
+            try:
+                with open(self._recording_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ===== 登录态导出/恢复(解决 session cookie 关闭即丢,如微信支付) =====
+
+    LOGIN_STATE_FILE = "login_state.json"
+
+    def save_login_state(self):
+        """导出当前登录态(cookie + localStorage)到 profile 目录,供下次启动恢复。
+        context.storage_state() 会包含 session cookie(无过期时间),正好解决
+        Playwright persistent context 关闭时不保留 session cookie 的问题。"""
+        try:
+            if not self.context:
+                return False
+            state = self.context.storage_state()
+            path = os.path.join(self._profile_dir, self.LOGIN_STATE_FILE)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            self._log(f"登录态已保存({len(state.get('cookies', []))} 个 cookie)")
+            return True
+        except Exception as e:
+            self._log(f"保存登录态失败: {e}", "warning")
+            return False
+
+    def _restore_login_state(self):
+        """启动后恢复上次保存的登录态: 注入 cookie + 用初始化脚本恢复 localStorage。"""
+        try:
+            path = os.path.join(self._profile_dir, self.LOGIN_STATE_FILE)
+            if not os.path.isfile(path):
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            cookies = state.get("cookies") or []
+            if cookies:
+                self.context.add_cookies(cookies)
+            # 恢复 localStorage(通过 add_init_script 在页面加载前写入)
+            origins = state.get("origins") or []
+            ls_map = {}
+            for origin in origins:
+                origin_url = origin.get("origin", "")
+                items = {it.get("name", ""): it.get("value", "")
+                         for it in origin.get("localStorage", []) if it.get("name")}
+                if items:
+                    ls_map[origin_url] = items
+            if ls_map:
+                init = ("window.addEventListener('DOMContentLoaded', function(){"
+                        "try{var m=" + json.dumps(ls_map, ensure_ascii=False) +
+                        ";for(var o in m){if(location.origin===o){"
+                        "for(var k in m[o]){localStorage.setItem(k,m[o][k]);}}}}catch(e){}});")
+                self.context.add_init_script(init)
+            self._log(f"已恢复登录态({len(cookies)} 个 cookie)")
+        except Exception as e:
+            self._log(f"恢复登录态失败: {e}", "warning")
 
     def __enter__(self):
         self.start()

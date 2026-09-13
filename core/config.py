@@ -21,6 +21,9 @@ SETTINGS_FILE = os.path.join(ROOT_DIR, "settings.json")
 # 定时任务持久化文件
 SCHEDULED_TASKS_FILE = os.path.join(ROOT_DIR, "scheduled_tasks.json")
 
+# 平台/商户勾选状态持久化文件(重启后恢复上次勾选)
+SELECTION_FILE = os.path.join(ROOT_DIR, "selection_state.json")
+
 DEFAULT_SETTINGS = {
     "show_browser": True,        # 是否显示浏览器窗口(取消勾选=后台运行)
     "download_name_mode": "unified",  # 下载文件名: unified=统一命名 / original=保留原始名称(非UUID)

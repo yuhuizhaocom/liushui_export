@@ -11,6 +11,16 @@
 /logs/
 /settings.json
 /scheduled_tasks.json
+/recordings/
+/selection_state.json
+
+# 临时/调试脚本(与导出功能无关)
+/debug_rtf.py
+/dump_rtf_full.py
+/dump_rtf_text.py
+/extract_rtf_info.py
+/ocr_images.py
+/ocr_windows.ps1
 
 # Python 缓存
 __pycache__/

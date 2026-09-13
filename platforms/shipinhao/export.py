@@ -73,9 +73,9 @@ class ShipinhaoExporter(PlatformBase):
                     browser.page.keyboard.type(value)
                     browser.page.keyboard.press("\n")
 
-            set_one(st.first, start_date[:10])
+            set_one(st.first, f"{start_date[:10]} 00:00:00")
             browser.sleep(0.5)
-            set_one(en.first, end_date[:10])
+            set_one(en.first, f"{end_date[:10]} 23:59:59")
             browser.page.keyboard.press("Escape")  # 关闭日期面板
             browser.sleep(0.5)
             return True

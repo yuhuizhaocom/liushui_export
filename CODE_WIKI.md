@@ -124,6 +124,9 @@ liushui_export/
 | `core/browser.py`        | **浏览器管理**。封装 Playwright 持久化上下文（含登录态），提供导航/点击/填表/等待/下载捕获/文件归档/弹窗关闭/日期选择器辅助方法；内置浏览器启动重试与 Chrome 锁文件清理。                                                                  |
 | `core/exporters.py`      | **智能导出器**。`SmartExporter` 通过 placeholder 匹配日期输入框、按文本匹配查询/导出按钮，全自动完成「填日期→查询→导出→等待下载」，失败时截图并返回提示，是平台未自定义 `export()` 时的默认实现。                                             |
 | `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典：注册模块内**所有**带 key 的 `PlatformBase` 子类（用 `__module__` 排除从别处 import 进来的），key 重复/模块里没有平台类/导入失败都会写日志（导入失败以前只 print，pythonw 下界面完全看不到）。`reload_platforms()` 供平台管理改完脚本后免重启生效，需同时清 `sys.modules`、importlib 的 stat 缓存和磁盘上的 `.pyc`。                                                                                                           |
+| `core/outputs.py` | **导出文件汇总**。`find_output_files`（认 `平台/日期` 与 `平台/商户/日期` 两种结构、跳过 `.crdownload/.tmp/.part`）、`copy_to_summary_dir`（复制到 `downloads/开始_结束_时间戳/`，无文件返回 None 因此不再打开文件夹）、`sanitize_name`（路径非法字符清理，商户名与 profile 目录共用）。纯文件操作，可脱离界面测试。 |
+| `core/dialogs.py` | **查看类对话框**。`show_log_history(root)` 历史日志窗口、`show_stats_dashboard(app)` 稳定性看板；只读根窗口/状态栏，与导出流程无关。 |
+| `core/theme.py` | **界面配色常量**。单独成模块供 `dialogs.py` 复用，避免反向 import `main_gui` 成环。 |
 | `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。                      |
 | `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；提供 `load_settings()/save_settings()` 读写 `settings.json`。 |
 | `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀），系统日志与用户操作统一记录这个通道。 |
@@ -158,6 +161,7 @@ liushui_export/
 | `_action_export_all()`                 | 校验后弹出任务确认框（平台·商户明细 + 日期），确认后**在主线程取好日期与单步开关**再启动 `_do_export(tasks, start, end, step_debug)`。                 |
 | `_action_check_status()`               | 启动线程执行 `_do_check(tasks)`，逐个商户调用平台自身的 `check_login` 判断登录态。                       |
 | `_action_open_folder()`                | 打开 `downloads/` 目录。                                          |
+| `_request_abort()`                     | 「中止本次任务」按钮：置 `_abort` 事件并记日志。只在**商户边界**生效（`_execute_export_tasks`/`_do_login`/`_do_check` 每轮开头查 `_aborted()`），不会中途掐浏览器留下半截下载；按钮由 `_run_async` 启用、`_thread_wrapper` 结束时置灰。 |
 | `_action_help()`                       | 弹出简化使用说明。                                                    |
 | `_prompt_add_merchant(key, plat_name)` | 弹窗输入商户名 → 清洗非法字符 → 创建 `browser_data/平台key/商户/` 目录 → 动态刷新勾选框。 |
 
@@ -179,6 +183,7 @@ liushui_export/
 | `_ensure_browser(plat, merchant, force_visible)` | 关闭旧浏览器 → 按 headless 配置创建 `BrowserManager` → 设置平台+商户 profile → `start()`。登录流程 `force_visible=True` 强制显示窗口；是否显示读 `settings.json` 的 `show_browser`（复选框 trace 已同步），不跨线程读 Tk 变量。 |
 | `_ui(fn)` / `_pump_ui()`                         | 界面更新的唯一通道：非主线程调用 `_ui` 只把回调投入队列，主线程 `_pump_ui` 每 60ms 批量消费并重新排程；已在主线程则就地执行。单条回调抛错只丢这一条，不会停泵。 |
 | `_set_progress(**kwargs)`                        | 进度条更新的线程安全包装。                        |
+| `_prompt_manual_leftovers(items, date_str)`      | 需要人工完成的平台**在整批结束后一次性列出一个窗**（以前每个 manual 各弹一个，多个平台会叠好几个窗）；全自动成功时完全不打扰。 |
 
 #### 状态/日志
 
@@ -282,7 +287,8 @@ liushui_export/
 | `open_export_page(browser)`            | 方法  | 骨架钩子①：`navigate(export_url)` + `sleep(PAGE_SETTLE_S)` + `close_popup()`。 |
 | `set_date_range(browser, start, end)`  | 方法  | 骨架钩子②：按 placeholder 填「开始日期/结束日期」（各取 `[:10]`）。 |
 | `trigger_export(browser, start, end)`  | 方法  | 骨架钩子③：点「查询」再点「导出」。需先切标签、或导出后还要去历史报表页的平台覆盖此方法。 |
-| `download_export_file(browser, label)` | 方法  | 骨架钩子④：`begin_wait_download` → 点 `label`（默认「下载」）→ `wait_download(timeout=DOWNLOAD_TIMEOUT_S)`，返回 `"success"`/`"manual"`。 |
+| `download_export_file(browser, label, settle_s)` | 方法 | 骨架钩子④：`begin_wait_download` → 点 `label`（默认 `DOWNLOAD_LABEL`「下载」）→ `sleep(DOWNLOAD_SETTLE_S)` → `wait_download(timeout=DOWNLOAD_TIMEOUT_S)`，返回 `"success"`/`"manual"`。 |
+| `PAGE_SETTLE_S` / `DOWNLOAD_TIMEOUT_S` / `DOWNLOAD_LABEL` / `DOWNLOAD_SETTLE_S` / `DATE_VALUE_SLICE` | 类属性 | 骨架的三个可声明差异点：打开页面后等几秒（3）、下载最多等多久（60）、下载按钮的真实文字（有的后台叫「下载全部」「下载明细」，小红书干脆就是「导出」）、点完给几秒落地、以及填进日期框的字符串长度（天猫「月汇总」只吃 `2026-09`）。 |
 | `run_standard_flow(browser, start, end)` | 方法 | 串起上述四步；平台脚本 `export()` 里 `return self.run_standard_flow(...)` 即采用骨架。**不调用则行为完全不变**（SmartExporter 默认实现保留）。 |
 | `SELECTORS`                             | 类属性 | 关键元素的选择器表（`{"export_btn": "button.export"}` 之类）。声明后导出前会被自动校验；目前只有微信支付声明了它。 |
 | `check_selectors(browser)`              | 方法  | 自检 `SELECTORS` 是否都在页面上，返回 `(ok, missing)`。**由 `_run_single_export` 在导出前自动调用一次**，缺失只写日志不拦截导出；未声明的平台直接跳过。 |
@@ -328,7 +334,9 @@ liushui_export/
 - `CronExpr(expr)`：支持 `*`/`*/n`/`a-b`/`a,b`/`?`；`match(dt)` 按分时日月周匹配（dom 与 dow 同时受限为 OR）；`next_run(after)` 返回下一个匹配分钟（一年内）。
 - `CronJob`/`TaskStore`：任务模型与 `scheduled_tasks.json`（version 1）读写；损坏条目跳过。**新建任务走 `CronJob.new(...)`**，它把 `last_run` 记为创建时间。
 - `CronScheduler(app, store, poll_interval=30)`：后台线程轮询；`should_trigger` 基于「上次运行后的 next_run <= now」（`last_run` 为空视为已到期，故新建任务必须用 `CronJob.new` 记起算点，否则保存后 30s 内就会执行一次）；触发经 `app.trigger_job(job)` 后更新 `last_run` 并保存；错过不补跑。
-- `app.trigger_job(job)`：用 `pair_job_targets` 把任务的平台/商户配成实际可跑的组合（商户只与其所属平台配对），无匹配时在日志里提示而不是静默返回。
+- `app.trigger_job(job)`：用 `pair_job_targets` 把任务的平台/商户配成实际可跑的组合（商户只与其所属平台配对），无匹配时在日志里提示而不是静默返回；返回 `_run_async` 是否真的开始（正忙时 False，且不弹"已有任务在执行"的窗打扰人）。
+- `CronScheduler.trigger(job, now)`：**只有真的开始执行才写 `last_run`**；到点时若被手动导出占着，本次不记，下个轮询周期自动重试（"程序关闭期间错过不补跑"的语义保持不变）。
+- 界面：`SchedulerDialog` 列表的「对象」列显示 `pair_job_targets` 算出的**实际项数**（配不出来标「0 项(商户与平台不匹配)」）；`JobEditDialog` 保存时对空商户/不匹配商户先问一句再存。
 - `SchedulerDialog`/`JobEditDialog`：任务新增/编辑/删除/启停；cron 带常用模板与校验。
 - 失败重试：`run_with_retry(fn, retry_times, retry_interval_s, log)` 与 `_execute_export_tasks`（自 `_do_export` 提炼）；settings `retry_times`(默认 2)/`retry_interval_s`(默认 30，递增 ×2)；`retry_times=0` 关闭。`_run_single_export` 对任何异常都在内部消化成返回值 `"failed"`（含浏览器启动阶段），否则抛出会让重试整批失效；导出前登录预检失败返回 `"manual"` 且同样落 `stats.jsonl`（`error` 写明「登录已失效」）。
 
@@ -592,7 +600,7 @@ python -m playwright install chromium
 
 | 文件                       | 规模（约）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
-| `core/main_gui.py`       | 约 1660 行      | GUI 主程序与三大业务流程、界面更新队列          |
+| `core/main_gui.py`       | 约 1500 行      | GUI 主程序与三大业务流程、界面更新队列、中止控制          |
 | `core/browser.py`        | 约 1140 行      | 浏览器管理与下载归档（项目体量最大的核心模块）         |
 | `core/exporters.py`      | 约 190 行       | 智能导出器（默认兜底导出）                   |
 | `core/platform_base.py`  | 约 190 行       | 平台基类（元信息 + 登录态自检 + 通用导出骨架钩子）  |
@@ -602,10 +610,10 @@ python -m playwright install chromium
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
 | `core/platform_admin.py` | 约 310 行 | 平台管理/脚本调试（骨架生成 + DebugProbe + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
-| `tests/` | 11 个文件约 1140 行 | pytest 测试：日志、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列、有赞日期、录制生成器 |
+| `tests/` | 14 个文件约 1560 行 | pytest 测试：日志、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总、对话框 |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
-| `platforms/*/export.py` | 11 个平台约 1040 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝），其中快手已改用 `run_standard_flow` 骨架，其余仍为逐步写法 |
+| `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
 | `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
 

@@ -48,36 +48,15 @@ class KuaishouExporter(PlatformBase):
     export_url = "https://s.kwaixiaodian.com/zone/fund/payment/bill"
     guide = "资金 → 货款账单 → 选结算时间(建议半年) → 查询 → 导出 → 查看导出记录 → 下载"
 
-    def export(self, browser, start_date, end_date):
-        # ===== 1. 打开货款账单页面 =====
-        browser.navigate(self.export_url)
+    def trigger_export(self, browser, start_date, end_date):
+        """差异步骤: 快手点完"导出"要先进"查看导出记录"列表, 才有可点的"下载"。"""
+        browser.click_text("查询")            # 应用结算时间范围
         browser.sleep(3)
-        browser.close_popup()
-
-        # ===== 2. 设置结算时间范围 =====
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
-        browser.sleep(1)
-
-        # ===== 3. 点击"查询" =====
-        browser.click_text("查询")
-        browser.sleep(3)
-
-        # ===== 4. 点击"导出"按钮 =====
         browser.click_text("导出")
         browser.sleep(5)
-
-        # ===== 5. 点击"查看导出记录" =====
         browser.click_text("查看导出记录")
         browser.sleep(3)
 
-        # ===== 6. 在导出记录列表中点击"下载" =====
-        browser.begin_wait_download()
-        browser.click_text("下载")
-        browser.sleep(3)
-
-        # ===== 7. 等待下载完成 =====
-        path = browser.wait_download(timeout=60)
-        if path:
-            return "success"
-        return "manual"
+    def export(self, browser, start_date, end_date):
+        # 打开货款账单页 → 填结算时间 → 查询/导出/查看导出记录 → 点下载并等文件
+        return self.run_standard_flow(browser, start_date, end_date)

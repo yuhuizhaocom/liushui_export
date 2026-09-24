@@ -129,6 +129,47 @@ class PlatformBase:
             browser.snapshot_on_failure(f"断言失败_{key}")
             raise RuntimeError(f"关键元素 [{key}] 未找到: {sel} ({str(e)[:60]})")
 
+    # ===== 通用导出骨架(平台脚本按需改用;不调用则完全不受影响) =====
+    # 各平台脚本里"打开页面 → 填日期 → 点查询/导出 → 等下载"这段几乎逐字相同,
+    # 差异只有中间点哪些按钮、下载等多久。收在这里后平台只需覆盖有差异的钩子,
+    # 收尾的 begin_wait_download/wait_download 配对与超时也不会再各写一份。
+    PAGE_SETTLE_S = 3          # 打开页面后的等待秒数
+    DOWNLOAD_TIMEOUT_S = 60    # 等待下载完成的秒数
+
+    def open_export_page(self, browser):
+        """打开导出页并等页面稳定(close_popup 当前在各平台是空转, 保留调用点)。"""
+        browser.navigate(self.export_url)
+        browser.sleep(self.PAGE_SETTLE_S)
+        browser.close_popup()
+
+    def set_date_range(self, browser, start_date, end_date):
+        """按 placeholder 填起止日期(多数后台的日期框都叫"开始日期/结束日期")。"""
+        browser.fill_placeholder("开始日期", (start_date or "")[:10])
+        browser.fill_placeholder("结束日期", (end_date or "")[:10])
+        browser.sleep(1)
+
+    def trigger_export(self, browser, start_date, end_date):
+        """查询 + 点导出。需要额外步骤(如先切标签、再去历史报表页)的平台覆盖本方法。"""
+        browser.click_text("查询")
+        browser.sleep(3)
+        browser.click_text("导出")
+        browser.sleep(5)
+
+    def download_export_file(self, browser, label="下载"):
+        """开启下载捕获 → 点下载 → 等文件落地。返回 "success"/"manual"。"""
+        browser.begin_wait_download()
+        browser.click_text(label)
+        browser.sleep(3)
+        path = browser.wait_download(timeout=self.DOWNLOAD_TIMEOUT_S)
+        return "success" if path else "manual"
+
+    def run_standard_flow(self, browser, start_date, end_date):
+        """标准四步骨架。平台脚本在 export() 里 return 本方法即可。"""
+        self.open_export_page(browser)
+        self.set_date_range(browser, start_date, end_date)
+        self.trigger_export(browser, start_date, end_date)
+        return self.download_export_file(browser)
+
     def export(self, browser, start_date, end_date):
         """
         导出流水流程(核心方法,建议覆盖)

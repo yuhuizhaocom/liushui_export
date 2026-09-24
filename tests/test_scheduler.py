@@ -155,3 +155,17 @@ def test_check_all_skips_undue_job(tmp_path):
     now = datetime(2026, 9, 4, 18, 0)
     s.check_all(now)
     assert calls == []
+
+
+def test_pair_job_targets_matches_only_own_platform_merchants():
+    """任务里的商户是一整条与平台无关的文本, 不能做平台×商户笛卡尔积。"""
+    from core.main_gui import pair_job_targets
+    merchants_by_key = {"youzan": ["旗舰店A", "旗舰店B"], "alipay": ["支付宝商户"]}
+    pairs = pair_job_targets(["youzan", "alipay"], ["旗舰店A", "支付宝商户"], merchants_by_key)
+    assert pairs == [("youzan", "旗舰店A"), ("alipay", "支付宝商户")]
+
+
+def test_pair_job_targets_empty_or_unknown_yields_nothing():
+    from core.main_gui import pair_job_targets
+    assert pair_job_targets(["youzan"], [], {"youzan": ["旗舰店A"]}) == []
+    assert pair_job_targets(["youzan"], ["旗舰店A"], {}) == []

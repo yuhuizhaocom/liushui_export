@@ -43,6 +43,22 @@ def discover_merchants(platform_keys):
     return result
 
 
+def pair_job_targets(job_platforms, job_merchants, merchants_by_key):
+    """把定时任务里的平台/商户配成 (平台key, 商户名)。
+
+    任务编辑框中商户是一整条与平台无关的逗号文本, 若直接做平台×商户笛卡尔积,
+    会给不属于该平台的商户拉起一个没有登录态的 profile。这里只保留
+    browser_data/<平台key>/<商户> 下确实建档的配对。
+    """
+    pairs = []
+    for key in job_platforms:
+        known = set(merchants_by_key.get(key, []))
+        for m in job_merchants:
+            if m in known:
+                pairs.append((key, m))
+    return pairs
+
+
 def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):
     """通用重试: fn 返回非 "failed" 视为成功; 失败按 retry_times 重试, 间隔递增(×2)。
     retry_times=0 表示失败一次即返回, 不重试。"""
@@ -1111,13 +1127,16 @@ class LiushuiApp:
     def trigger_job(self, job):
         """CronScheduler 回调: 按任务对象执行导出(昨天~今天)。"""
         tasks = []
-        for key in job.platforms:
+        for key, m in pair_job_targets(job.platforms, job.merchants, self.merchants):
             plat = self.platforms.get(key)
-            if not plat:
-                continue
-            for m in job.merchants:
+            if plat:
                 tasks.append((key, plat, m))
         if not tasks:
+            # 原来这里静默 return, 用户只会看到"任务没跑"且日志里没有任何痕迹
+            detail = (f"(商户 {job.merchants} 在平台 {job.platforms} 下都未建档)"
+                      if job.merchants else "(未填写商户)")
+            log(f"[提示] 定时任务「{job.name}」没有可执行的平台/商户组合 {detail}",
+                callback=self._append_log)
             return
         end = datetime.now().strftime("%Y-%m-%d")
         start = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")

@@ -6,6 +6,7 @@
 
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -88,11 +89,21 @@ FG_LOG = "#cdd6f4"
 FG_MAIN = "#2d3436"
 FG_MUTED = "#636e72"
 
+# 工作线程投递的界面回调多久抽一次(毫秒)。太小空转, 太大日志发涩。
+_UI_PUMP_MS = 60
+_UI_PUMP_BATCH = 300
+
 class LiushuiApp:
     def __init__(self, root):
         self.root = root
         self.browser = None
         self.running = False
+        # running 由 UI 线程与定时任务线程共同读写, 检查+置位必须在同一把锁里完成,
+        # 否则两条线程可能同时进入任务(同一 profile 被两个浏览器占用)。
+        self._task_lock = threading.Lock()
+        # 界面更新一律经这里回主线程执行(见 _ui/_pump_ui);Tk 控件不能跨线程改。
+        self._ui_thread = threading.get_ident()
+        self._uiq = queue.Queue()
         self.platform_vars = {}
         self.log_lines = []
         self.platforms = discover_platforms()
@@ -109,6 +120,7 @@ class LiushuiApp:
         self._build_left_panel()
         self._build_middle_panel()
         self._refresh_summary()   # 初始化概览条
+        self.root.after(_UI_PUMP_MS, self._pump_ui)   # 须在控件建好后启动
 
         # 登录保活服务: 后台线程周期刷新各商户登录态
         self.keepalive = KeepAliveService(
@@ -485,13 +497,16 @@ class LiushuiApp:
         return {"platform": {}, "merchant": {}}
 
     def _save_selection(self, *_):
-        """持久化当前平台/商户勾选状态到文件(重启后自动恢复)。"""
+        """持久化当前平台/商户勾选状态到文件(重启后自动恢复)。
+        同时在 self.selection 留一份纯数据镜像: 保活线程需要读勾选, 而跨线程读
+        Tk 变量不安全。"""
         try:
             data = {
                 "platform": {k: bool(v.get()) for k, v in self.platform_vars.items()},
                 "merchant": {k: {n: bool(mv.get()) for n, mv in mvs.items()}
                              for k, mvs in self.merchant_vars.items()},
             }
+            self.selection = data
             with open(SELECTION_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -513,13 +528,47 @@ class LiushuiApp:
             pass
 
     def _append_log(self, line):
+        """任意线程可调: 文本缓冲就地追加, 控件刷新投递到主线程。
+
+        这条是量最大的跨线程入口(BrowserManager 每个动作、保活/调度线程都会调)。
+        """
         self.log_lines.append(line)
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.insert(tk.END, line + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
         if len(self.log_lines) > 500:
             self.log_lines = self.log_lines[-300:]
+
+        def _paint():
+            self.log_text.config(state=tk.NORMAL)
+            self.log_text.insert(tk.END, line + "\n")
+            self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+        self._ui(_paint)
+
+    def _ui(self, fn):
+        """把只在主线程安全的操作(改控件、弹窗)投递给主线程;工作线程立即返回不等待。
+        已在主线程则就地执行, 保证点击响应没有额外延迟。"""
+        if threading.get_ident() == self._ui_thread:
+            fn()
+        else:
+            self._uiq.put(fn)
+
+    def _pump_ui(self):
+        """主线程周期性消费 _ui 队列。单个回调抛错只丢这一条, 不能停掉泵。"""
+        for _ in range(_UI_PUMP_BATCH):
+            try:
+                fn = self._uiq.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                pass
+        try:
+            self.root.after(_UI_PUMP_MS, self._pump_ui)
+        except Exception:
+            pass   # 窗口已销毁, 泵自然结束
+
+    def _set_progress(self, **kwargs):
+        self._ui(lambda: self.progress.config(**kwargs))
 
     def _copy_log(self):
         """复制当前全部日志文本到系统剪贴板,便于复制给我排查问题。"""
@@ -625,9 +674,10 @@ class LiushuiApp:
         listbox.bind("<Double-Button-1>", _on_select)
 
     def _set_status(self, text):
-        self.status_var.set(f"状态: {text}")
+        self._ui(lambda: self.status_var.set(f"状态: {text}"))
 
-    def _set_platform_status(self, key, status):
+    def _paint_platform_status(self, key, status):
+        """仅主线程调用;跨线程请用 set_platform_status。"""
         plat = self.platforms.get(key)
         if not plat:
             return
@@ -638,13 +688,9 @@ class LiushuiApp:
         label.config(fg=colors.get(status, "#bdc3c7"))
 
     def set_platform_status(self, key, status):
-        """保活线程用的公共入口(KeepAliveService._mark 按此名字查找)。
-        状态灯控件只能在 UI 线程改, 这里统一切回主线程;
-        窗口已销毁时 after 会抛 TclError, 属后台服务噪声, 吞掉不影响导出主流程。"""
-        try:
-            self.root.after(0, lambda: self._set_platform_status(key, status))
-        except Exception:
-            pass
+        """平台状态灯的线程安全入口(保活线程和任务线程都走这里)。
+        保活服务按这个名字查找回调, 改名要同步 core/keepalive.py::_mark。"""
+        self._ui(lambda: self._paint_platform_status(key, status))
 
     def _get_selected(self):
         return [k for k, v in self.platform_vars.items() if v.get()]
@@ -673,20 +719,35 @@ class LiushuiApp:
                        "retry_interval_s": int(DEFAULT_SETTINGS.get("retry_interval_s", 30))})
 
     def __iter_merchants(self):
-        """供保活复用的迭代: (platform_key, merchant)。"""
-        for key in self._get_selected():
-            for m in self._get_selected_merchants(key):
-                yield (key, m)
+        """供保活复用的迭代: (platform_key, merchant)。
+        保活线程调用, 因此读 self.selection 镜像而不是 Tk 勾选框变量。"""
+        sel = self.selection or {}
+        plats = sel.get("platform", {})
+        merchants = sel.get("merchant", {})
+        for key in self.platforms:
+            if not plats.get(key):
+                continue
+            for name, on in merchants.get(key, {}).items():
+                if on:
+                    yield (key, name)
 
     iter_selected_merchants = __iter_merchants
 
     def _run_async(self, target):
-        if self.running:
-            messagebox.showwarning("提示", "已有任务正在执行,请等待完成。")
+        """起后台线程跑 target; running 标志由 _task_lock 保护。
+        调用方可能是界面按钮(主线程), 也可能是 CronScheduler 线程。"""
+        with self._task_lock:
+            if self.running:
+                busy = True
+            else:
+                self.running = True
+                busy = False
+        if busy:
+            # 定时任务线程也会走到这里, 弹窗只能在主线程做
+            self._ui(lambda: messagebox.showwarning("提示", "已有任务正在执行,请等待完成。"))
             return
-        self.running = True
         for key in self.platform_vars:
-            self._set_platform_status(key, "idle")
+            self.set_platform_status(key, "idle")
         t = threading.Thread(target=self._thread_wrapper, args=(target,), daemon=True)
         t.start()
 
@@ -697,9 +758,10 @@ class LiushuiApp:
             self._append_log(f"[错误] {e}")
             self._set_status(f"出错: {e}")
         finally:
-            self.running = False
+            with self._task_lock:
+                self.running = False
             self._set_status("就绪")
-            self.progress.config(value=0)
+            self._set_progress(value=0)
             # 任务结束自动关闭浏览器(避免窗口残留/占用,下次任务重新启动)
             if self.browser:
                 try:
@@ -719,7 +781,9 @@ class LiushuiApp:
             except Exception:
                 pass
         from core.browser import BrowserManager
-        show = force_visible or bool(self.show_browser_var.get())
+        # 该复选框的 trace 会把值同步进 settings.json, 这里读文件而不是读 BooleanVar:
+        # _ensure_browser 跑在任务线程上, 跨线程读 Tk 变量不安全。
+        show = force_visible or bool(load_settings().get("show_browser", True))
         self.browser = BrowserManager(headless=not show, log_callback=self._append_log)
         if plat is not None:
             self.browser.set_browser_profile(plat.key, merchant)
@@ -732,6 +796,18 @@ class LiushuiApp:
             if mv.get():
                 result.append(name)
         return result
+
+    def _collect_tasks(self, selected=None):
+        """把"已勾选平台 + 该平台已勾选商户"展成 (key, plat, merchant) 列表。
+        只能在主线程调用(要读勾选框);任务线程一律用主线程拍好的这份列表, 不再回读界面。"""
+        tasks = []
+        for key in (selected if selected is not None else self._get_selected()):
+            plat = self.platforms.get(key)
+            if not plat:
+                continue
+            for m in self._get_selected_merchants(key):
+                tasks.append((key, plat, m))
+        return tasks
 
     def _validate_dates(self, show_warning=True):
         """校验日期输入(格式 YYYY-MM-DD、结束>=开始),供导出/登录前调用"""
@@ -757,10 +833,10 @@ class LiushuiApp:
         if not selected:
             messagebox.showwarning("提示", "请至少选择一个平台。")
             return
-        cnt = sum(len(self._get_selected_merchants(k)) for k in selected)
-        if cnt > 0:
-            log(f"首次登录: {cnt} 个商户", callback=self._append_log)
-        self._run_async(lambda: self._do_login(selected))
+        tasks = self._collect_tasks(selected)
+        if tasks:
+            log(f"首次登录: {len(tasks)} 个商户", callback=self._append_log)
+        self._run_async(lambda: self._do_login(tasks))
 
     def _action_export_all(self):
         if not self._validate_dates():
@@ -770,26 +846,27 @@ class LiushuiApp:
             messagebox.showwarning("提示", "请至少选择一个平台。")
             return
         # 汇总本次将导出的任务并让用户确认(防误操作)
-        tasks = []
-        for key in selected:
-            plat = self.platforms[key]
-            for m in self._get_selected_merchants(key):
-                tasks.append(f"{plat.name} · {m}")
+        tasks = self._collect_tasks(selected)
         if not tasks:
             messagebox.showwarning("提示", "请至少勾选一个商户后再导出。")
             return
-        date_str = f"{self.date_start.get()} ~ {self.date_end.get()}"
-        lines = "\n".join(tasks[:12])
-        if len(tasks) > 12:
-            lines += f"\n…… 等共 {len(tasks)} 项"
+        # 日期与"单步调试"开关在此处(主线程)取值, 任务线程不再回读界面
+        start_date = self.date_start.get().strip()
+        end_date = self.date_end.get().strip()
+        step_debug = bool(self.step_debug_var.get())
+        date_str = f"{start_date} ~ {end_date}"
+        labels = [f"{plat.name} · {m}" for _, plat, m in tasks]
+        lines = "\n".join(labels[:12])
+        if len(labels) > 12:
+            lines += f"\n…… 等共 {len(labels)} 项"
         ok = messagebox.askyesno(
             "确认导出",
-            f"确认导出以下 {len(tasks)} 个商家流水?\n\n"
+            f"确认导出以下 {len(labels)} 个商家流水?\n\n"
             f"日期: {date_str}\n{lines}")
         if not ok:
             return
-        log(f"开始导出: {len(tasks)} 个商户 [{date_str}]", callback=self._append_log)
-        self._run_async(lambda: self._do_export(selected))
+        log(f"开始导出: {len(labels)} 个商户 [{date_str}]", callback=self._append_log)
+        self._run_async(lambda: self._do_export(tasks, start_date, end_date, step_debug))
 
     def _action_check_status(self):
         if not self._validate_dates(show_warning=False):
@@ -799,7 +876,8 @@ class LiushuiApp:
             messagebox.showwarning("提示", "请至少选择一个平台。")
             return
         log("检查登录状态", callback=self._append_log)
-        self._run_async(lambda: self._do_check(selected))
+        tasks = self._collect_tasks(selected)
+        self._run_async(lambda: self._do_check(tasks))
 
     def _action_open_folder(self):
         path = os.path.abspath(DOWNLOAD_DIR)
@@ -835,7 +913,7 @@ class LiushuiApp:
             self._append_log(f"{plat.name}({merchant}) 浏览器窗口已关闭")
         except Exception as e:
             self._append_log(f"打开商户浏览器失败: {e}")
-            self._set_platform_status(plat.key, "error")
+            self.set_platform_status(plat.key, "error")
 
     def _action_help(self):
         """弹出简要使用说明"""
@@ -881,7 +959,7 @@ class LiushuiApp:
                 end_date = self.date_end.get().strip()
 
             def _task():
-                self.progress.config(maximum=100, value=0)
+                self._set_progress(maximum=100, value=0)
                 self._set_status(f"调试 {plat.name}…")
                 steps = []
                 try:
@@ -1254,17 +1332,12 @@ class LiushuiApp:
                   font=("Microsoft YaHei", 10), relief=tk.FLAT, width=8
                   ).pack(side=tk.LEFT, padx=6)
 
-    def _do_login(self, selected):
-        # 统计全部待登录商户
-        tasks = []
-        for key in selected:
-            plat = self.platforms[key]
-            for m in self._get_selected_merchants(key):
-                tasks.append((key, plat, m))
+    def _do_login(self, tasks):
+        # tasks 由主线程 _collect_tasks 备好, 这里只消费(工作线程不读界面)
         self._set_status("正在登录...")
-        self.progress.config(maximum=len(tasks), value=0)
+        self._set_progress(maximum=len(tasks), value=0)
         for i, (key, plat, merchant) in enumerate(tasks):
-            self._set_platform_status(key, "warn")
+            self.set_platform_status(key, "warn")
             # 登录需要人工操作,始终显示浏览器窗口;每个商户独立 profile
             self._ensure_browser(plat, merchant, force_visible=True)
             self._append_log(f">>> 正在打开 {plat.name}({merchant}) 登录页面...")
@@ -1274,8 +1347,8 @@ class LiushuiApp:
                 self._append_log(f"操作提示: {plat.guide}")
                 # 弹窗由主线程弹出;后台线程阻塞等待用户点"确定"(期间浏览器保持打开)
                 self._login_confirm.clear()
-                self.root.after(0, lambda n=plat.name, m=merchant, g=plat.guide:
-                                self._show_login_prompt(n, m, g))
+                self._ui(lambda n=plat.name, m=merchant, g=plat.guide:
+                         self._show_login_prompt(n, m, g))
                 if not self._login_confirm.wait(timeout=600):
                     self._append_log(f"[提示] {plat.name}({merchant}) 等待登录超时,已跳过")
                 else:
@@ -1300,8 +1373,8 @@ class LiushuiApp:
                         self._append_log(f"  [警告] 未能确认登录成功(页面仍在登录/扫码页),请重新执行首次登录")
             except Exception as e:
                 self._append_log(f"打开 {plat.name}({merchant}) 失败: {e}")
-                self._set_platform_status(key, "error")
-            self.progress.config(value=i + 1)
+                self.set_platform_status(key, "error")
+            self._set_progress(value=i + 1)
             # 用户确认后再关闭,进入下一个商户(避免窗口提前被关)
             if self.browser:
                 try:
@@ -1314,20 +1387,14 @@ class LiushuiApp:
         self._append_log("登录流程完成,各商户登录状态已按目录保存")
         self._set_status("登录完成")
 
-    def _do_export(self, selected):
-        date_str = f"{self.date_start.get()} 至 {self.date_end.get()}"
-        start_date = self.date_start.get()
-        end_date = self.date_end.get()
-        # 统计全部待导出商户任务
-        tasks = []
-        for key in selected:
-            plat = self.platforms[key]
-            for m in self._get_selected_merchants(key):
-                tasks.append((key, plat, m))
-        self._execute_export_tasks(tasks, start_date, end_date, label="导出")
+    def _do_export(self, tasks, start_date, end_date, step_debug=False):
+        """tasks/日期/单步开关均由主线程取好再传进来, 本函数跑在工作线程上。"""
+        self._execute_export_tasks(tasks, start_date, end_date, label="导出",
+                                   step_debug=step_debug)
         self._record_job_done("导出", start_date, end_date)
 
-    def _execute_export_tasks(self, tasks, start_date, end_date, label="导出"):
+    def _execute_export_tasks(self, tasks, start_date, end_date, label="导出",
+                              step_debug=False):
         """对 tasks((key,plat,merchant)) 依次执行导出(含失败重试), 日志/状态由这里统一驱动。"""
         if not tasks:
             self._append_log("[提示] 未勾选任何平台商户,请先添加/勾选商户。")
@@ -1345,14 +1412,15 @@ class LiushuiApp:
         retry_interval_s = int(st.get("retry_interval_s", DEFAULT_SETTINGS.get("retry_interval_s", 30)))
         date_str = f"{start_date} 至 {end_date}"
         self._set_status(f"正在导出({date_str})...")
-        self.progress.config(maximum=len(tasks), value=0)
+        self._set_progress(maximum=len(tasks), value=0)
         exported = manual = failed = 0
         for i, (key, plat, merchant) in enumerate(tasks):
             self._append_log(f">>> 正在导出 {plat.name}({merchant}) 流水...")
-            self._set_platform_status(key, "warn")
+            self.set_platform_status(key, "warn")
             try:
                 result = run_with_retry(
-                    lambda k=key, p=plat, m=merchant: self._run_single_export(p, m, start_date, end_date),
+                    lambda k=key, p=plat, m=merchant: self._run_single_export(
+                        p, m, start_date, end_date, step_debug=step_debug),
                     retry_times=retry_times,
                     retry_interval_s=retry_interval_s,
                     log=self._append_log,
@@ -1367,12 +1435,12 @@ class LiushuiApp:
                 manual += 1
             else:
                 failed += 1
-            self.progress.config(value=i + 1)
+            self._set_progress(value=i + 1)
         self._append_log(f"导出流程完成: 成功{exported} / 手动{manual} / 失败{failed}")
         self._set_status(f"导出完成(成功{exported}/手动{manual}/失败{failed})")
         return exported, manual, failed
 
-    def _run_single_export(self, plat, merchant, start_date, end_date):
+    def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
         """单个商户导出(给 run_with_retry 调用): 返回 "success"/"manual"/"failed"。"""
         date_str = f"{start_date} 至 {end_date}"
         self._append_log(f"日期范围: {date_str}")
@@ -1391,11 +1459,11 @@ class LiushuiApp:
                 except Exception:
                     pass
                 evt.set()
-            self.root.after(0, _ask)
+            self._ui(_ask)
             evt.wait(timeout=3600)
         self.browser.set_user_wait_callback(_user_wait_cb)
         # 单步调试模式: 注入回调,平台脚本调用 step_pause() 时弹"继续/中止"
-        if self.step_debug_var.get():
+        if step_debug:
             def _step_cb(name, n=plat.name, m=merchant):
                 # 通过主线程弹窗,后台线程阻塞等待用户选择
                 evt = threading.Event()
@@ -1408,7 +1476,7 @@ class LiushuiApp:
                     except Exception:
                         choice["v"] = True
                     evt.set()
-                self.root.after(0, _ask)
+                self._ui(_ask)
                 evt.wait(timeout=3600)
                 return bool(choice["v"])
             self.browser.set_step_debug(True, _step_cb)
@@ -1454,17 +1522,17 @@ class LiushuiApp:
     def _apply_export_result(self, key, plat, result, date_str):
         """结果状态灯与弹窗(manual 时弹窗)。"""
         if result == "success":
-            self._set_platform_status(key, "ok")
+            self.set_platform_status(key, "ok")
         elif result == "manual":
-            self._set_platform_status(key, "warn")
-            self.root.after(0, lambda n=plat.name, d=date_str, g=plat.guide: messagebox.showinfo(
+            self.set_platform_status(key, "warn")
+            self._ui(lambda n=plat.name, d=date_str, g=plat.guide: messagebox.showinfo(
                 "请手动导出",
                 f"【{n}】自动导出未完全成功\n\n"
                 f"日期范围: {d}\n"
                 f"操作指引: {g}\n\n"
                 f"请在浏览器中手动完成导出,下载完成后点击确定继续。"))
         else:
-            self._set_platform_status(key, "error")
+            self.set_platform_status(key, "error")
 
     def _record_job_done(self, label, start_date, end_date):
         """导出任务收尾: 汇总复制文件、打开文件夹与操作日志。"""
@@ -1481,14 +1549,10 @@ class LiushuiApp:
         except Exception as e:
             self._append_log(f"[汇总] 复制汇总失败: {e}")
 
-    def _do_check(self, selected):
-        tasks = []
-        for key in selected:
-            plat = self.platforms[key]
-            for m in self._get_selected_merchants(key):
-                tasks.append((key, plat, m))
+    def _do_check(self, tasks):
+        """tasks 由主线程 _collect_tasks 备好;本函数跑在工作线程上。"""
         self._set_status("正在检查登录状态...")
-        self.progress.config(maximum=len(tasks), value=0)
+        self._set_progress(maximum=len(tasks), value=0)
         for i, (key, plat, merchant) in enumerate(tasks):
             self._append_log(f"检查 {plat.name}({merchant})...")
             try:
@@ -1497,15 +1561,15 @@ class LiushuiApp:
                 logged_in = plat.check_login(self.browser)
                 if not logged_in:
                     self._append_log(f"  {plat.name}({merchant}): 未登录")
-                    self._set_platform_status(key, "error")
+                    self.set_platform_status(key, "error")
                 else:
                     info = self.browser.get_page_info()
                     self._append_log(f"  {plat.name}({merchant}): 已登录 ({info.get('title', '')[:20]})")
-                    self._set_platform_status(key, "ok")
+                    self.set_platform_status(key, "ok")
             except Exception as e:
                 self._append_log(f"  {plat.name}({merchant}): 检查失败 - {e}")
-                self._set_platform_status(key, "error")
-            self.progress.config(value=i + 1)
+                self.set_platform_status(key, "error")
+            self._set_progress(value=i + 1)
         if not tasks:
             self._append_log("[提示] 未勾选任何平台商户。")
         self._set_status("检查完成")

@@ -113,6 +113,17 @@ def test_should_not_trigger_when_disabled():
     assert s.should_trigger(job, now) is False
 
 
+def test_new_job_fires_at_next_cron_point_not_on_save():
+    """新建任务不能"保存即触发": CronJob.new 以创建时间为起算点。"""
+    now = datetime(2026, 9, 4, 18, 0, 30)
+    s = CronScheduler(app=object())
+    job = CronJob.new(name="每日导出", cron="0 9 * * *",
+                      platforms=["youzan"], merchants=["旗舰店A"], now=now)
+    assert job.job_id and job.enabled is True
+    assert s.should_trigger(job, now) is False
+    assert s.should_trigger(job, _dt("2026-09-05 09:00")) is True
+
+
 def test_check_all_triggers_due_job_and_updates_last_run(tmp_path):
     calls = []
 

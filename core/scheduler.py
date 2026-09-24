@@ -112,6 +112,15 @@ class CronJob:
                    enabled=d.get("enabled", True),
                    last_run=d.get("last_run"))
 
+    @classmethod
+    def new(cls, name, cron, platforms, merchants, now=None):
+        """新建任务专用入口: 把 last_run 记为创建时间, 调度因此从下一个 cron 点起算。
+        直接用 __init__ 建任务时 last_run 为 None, should_trigger 按"从未运行=已到期"
+        处理, 会让刚保存的任务在下一个轮询周期(默认 30s)内立刻执行一次。"""
+        return cls(job_id=uuid.uuid4().hex[:8], name=name, cron=cron,
+                   platforms=platforms, merchants=merchants,
+                   last_run=(now or datetime.now()).isoformat())
+
 
 class TaskStore:
     """scheduled_tasks.json 持久化。"""
@@ -363,8 +372,7 @@ class JobEditDialog(tk.Toplevel):
             messagebox.showwarning("cron 非法", str(e), parent=self)
             return
         if self.job is None:
-            job = CronJob(job_id=uuid.uuid4().hex[:8], name=name, cron=cron,
-                          platforms=plats, merchants=merchants)
+            job = CronJob.new(name=name, cron=cron, platforms=plats, merchants=merchants)
             self.scheduler.store.jobs.append(job)
         else:
             self.job.name, self.job.cron = name, cron

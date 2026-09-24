@@ -212,3 +212,39 @@ def test_platform_without_selectors_skips_check(monkeypatch):
     result, _recs, app = _run(monkeypatch, plat)
     assert result == "success"
     assert not any("自检" in line for line in app.logs)
+
+
+class _DialogApp:
+    """只测 _prompt_manual_leftovers 的消息组织, _ui 就地执行。"""
+
+    _prompt_manual_leftovers = LiushuiApp._prompt_manual_leftovers
+
+    def __init__(self):
+        self.shown = []
+
+    def _ui(self, fn):
+        fn()
+
+
+def test_manual_platforms_summarized_in_one_dialog(monkeypatch):
+    import tkinter.messagebox as mb
+    shown = []
+    monkeypatch.setattr(mb, "showinfo", lambda title, msg: shown.append((title, msg)))
+    app = _DialogApp()
+    app._prompt_manual_leftovers([("微信支付", "商户A", "账单 → 明细 → 导出"),
+                                  ("有赞", "旗舰店B", "数据 → 交易明细 → 导出")],
+                                 "2026-09-01 至 2026-09-02")
+    assert len(shown) == 1                       # 五个要手动也只弹一个窗
+    title, msg = shown[0]
+    assert "2" in title
+    assert "微信支付(商户A)" in msg and "有赞(旗舰店B)" in msg
+    assert "账单 → 明细 → 导出" in msg            # 每个平台的指引都留着
+    assert "2026-09-01 至 2026-09-02" in msg
+
+
+def test_manual_summary_silent_when_nothing_left(monkeypatch):
+    import tkinter.messagebox as mb
+    shown = []
+    monkeypatch.setattr(mb, "showinfo", lambda title, msg: shown.append((title, msg)))
+    _DialogApp()._prompt_manual_leftovers([], "2026-09-01 至 2026-09-02")
+    assert shown == []

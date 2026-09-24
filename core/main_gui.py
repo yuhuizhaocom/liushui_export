@@ -1392,6 +1392,7 @@ class LiushuiApp:
         self._set_status(f"正在导出({date_str})...")
         self._set_progress(maximum=len(tasks), value=0)
         exported = manual = failed = 0
+        manual_items = []
         for i, (key, plat, merchant) in enumerate(tasks):
             self._append_log(f">>> 正在导出 {plat.name}({merchant}) 流水...")
             self.set_platform_status(key, "warn")
@@ -1406,17 +1407,34 @@ class LiushuiApp:
             except Exception as e:
                 result = "failed"
                 self._append_log(f"[失败] {plat.name} 导出异常: {e}")
-            self._apply_export_result(key, plat, result, date_str)
+            self._apply_export_result(key, plat, result)
             if result == "success":
                 exported += 1
             elif result == "manual":
                 manual += 1
+                manual_items.append((plat.name, merchant, plat.guide))
             else:
                 failed += 1
             self._set_progress(value=i + 1)
         self._append_log(f"导出流程完成: 成功{exported} / 手动{manual} / 失败{failed}")
         self._set_status(f"导出完成(成功{exported}/手动{manual}/失败{failed})")
+        self._prompt_manual_leftovers(manual_items, date_str)
         return exported, manual, failed
+
+    def _prompt_manual_leftovers(self, items, date_str):
+        """把需要人工完成的平台一次性列出来。
+
+        以前是每个平台一个 messagebox, 十个商户里五个要手动就会叠五个窗, 用户既看
+        不全也不知道还差几个。
+        """
+        if not items:
+            return
+        lines = [f"日期范围: {date_str}", ""]
+        lines += [f"· {name}({merchant}) —— {guide}" for name, merchant, guide in items]
+        lines += ["", "可在左侧该平台/商户右侧点\"打开\"重新进入页面手动导出,"
+                  "完成后文件同样会归到 downloads 目录。"]
+        text = "\n".join(lines)
+        self._ui(lambda: messagebox.showinfo(f"{len(items)} 个平台需要您手动导出", text))
 
     def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
         """单个商户导出(给 run_with_retry 调用): 返回 "success"/"manual"/"failed"。
@@ -1525,18 +1543,12 @@ class LiushuiApp:
         except Exception as e:
             self._append_log(f"[自检] {plat.name} 自检异常,跳过: {str(e)[:80]}")
 
-    def _apply_export_result(self, key, plat, result, date_str):
-        """结果状态灯与弹窗(manual 时弹窗)。"""
+    def _apply_export_result(self, key, plat, result):
+        """只负责平台状态灯;需要人工完成的平台由 _prompt_manual_leftovers 一次性汇总。"""
         if result == "success":
             self.set_platform_status(key, "ok")
         elif result == "manual":
             self.set_platform_status(key, "warn")
-            self._ui(lambda n=plat.name, d=date_str, g=plat.guide: messagebox.showinfo(
-                "请手动导出",
-                f"【{n}】自动导出未完全成功\n\n"
-                f"日期范围: {d}\n"
-                f"操作指引: {g}\n\n"
-                f"请在浏览器中手动完成导出,下载完成后点击确定继续。"))
         else:
             self.set_platform_status(key, "error")
 

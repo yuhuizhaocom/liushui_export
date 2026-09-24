@@ -43,32 +43,18 @@ class TmallExporter(PlatformBase):
     export_url = "https://myseller.taobao.com/home.htm/whale-accountant/index"
     guide = "财务 → 资金管理 → 聚合结算账户 → 月汇总 → 选月份 → 搜索 → 下载明细"
 
+    DATE_VALUE_SLICE = 7        # "月汇总"页的日期框只吃月份: 2026-09
+    DOWNLOAD_LABEL = "下载明细"
+
+    def open_export_page(self, browser):
+        super().open_export_page(browser)
+        browser.click_text("月汇总")     # 默认停在"日汇总", 账期是按月的
+        browser.sleep(1)
+
+    def trigger_export(self, browser, start_date, end_date):
+        browser.click_text("搜索")       # 这个后台把"查询"叫"搜索"
+        browser.sleep(3)
+
     def export(self, browser, start_date, end_date):
-        # ===== 1. 打开聚合结算账户页面 =====
-        browser.navigate(self.export_url)
-        browser.sleep(3)
-        browser.close_popup()
-
-        # ===== 2. 选择"月汇总"标签页 =====
-        browser.click_text("月汇总")
-        browser.sleep(1)
-
-        # ===== 3. 设置入账日期范围 =====
-        browser.fill_placeholder("开始日期", start_date[:7])  # 月份格式 2026-09
-        browser.fill_placeholder("结束日期", end_date[:7])
-        browser.sleep(1)
-
-        # ===== 4. 点击"搜索" =====
-        browser.click_text("搜索")
-        browser.sleep(3)
-
-        # ===== 5. 点击"下载明细" =====
-        browser.begin_wait_download()
-        browser.click_text("下载明细")
-        browser.sleep(3)
-
-        # ===== 6. 等待下载完成 =====
-        path = browser.wait_download(timeout=60)
-        if path:
-            return "success"
-        return "manual"
+        # 打开聚合结算账户 → 切"月汇总" → 填月份 → 搜索 → 点"下载明细"并等文件
+        return self.run_standard_flow(browser, start_date, end_date)

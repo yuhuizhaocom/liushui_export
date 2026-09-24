@@ -135,6 +135,9 @@ class PlatformBase:
     # 收尾的 begin_wait_download/wait_download 配对与超时也不会再各写一份。
     PAGE_SETTLE_S = 3          # 打开页面后的等待秒数
     DOWNLOAD_TIMEOUT_S = 60    # 等待下载完成的秒数
+    DOWNLOAD_LABEL = "下载"     # 收尾要点的按钮文字(有的平台就是"导出"/"下载全部")
+    DOWNLOAD_SETTLE_S = 3      # 点完那个按钮后给它的落地时间
+    DATE_VALUE_SLICE = 10      # 填进日期框的字符串长度(天猫"月汇总"只要 2026-09)
 
     def open_export_page(self, browser):
         """打开导出页并等页面稳定(close_popup 当前在各平台是空转, 保留调用点)。"""
@@ -144,8 +147,9 @@ class PlatformBase:
 
     def set_date_range(self, browser, start_date, end_date):
         """按 placeholder 填起止日期(多数后台的日期框都叫"开始日期/结束日期")。"""
-        browser.fill_placeholder("开始日期", (start_date or "")[:10])
-        browser.fill_placeholder("结束日期", (end_date or "")[:10])
+        n = self.DATE_VALUE_SLICE
+        browser.fill_placeholder("开始日期", (start_date or "")[:n])
+        browser.fill_placeholder("结束日期", (end_date or "")[:n])
         browser.sleep(1)
 
     def trigger_export(self, browser, start_date, end_date):
@@ -155,11 +159,13 @@ class PlatformBase:
         browser.click_text("导出")
         browser.sleep(5)
 
-    def download_export_file(self, browser, label="下载"):
+    def download_export_file(self, browser, label=None, settle_s=None):
         """开启下载捕获 → 点下载 → 等文件落地。返回 "success"/"manual"。"""
+        label = label or self.DOWNLOAD_LABEL
+        settle_s = self.DOWNLOAD_SETTLE_S if settle_s is None else settle_s
         browser.begin_wait_download()
         browser.click_text(label)
-        browser.sleep(3)
+        browser.sleep(settle_s)
         path = browser.wait_download(timeout=self.DOWNLOAD_TIMEOUT_S)
         return "success" if path else "manual"
 

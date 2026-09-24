@@ -46,32 +46,19 @@ class XiaohongshuExporter(PlatformBase):
     export_url = "https://ark.xiaohongshu.com/app-merchant/third-settle/account"
     guide = "资金 → 账户管理 → 动账明细 → 选日期 → 查询 → 导出"
 
-    def export(self, browser, start_date, end_date):
-        # ===== 1. 打开货款资金页面 =====
-        browser.navigate(self.export_url)
-        browser.sleep(3)
-        browser.close_popup()
+    # 这个后台点"导出"就直接产出文件, 没有单独的"下载"按钮
+    DOWNLOAD_LABEL = "导出"
+    DOWNLOAD_SETTLE_S = 5
 
-        # ===== 2. 确认在"动账明细"标签 =====
-        browser.click_text("动账明细")
+    def open_export_page(self, browser):
+        super().open_export_page(browser)
+        browser.click_text("动账明细")   # 默认停在"账户余额"一类标签
         browser.sleep(1)
 
-        # ===== 3. 设置日期范围 =====
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
-        browser.sleep(1)
-
-        # ===== 4. 点击"查询" =====
+    def trigger_export(self, browser, start_date, end_date):
         browser.click_text("查询")
         browser.sleep(3)
 
-        # ===== 5. 点击"导出" =====
-        browser.begin_wait_download()
-        browser.click_text("导出")
-        browser.sleep(5)
-
-        # ===== 6. 等待下载完成 =====
-        path = browser.wait_download(timeout=60)
-        if path:
-            return "success"
-        return "manual"
+    def export(self, browser, start_date, end_date):
+        # 打开货款资金 → 切动账明细 → 填日期 → 查询 → 点"导出"并等文件
+        return self.run_standard_flow(browser, start_date, end_date)

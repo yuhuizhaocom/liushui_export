@@ -43,28 +43,14 @@ class AlipayExporter(PlatformBase):
     export_url = "https://b.alipay.com/page/mbillprod/account/detail"
     guide = "对账中心 → 资金流水/账单 → 选账户/日期/收支类型 → 查询 → 下载全部"
 
-    def export(self, browser, start_date, end_date):
-        # ===== 1. 打开资金流水页面 =====
-        browser.navigate(self.export_url)
-        browser.sleep(3)
-        browser.close_popup()
+    # 查询之后没有"导出"这一步, 直接点"下载全部"(给 5 秒落地)
+    DOWNLOAD_LABEL = "下载全部"
+    DOWNLOAD_SETTLE_S = 5
 
-        # ===== 2. 设置时间范围 =====
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
-        browser.sleep(1)
-
-        # ===== 3. 点击"查询" =====
+    def trigger_export(self, browser, start_date, end_date):
         browser.click_text("查询")
         browser.sleep(3)
 
-        # ===== 4. 点击"下载全部" =====
-        browser.begin_wait_download()
-        browser.click_text("下载全部")
-        browser.sleep(5)
-
-        # ===== 5. 等待下载完成 =====
-        path = browser.wait_download(timeout=60)
-        if path:
-            return "success"
-        return "manual"
+    def export(self, browser, start_date, end_date):
+        # 打开资金流水页 → 填时间范围 → 查询 → 点"下载全部"并等文件
+        return self.run_standard_flow(browser, start_date, end_date)

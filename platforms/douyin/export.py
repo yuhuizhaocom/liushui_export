@@ -39,41 +39,20 @@ class DouyinExporter(PlatformBase):
     export_url = "https://fxg.jinritemai.com/ffa/fxg-bill/fund-detail-bill"
     guide = "资金 → 账单管理 → 资金账单 → 资金流水明细/日汇总 → 选日期 → 查询 → 生成报表明细 → 历史报表 → 下载"
 
-    def export(self, browser, start_date, end_date):
-        # ===== 1. 打开账单管理页面 =====
-        browser.navigate(self.export_url)
-        browser.sleep(3)
-        browser.close_popup()
-
-        # ===== 2. 确认在"资金流水明细"或"日汇总"标签 =====
-        browser.click_text("日汇总")
+    def open_export_page(self, browser):
+        super().open_export_page(browser)
+        browser.click_text("日汇总")     # 页面默认停在"资金流水明细"
         browser.sleep(1)
 
-        # ===== 3. 设置账单日期范围 =====
-        # 抖音日期选择器格式: 2026-08-21 00:00:00 ~ 2026-08-23 23:59:59
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
-        browser.sleep(1)
-
-        # ===== 4. 点击"查询" =====
+    def trigger_export(self, browser, start_date, end_date):
+        """抖店的报表是异步生成的: 查询 → 生成报表 → 去"历史报表"里才有下载。"""
         browser.click_text("查询")
         browser.sleep(3)
-
-        # ===== 5. 点击"生成报表明细" =====
         browser.click_text("生成报表")
         browser.sleep(10)
-
-        # ===== 6. 去历史报表页面下载 =====
         browser.click_text("历史报表")
         browser.sleep(3)
 
-        # ===== 7. 点击最新一条的"下载"按钮 =====
-        browser.begin_wait_download()
-        browser.click_text("下载")
-        browser.sleep(3)
-
-        # ===== 8. 等待下载完成 =====
-        path = browser.wait_download(timeout=60)
-        if path:
-            return "success"
-        return "manual"
+    def export(self, browser, start_date, end_date):
+        # 打开账单管理 → 切日汇总 → 填日期 → 查询/生成报表/历史报表 → 点下载
+        return self.run_standard_flow(browser, start_date, end_date)

@@ -40,46 +40,20 @@ class YinlianExporter(PlatformBase):
     export_url = "https://up.95516.com/qmpmgm/system/guide"
     guide = "文件管理 → 商户对账单下载 → 选日期 → 查询 → 商户对账单下载 → 选类型/时间 → 导出 → 下载"
 
-    def export(self, browser, start_date, end_date):
-        # ===== 1. 打开商户对账单下载页面 =====
-        browser.navigate(self.export_url)
-        browser.sleep(3)
-        browser.close_popup()
-
-        # ===== 2. 设置账单日期范围 =====
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
-        browser.sleep(1)
-
-        # ===== 3. 点击"查询" =====
+    def trigger_export(self, browser, start_date, end_date):
+        """查询后要再开一层"商户对账单下载"弹窗, 在弹窗里选类型/时间再导出。"""
         browser.click_text("查询")
         browser.sleep(3)
-
-        # ===== 4. 点击"商户对账单下载"按钮(打开导出弹窗) =====
         browser.click_text("商户对账单下载")
         browser.sleep(2)
-
-        # ===== 5. 在弹窗中选择对账单类型和日期 =====
-        # 默认选"所有交易账单"
         browser.click_text("所有交易账单")
         browser.sleep(1)
-
-        # 填写对账单开始/结束时间(与查询日期一致)
         browser.fill_placeholder("对账单开始时间", start_date[:10])
         browser.fill_placeholder("对账单结束时间", end_date[:10])
         browser.sleep(1)
-
-        # ===== 6. 点击"导出"按钮 =====
         browser.click_text("导出")
-        browser.sleep(10)
+        browser.sleep(10)      # 银联生成对账单文件明显偏慢
 
-        # ===== 7. 等待文件生成,在列表中点击"下载" =====
-        browser.begin_wait_download()
-        browser.click_text("下载")
-        browser.sleep(3)
-
-        # ===== 8. 等待下载完成 =====
-        path = browser.wait_download(timeout=60)
-        if path:
-            return "success"
-        return "manual"
+    def export(self, browser, start_date, end_date):
+        # 打开商户对账单下载 → 填日期 → 查询/弹窗导出 → 点列表里的"下载"
+        return self.run_standard_flow(browser, start_date, end_date)

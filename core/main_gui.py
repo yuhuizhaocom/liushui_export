@@ -114,6 +114,7 @@ class LiushuiApp:
         self.merchants = discover_merchants(self.platforms.keys())
         self.selection = self._load_selection()   # 上次勾选状态(重启后恢复)
         self._login_confirm = threading.Event()  # 登录弹窗确认事件(等待用户)
+        self._abort = threading.Event()          # 中止请求: 在任务边界生效(见 _aborted)
 
         self._setup_window()
         # 构建顺序: 右日志 → 左平台 → 中间(设置+历史+操作按钮) → 初始化概览
@@ -432,6 +433,27 @@ class LiushuiApp:
                   font=("Microsoft YaHei", 13, "bold"), relief=tk.FLAT,
                   cursor="hand2").grid(row=0, column=2, rowspan=2,
                                        padx=3, pady=3, sticky="nsew")
+        # 中止: 任务跑着才可点, 见 _run_async/_thread_wrapper 的启停
+        self.abort_btn = tk.Button(bar, text="中止本次任务", command=self._request_abort,
+                                   bg=BG_ERROR, fg="white",
+                                   font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
+                                   state=tk.DISABLED, cursor="hand2")
+        self.abort_btn.grid(row=2, column=2, rowspan=3, padx=3, pady=3, sticky="nsew")
+
+    def _request_abort(self):
+        """请求中止正在跑的任务。
+
+        只在一个商户/平台做完的边界上生效, 不会中途掐断浏览器 —— 那会让下载停在
+        半截文件上, 反而更难收拾。
+        """
+        if not self.running:
+            return
+        self._abort.set()
+        self._append_log("[中止] 已请求中止: 当前商户跑完后就停, 剩余商户不再执行")
+        self._set_status("正在中止...")
+
+    def _aborted(self):
+        return bool(getattr(self, "_abort", None) and self._abort.is_set())
 
     def _set_date(self, start_offset, end_offset=-1):
         self.date_start.set((datetime.now() + timedelta(days=start_offset)).strftime("%Y-%m-%d"))
@@ -751,6 +773,8 @@ class LiushuiApp:
             return False
         for key in self.platform_vars:
             self.set_platform_status(key, "idle")
+        self._abort.clear()
+        self._ui(lambda: self.abort_btn.config(state=tk.NORMAL))
         t = threading.Thread(target=self._thread_wrapper, args=(target,), daemon=True)
         t.start()
         return True
@@ -766,6 +790,7 @@ class LiushuiApp:
                 self.running = False
             self._set_status("就绪")
             self._set_progress(value=0)
+            self._ui(lambda: self.abort_btn.config(state=tk.DISABLED))
             # 任务结束自动关闭浏览器(避免窗口残留/占用,下次任务重新启动)
             if self.browser:
                 try:
@@ -1315,6 +1340,9 @@ class LiushuiApp:
         self._set_status("正在登录...")
         self._set_progress(maximum=len(tasks), value=0)
         for i, (key, plat, merchant) in enumerate(tasks):
+            if self._aborted():
+                self._append_log(f"[中止] 剩余 {len(tasks) - i} 项未登录")
+                break
             self.set_platform_status(key, "warn")
             # 登录需要人工操作,始终显示浏览器窗口;每个商户独立 profile
             self._ensure_browser(plat, merchant, force_visible=True)
@@ -1394,6 +1422,9 @@ class LiushuiApp:
         exported = manual = failed = 0
         manual_items = []
         for i, (key, plat, merchant) in enumerate(tasks):
+            if self._aborted():
+                self._append_log(f"[中止] 剩余 {len(tasks) - i} 项未执行")
+                break
             self._append_log(f">>> 正在导出 {plat.name}({merchant}) 流水...")
             self.set_platform_status(key, "warn")
             try:
@@ -1572,6 +1603,9 @@ class LiushuiApp:
         self._set_status("正在检查登录状态...")
         self._set_progress(maximum=len(tasks), value=0)
         for i, (key, plat, merchant) in enumerate(tasks):
+            if self._aborted():
+                self._append_log(f"[中止] 剩余 {len(tasks) - i} 项未检查")
+                break
             self._append_log(f"检查 {plat.name}({merchant})...")
             try:
                 # 每个商户独立 profile 检查

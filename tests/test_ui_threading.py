@@ -69,6 +69,14 @@ def test_pump_stops_quietly_when_window_destroyed():
     app._pump_ui()                          # 不应抛出
 
 
+class _FakeBtn:
+    def __init__(self):
+        self.states = []
+
+    def config(self, **kwargs):
+        self.states.append(kwargs.get("state"))
+
+
 class _RunApp:
     _run_async = LiushuiApp._run_async
 
@@ -77,11 +85,12 @@ class _RunApp:
         self._task_lock = threading.Lock()
         self.platform_vars = {}
         self.started = []
-        self.warned = 0
         self.thread_ran = threading.Event()
+        self._abort = threading.Event()
+        self.abort_btn = _FakeBtn()
 
     def _ui(self, fn):
-        self.warned += 1                    # busy 分支只投递警告, 不真的弹窗
+        fn()                                # 就地执行, 弹窗在测试里已打桩
 
     def set_platform_status(self, key, status):
         pass
@@ -91,8 +100,11 @@ class _RunApp:
         self.thread_ran.set()
 
 
-def test_concurrent_run_async_admits_exactly_one_task():
+def test_concurrent_run_async_admits_exactly_one_task(monkeypatch):
     """10 条线程同时抢: 只允许 1 条真正开始, 其余必须看到"已有任务在执行"。"""
+    import core.main_gui as mg
+    warnings = []
+    monkeypatch.setattr(mg.messagebox, "showwarning", lambda *a, **k: warnings.append(a))
     app = _RunApp()
     ready = threading.Barrier(10)
 
@@ -107,4 +119,5 @@ def test_concurrent_run_async_admits_exactly_one_task():
         t.join()
     assert app.thread_ran.wait(timeout=2) is True
     assert len(app.started) == 1
-    assert app.warned == 9
+    assert len(warnings) == 9
+    assert app.abort_btn.states == ["normal"]   # 只有拿到执行权的那条会启用中止键

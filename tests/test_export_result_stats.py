@@ -3,6 +3,8 @@
 _run_single_export 跑在工作线程上, 日期与"单步调试"开关由主线程取好后作为参数传入
 (见 _action_export_all), 因此这里可以用假 self 直接调真实方法。
 """
+import threading
+
 import core.main_gui as mg
 from core.main_gui import LiushuiApp
 
@@ -248,3 +250,81 @@ def test_manual_summary_silent_when_nothing_left(monkeypatch):
     monkeypatch.setattr(mb, "showinfo", lambda title, msg: shown.append((title, msg)))
     _DialogApp()._prompt_manual_leftovers([], "2026-09-01 至 2026-09-02")
     assert shown == []
+
+
+class _Plat:
+    def __init__(self, name):
+        self.key = name
+        self.name = name
+        self.manual_intervention = False
+        self.intervention_hint = ""
+        self.guide = ""
+
+
+class _BatchApp:
+    """跑 _execute_export_tasks 的批量循环, 不碰浏览器也不建窗口。"""
+
+    _execute_export_tasks = LiushuiApp._execute_export_tasks
+    _aborted = LiushuiApp._aborted
+    _prompt_manual_leftovers = LiushuiApp._prompt_manual_leftovers
+
+    def __init__(self):
+        self._abort = threading.Event()
+        self.logs = []
+        self.export_calls = 0
+
+    def _append_log(self, line):
+        self.logs.append(line)
+
+    def _ui(self, fn):
+        fn()
+
+    def _set_status(self, text):
+        pass
+
+    def _set_progress(self, **kwargs):
+        pass
+
+    def set_platform_status(self, key, status):
+        pass
+
+    def _apply_export_result(self, key, plat, result):
+        pass
+
+    def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
+        self.export_calls += 1
+        return "success"
+
+
+TASKS = [("a", _Plat("平台A"), "商户A"), ("b", _Plat("平台B"), "商户B")]
+
+
+def test_batch_runs_all_tasks_when_not_aborted():
+    app = _BatchApp()
+    assert app._execute_export_tasks(list(TASKS), "2026-09-01", "2026-09-02") == (2, 0, 0)
+    assert app.export_calls == 2
+
+
+def test_abort_stops_before_next_merchant():
+    """中止只在商户边界生效: 不会把正在跑的那个平台的浏览器掐在半截。"""
+    app = _BatchApp()
+    app._abort.set()
+    assert app._execute_export_tasks(list(TASKS), "2026-09-01", "2026-09-02") == (0, 0, 0)
+    assert app.export_calls == 0
+    assert any("剩余 2 项未执行" in line for line in app.logs)
+
+
+def test_request_abort_is_noop_when_idle():
+    app = _BatchApp()
+    app.running = False
+    LiushuiApp._request_abort(app)
+    assert not app._aborted()
+    assert app.logs == []
+
+
+def test_request_abort_sets_flag_and_logs():
+    app = _BatchApp()
+    app.running = True
+    LiushuiApp._request_abort(app)
+    assert app._aborted()
+    assert any("[中止]" in line for line in app.logs)

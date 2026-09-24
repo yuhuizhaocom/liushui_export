@@ -1441,72 +1441,84 @@ class LiushuiApp:
         return exported, manual, failed
 
     def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
-        """单个商户导出(给 run_with_retry 调用): 返回 "success"/"manual"/"failed"。"""
+        """单个商户导出(给 run_with_retry 调用): 返回 "success"/"manual"/"failed"。
+
+        本函数不允许向外抛异常: run_with_retry 只对返回值 "failed" 重试, 抛出会被
+        调用方的 except 折成"一次失败", 既不计入 stats 也跳过全部重试 —— 而"浏览器
+        起不来"恰是最值得重试的那种失败。
+        """
         date_str = f"{start_date} 至 {end_date}"
         self._append_log(f"日期范围: {date_str}")
-        # 每个商户使用独立浏览器 profile(登录态隔离);下载目录含商户层
-        self._ensure_browser(plat, merchant)
-        self.browser.set_export_context(plat.name, start_date, end_date, merchant)
-        # 注入"等待用户手动操作"回调(如微信扫码确认),生产环境始终启用。
-        # 后台线程调用 browser.wait_user() 时,切到 UI 线程弹窗提醒并阻塞等待用户完成。
-        def _user_wait_cb(prompt, n=plat.name, m=merchant):
-            evt = threading.Event()
-            def _ask():
-                try:
-                    messagebox.showinfo(
-                        "需要您操作确认",
-                        f"平台: {n} / 商户: {m}\n\n{prompt}\n\n请按提示在浏览器中完成操作(如微信扫码),完成后点击\"确定\"继续。")
-                except Exception:
-                    pass
-                evt.set()
-            self._ui(_ask)
-            evt.wait(timeout=3600)
-        self.browser.set_user_wait_callback(_user_wait_cb)
-        # 单步调试模式: 注入回调,平台脚本调用 step_pause() 时弹"继续/中止"
-        if step_debug:
-            def _step_cb(name, n=plat.name, m=merchant):
-                # 通过主线程弹窗,后台线程阻塞等待用户选择
+        result = "failed"
+        err_msg = ""
+        t0 = time.time()   # 启动阶段就抛错时用它, 耗时记为约 0
+        try:
+            # 每个商户使用独立浏览器 profile(登录态隔离);下载目录含商户层
+            self._ensure_browser(plat, merchant)
+            self.browser.set_export_context(plat.name, start_date, end_date, merchant)
+            # 注入"等待用户手动操作"回调(如微信扫码确认),生产环境始终启用。
+            # 后台线程调用 browser.wait_user() 时,切到 UI 线程弹窗提醒并阻塞等待用户完成。
+            def _user_wait_cb(prompt, n=plat.name, m=merchant):
                 evt = threading.Event()
-                choice = {"v": True}
                 def _ask():
                     try:
-                        choice["v"] = messagebox.askyesno(
-                            "单步调试",
-                            f"已到达步骤: {name}\n平台: {n} / 商户: {m}\n\n是=继续 / 否=中止本次导出")
+                        messagebox.showinfo(
+                            "需要您操作确认",
+                            f"平台: {n} / 商户: {m}\n\n{prompt}\n\n请按提示在浏览器中完成操作(如微信扫码),完成后点击\"确定\"继续。")
                     except Exception:
-                        choice["v"] = True
+                        pass
                     evt.set()
                 self._ui(_ask)
                 evt.wait(timeout=3600)
-                return bool(choice["v"])
-            self.browser.set_step_debug(True, _step_cb)
-        else:
-            self.browser.set_step_debug(False)
-        # 登录态预检: 失效则不再执行导出, 避免空等 90s 下载
-        # 预检结果同样要落统计: 原来这里直接 return, 登录失效这一最主要的失败原因
-        # 永远不进 stats.jsonl, 看板成功率因此虚高。
-        t0 = time.time()
-        err_msg = ""
-        login_ok = True
-        try:
-            login_ok = plat.check_login(self.browser)
-        except Exception as e:
-            self._append_log(f"[预检] {plat.name} 登录状态检查异常,继续尝试导出: {str(e)[:80]}")
-        if not login_ok:
-            self._append_log(
-                f"[预检] {plat.name}({merchant}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
-            result = "manual"
-            err_msg = "登录已失效(导出前预检)"
-        else:
+            self.browser.set_user_wait_callback(_user_wait_cb)
+            # 单步调试模式: 注入回调,平台脚本调用 step_pause() 时弹"继续/中止"
+            if step_debug:
+                def _step_cb(name, n=plat.name, m=merchant):
+                    # 通过主线程弹窗,后台线程阻塞等待用户选择
+                    evt = threading.Event()
+                    choice = {"v": True}
+                    def _ask():
+                        try:
+                            choice["v"] = messagebox.askyesno(
+                                "单步调试",
+                                f"已到达步骤: {name}\n平台: {n} / 商户: {m}\n\n是=继续 / 否=中止本次导出")
+                        except Exception:
+                            choice["v"] = True
+                        evt.set()
+                    self._ui(_ask)
+                    evt.wait(timeout=3600)
+                    return bool(choice["v"])
+                self.browser.set_step_debug(True, _step_cb)
+            else:
+                self.browser.set_step_debug(False)
+            # 登录态预检: 失效则不再执行导出, 避免空等 90s 下载
+            # 预检结果同样要落统计: 原来这里直接 return, 登录失效这一最主要的失败原因
+            # 永远不进 stats.jsonl, 看板成功率因此虚高。
+            t0 = time.time()   # 耗时口径与旧实现一致: 不含浏览器启动
+            login_ok = True
             try:
-                result = plat.export(self.browser, start_date, end_date)
+                login_ok = plat.check_login(self.browser)
             except Exception as e:
-                result = "failed"
-                err_msg = str(e)[:200]
-                self._append_log(f"[失败] {plat.name} 导出异常: {err_msg}")
-        # 导出结束关闭单步调试/用户等待回调,避免影响后续任务
-        self.browser.set_step_debug(False)
-        self.browser.set_user_wait_callback(None)
+                self._append_log(f"[预检] {plat.name} 登录状态检查异常,继续尝试导出: {str(e)[:80]}")
+            if not login_ok:
+                self._append_log(
+                    f"[预检] {plat.name}({merchant}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
+                result = "manual"
+                err_msg = "登录已失效(导出前预检)"
+            else:
+                result = plat.export(self.browser, start_date, end_date)
+        except Exception as e:
+            result = "failed"
+            err_msg = str(e)[:200]
+            self._append_log(f"[失败] {plat.name} 导出异常: {err_msg}")
+        finally:
+            # 导出结束关闭单步调试/用户等待回调,避免影响后续任务(浏览器可能没起来)
+            if self.browser:
+                try:
+                    self.browser.set_step_debug(False)
+                    self.browser.set_user_wait_callback(None)
+                except Exception:
+                    pass
         # 落稳定性统计(每次导出一条 JSON,供看板汇总)
         duration = time.time() - t0
         record_stat(plat.name, merchant, start_date, end_date, result,

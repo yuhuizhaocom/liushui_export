@@ -124,3 +124,47 @@ def test_step_debug_comes_from_argument(monkeypatch):
 def test_step_debug_not_installed_by_default(monkeypatch):
     _result, _recs, app = _run(monkeypatch, _FakePlat())
     assert [a for a in app.browser.step_debug_calls if a and a[0] is True] == []
+
+
+def test_browser_startup_failure_returns_failed_and_records(monkeypatch):
+    """回归: 浏览器起不来以前向外抛异常, 既不落 stats, 也让 run_with_retry 拿不到
+    "failed" 返回值, 整批重试被折成一次失败。"""
+    class _NoBrowser(_FakeApp):
+        def _ensure_browser(self, plat=None, merchant="", force_visible=False):
+            raise RuntimeError("Chromium 启动失败")
+
+    recs = []
+    monkeypatch.setattr(mg, "record_stat", lambda *a, **k: recs.append((a, k)))
+    app = _NoBrowser()
+    app.browser = None                       # 浏览器根本没起来, 收尾不得再碰它
+    plat = _FakePlat()
+    result = LiushuiApp._run_single_export(app, plat, "旗舰店A",
+                                           "2026-09-01", "2026-09-02")
+    assert result == "failed"
+    assert plat.export_called == 0
+    assert recs[0][0][4] == "failed"
+    assert "Chromium" in recs[0][1]["error"]
+
+
+def test_startup_failure_goes_through_retry(monkeypatch):
+    class _Flaky(_FakeApp):
+        def __init__(self):
+            super().__init__()
+            self.browser = None
+            self.attempts = 0
+
+        def _ensure_browser(self, plat=None, merchant="", force_visible=False):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise RuntimeError("Chromium 启动失败")
+            self.browser = _FakeBrowser()
+
+    monkeypatch.setattr(mg, "record_stat", lambda *a, **k: None)
+    app, plat = _Flaky(), _FakePlat()
+    result = mg.run_with_retry(
+        lambda: LiushuiApp._run_single_export(app, plat, "旗舰店A",
+                                              "2026-09-01", "2026-09-02"),
+        retry_times=2, retry_interval_s=0, log=lambda m: None)
+    assert result == "success"
+    assert app.attempts == 3
+    assert plat.export_called == 1

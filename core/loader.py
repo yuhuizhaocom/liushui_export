@@ -18,6 +18,25 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from .platform_base import PlatformBase
+from .logger import log
+
+
+def _platform_classes(mod):
+    """取模块内**自己定义**的平台类。
+
+    两条限制都是必要的:
+    - __module__ 必须是本模块, 否则 `from platforms.youzan.export import ...`
+      这种引用会让有赞的类被注册两遍(一遍在 youzan, 一遍在这个文件夹);
+    - 带非空 key 才算平台。
+    """
+    classes = []
+    for attr in dir(mod):
+        obj = getattr(mod, attr)
+        if (isinstance(obj, type) and issubclass(obj, PlatformBase)
+                and obj is not PlatformBase and getattr(obj, "key", "")
+                and getattr(obj, "__module__", "") == mod.__name__):
+            classes.append(obj)
+    return classes
 
 
 def discover_platforms():
@@ -38,15 +57,21 @@ def discover_platforms():
             continue
         try:
             mod = importlib.import_module(f"platforms.{folder}.export")
-            for attr in dir(mod):
-                obj = getattr(mod, attr)
-                if (isinstance(obj, type) and issubclass(obj, PlatformBase)
-                        and obj is not PlatformBase and getattr(obj, "key", "")):
-                    inst = obj()
-                    platforms[inst.key] = inst
-                    break
+            classes = _platform_classes(mod)
+            if not classes:
+                log(f"[未加载] 平台 {folder}: export.py 里没有定义带 key 的 PlatformBase 子类",
+                    "warning")
+            for cls in classes:
+                inst = cls()
+                if inst.key in platforms:
+                    # 以前这里 dir()+break 只留一个, 另一个无声消失
+                    log(f"[跳过] 平台 {folder} 的 key={inst.key} 与已加载的平台重复",
+                        "warning")
+                    continue
+                platforms[inst.key] = inst
         except Exception as e:
-            print(f"[加载失败] 平台 {folder}: {e}")
+            # 走统一日志通道: pythonw 启动时没有控制台, 只 print 的话界面上完全看不到
+            log(f"[加载失败] 平台 {folder}: {e}", "error")
     return platforms
 
 

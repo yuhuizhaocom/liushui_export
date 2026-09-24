@@ -97,7 +97,9 @@ class YouzanExporter(PlatformBase):
             browser.sleep(2)
 
         # ===== 等待下载完成(监控下载文件夹,兼容异步下载) =====
-        path = browser.wait_download(timeout=10)
+        # 原来是 10 秒: 上面已经 sleep(10) 等报表生成, 再只等 10 秒基本判不到
+        # 成功, 表现为"有赞需要手动导出"的误报。改用基类统一的等待时长。
+        path = browser.wait_download(timeout=self.DOWNLOAD_TIMEOUT_S)
         if path:
             return "success"
         return "manual"

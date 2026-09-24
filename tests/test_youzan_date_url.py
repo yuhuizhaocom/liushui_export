@@ -43,3 +43,26 @@ def test_unpadded_date_is_accepted_by_strptime():
     q = _query(YouzanExporter()._build_youzan_url(url, "2026-9-1", "2026-9-3"))
     assert int(q["startTime"][0]) == _ms("2026-09-01 00:00:00")
     assert int(q["endTime"][0]) >= _ms("2026-09-03 23:59:59")
+
+
+class _Recorder:
+    def __init__(self, download_path=None):
+        self.calls = []
+        self.download_path = download_path
+
+    def __getattr__(self, name):
+        def _record(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            if name == "wait_download":
+                return self.download_path
+        return _record
+
+
+def test_download_wait_follows_base_timeout():
+    """回归: 有赞以前只给下载 10 秒, 而它前面已 sleep(10) 等报表生成,
+    几乎必然等不到 → 被记成"需要手动导出"的误报。"""
+    browser = _Recorder(download_path="有赞流水.csv")
+    assert YouzanExporter().export(browser, "2026-09-01", "2026-09-02") == "success"
+    waits = [c for c in browser.calls if c[0] == "wait_download"]
+    assert len(waits) == 1
+    assert waits[0][2]["timeout"] == YouzanExporter.DOWNLOAD_TIMEOUT_S

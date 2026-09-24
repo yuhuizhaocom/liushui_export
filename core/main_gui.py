@@ -621,6 +621,15 @@ class LiushuiApp:
         colors = {"ok": BG_SUCCESS, "warn": BG_WARN, "error": BG_ERROR, "idle": "#bdc3c7"}
         label.config(fg=colors.get(status, "#bdc3c7"))
 
+    def set_platform_status(self, key, status):
+        """保活线程用的公共入口(KeepAliveService._mark 按此名字查找)。
+        状态灯控件只能在 UI 线程改, 这里统一切回主线程;
+        窗口已销毁时 after 会抛 TclError, 属后台服务噪声, 吞掉不影响导出主流程。"""
+        try:
+            self.root.after(0, lambda: self._set_platform_status(key, status))
+        except Exception:
+            pass
+
     def _get_selected(self):
         return [k for k, v in self.platform_vars.items() if v.get()]
 

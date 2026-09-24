@@ -69,3 +69,11 @@ def test_run_once_marks_ok_green():
     svc = KeepAliveService(app, make_browser=factory)
     svc.run_once()
     assert ("youzan", "ok") in app.marks
+
+
+def test_gui_app_matches_keepalive_callback_names():
+    """真 app 必须提供保活要用的公共方法名。
+    FakeApp 只证明保活侧调用对了, 名字对不上时巡检结果会静默丢弃。"""
+    from core.main_gui import LiushuiApp
+    for name in ("set_platform_status", "iter_selected_merchants"):
+        assert callable(getattr(LiushuiApp, name, None)), name

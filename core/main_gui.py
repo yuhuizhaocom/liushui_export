@@ -23,6 +23,7 @@ from core.loader import discover_platforms, reload_platforms
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
 from core.outputs import copy_to_summary_dir, sanitize_name
 from core.keepalive import KeepAliveService
+from core.scheduler import pair_job_targets
 
 
 def discover_merchants(platform_keys):
@@ -43,22 +44,6 @@ def discover_merchants(platform_keys):
     except Exception:
         pass
     return result
-
-
-def pair_job_targets(job_platforms, job_merchants, merchants_by_key):
-    """把定时任务里的平台/商户配成 (平台key, 商户名)。
-
-    任务编辑框中商户是一整条与平台无关的逗号文本, 若直接做平台×商户笛卡尔积,
-    会给不属于该平台的商户拉起一个没有登录态的 profile。这里只保留
-    browser_data/<平台key>/<商户> 下确实建档的配对。
-    """
-    pairs = []
-    for key in job_platforms:
-        known = set(merchants_by_key.get(key, []))
-        for m in job_merchants:
-            if m in known:
-                pairs.append((key, m))
-    return pairs
 
 
 def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):

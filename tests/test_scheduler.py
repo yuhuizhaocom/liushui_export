@@ -3,7 +3,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from core.scheduler import CronExpr, CronJob, TaskStore, CronScheduler
+from core.scheduler import (CronExpr, CronJob, TaskStore, CronScheduler,
+                            pair_job_targets, unmatched_job_merchants)
 
 
 def _dt(s):
@@ -159,16 +160,23 @@ def test_check_all_skips_undue_job(tmp_path):
 
 def test_pair_job_targets_matches_only_own_platform_merchants():
     """任务里的商户是一整条与平台无关的文本, 不能做平台×商户笛卡尔积。"""
-    from core.main_gui import pair_job_targets
     merchants_by_key = {"youzan": ["旗舰店A", "旗舰店B"], "alipay": ["支付宝商户"]}
     pairs = pair_job_targets(["youzan", "alipay"], ["旗舰店A", "支付宝商户"], merchants_by_key)
     assert pairs == [("youzan", "旗舰店A"), ("alipay", "支付宝商户")]
 
 
 def test_pair_job_targets_empty_or_unknown_yields_nothing():
-    from core.main_gui import pair_job_targets
     assert pair_job_targets(["youzan"], [], {"youzan": ["旗舰店A"]}) == []
     assert pair_job_targets(["youzan"], ["旗舰店A"], {}) == []
+
+
+def test_unmatched_job_merchants_lists_what_would_never_run():
+    """保存任务时用来提示"这几个商户填了也不会执行"。"""
+    known = {"youzan": ["旗舰店A"], "alipay": ["支付宝商户"]}
+    assert unmatched_job_merchants(["youzan"], ["旗舰店A", "拼错了的店"], known) == ["拼错了的店"]
+    assert unmatched_job_merchants(["youzan", "alipay"], ["旗舰店A", "支付宝商户"], known) == []
+    # 商户属于别的平台: 对所选平台而言就是不匹配, 应该提示
+    assert unmatched_job_merchants(["youzan"], ["支付宝商户"], known) == ["支付宝商户"]
 
 
 class _App:

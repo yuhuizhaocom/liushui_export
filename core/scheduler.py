@@ -78,6 +78,30 @@ class CronExpr:
         return None
 
 
+def pair_job_targets(job_platforms, job_merchants, merchants_by_key):
+    """把定时任务里的平台/商户配成实际可跑的 (平台key, 商户名) 列表。
+
+    任务编辑框中商户是一整条与平台无关的逗号文本, 若直接做平台×商户笛卡尔积,
+    会给不属于该平台的商户拉起一个没有登录态的 profile。这里只保留
+    browser_data/<平台key>/<商户> 下确实建档的配对。
+    """
+    pairs = []
+    for key in job_platforms:
+        known = set(merchants_by_key.get(key, []))
+        for m in job_merchants:
+            if m in known:
+                pairs.append((key, m))
+    return pairs
+
+
+def unmatched_job_merchants(job_platforms, job_merchants, merchants_by_key):
+    """填了但在所选任何一个平台下都没建档的商户名(用于编辑任务时提示)。"""
+    known_any = set()
+    for key in job_platforms:
+        known_any.update(merchants_by_key.get(key, []))
+    return [m for m in job_merchants if m not in known_any]
+
+
 class CronJob:
     """定时导出任务。"""
 
@@ -260,7 +284,11 @@ class SchedulerDialog(tk.Toplevel):
     def _reload(self):
         self.tree.delete(*self.tree.get_children())
         for job in self.scheduler.store.jobs:
-            objs = f"{len(job.platforms)}平台 × {len(job.merchants)}商户"
+            # 商户是按平台建档的, "3平台 × 2商户" 那种写法会让人以为跑出 6 项,
+            # 实际执行的是 pair_job_targets 配出来的项。
+            known = getattr(self.scheduler.app, "merchants", {}) or {}
+            pairs = pair_job_targets(job.platforms, job.merchants, known)
+            objs = f"{len(pairs)} 项" if pairs else "0 项(商户与平台不匹配)"
             self.tree.insert("", "end", iid=job.job_id,
                              values=(job.name, job.cron, objs, "✓" if job.enabled else "✗"))
 
@@ -354,7 +382,7 @@ class JobEditDialog(tk.Toplevel):
             tk.Checkbutton(pf, text=platforms[key], variable=v,
                            font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         # 商户(逗号分隔文本)
-        tk.Label(self, text="商户(逗号分隔):", font=("Microsoft YaHei", 9)).grid(
+        tk.Label(self, text="商户(逗号分隔,须是所选平台已建档的):", font=("Microsoft YaHei", 9)).grid(
             row=plat_row + 1, column=0, sticky="w", padx=8, pady=6)
         self.merch_var = tk.StringVar(value=",".join(job.merchants) if job else "")
         tk.Entry(self, textvariable=self.merch_var, width=24,
@@ -377,6 +405,20 @@ class JobEditDialog(tk.Toplevel):
             CronExpr(cron)
         except ValueError as e:
             messagebox.showwarning("cron 非法", str(e), parent=self)
+            return
+        # 商户/平台不匹配或没填商户时, 任务到点什么都不会跑; 以前是保存成功、
+        # 无声无息, 现在当场提示(仍可坚持保存)。
+        known = getattr(self.scheduler.app, "merchants", {}) or {}
+        warning = ""
+        if not merchants:
+            warning = "该任务没有填商户, 到点不会导出任何文件。"
+        else:
+            unknown = unmatched_job_merchants(plats, merchants, known)
+            if unknown:
+                warning = ("以下商户在所选平台下没有建档, 这些组合不会执行:\n"
+                           + "、".join(unknown))
+        if warning and not messagebox.askyesno(
+                "定时任务设置可能有误", warning + "\n\n仍要保存吗?", parent=self):
             return
         if self.job is None:
             job = CronJob.new(name=name, cron=cron, platforms=plats, merchants=merchants)

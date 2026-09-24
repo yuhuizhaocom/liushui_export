@@ -123,7 +123,7 @@ liushui_export/
 | `core/main_gui.py`       | **GUI 主程序**。构建三栏界面（左平台/商户选择、中设置+操作历史+按钮、右日志+进度），管理任务线程、浏览器实例生命周期，编排「首次登录 / 导出流水 / 检查状态」三大业务流程，导出后自动汇总文件并打开文件夹。                                                        |
 | `core/browser.py`        | **浏览器管理**。封装 Playwright 持久化上下文（含登录态），提供导航/点击/填表/等待/下载捕获/文件归档/弹窗关闭/日期选择器辅助方法；内置浏览器启动重试与 Chrome 锁文件清理。                                                                  |
 | `core/exporters.py`      | **智能导出器**。`SmartExporter` 通过 placeholder 匹配日期输入框、按文本匹配查询/导出按钮，全自动完成「填日期→查询→导出→等待下载」，失败时截图并返回提示，是平台未自定义 `export()` 时的默认实现。                                             |
-| `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典；`reload_platforms()` 供平台管理改完脚本后免重启生效，需同时清 `sys.modules`、importlib 的 stat 缓存和磁盘上的 `.pyc`。                                                                                                           |
+| `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典：注册模块内**所有**带 key 的 `PlatformBase` 子类（用 `__module__` 排除从别处 import 进来的），key 重复/模块里没有平台类/导入失败都会写日志（导入失败以前只 print，pythonw 下界面完全看不到）。`reload_platforms()` 供平台管理改完脚本后免重启生效，需同时清 `sys.modules`、importlib 的 stat 缓存和磁盘上的 `.pyc`。                                                                                                           |
 | `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。                      |
 | `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；提供 `load_settings()/save_settings()` 读写 `settings.json`。 |
 | `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀），系统日志与用户操作统一记录这个通道。 |
@@ -284,6 +284,9 @@ liushui_export/
 | `trigger_export(browser, start, end)`  | 方法  | 骨架钩子③：点「查询」再点「导出」。需先切标签、或导出后还要去历史报表页的平台覆盖此方法。 |
 | `download_export_file(browser, label)` | 方法  | 骨架钩子④：`begin_wait_download` → 点 `label`（默认「下载」）→ `wait_download(timeout=DOWNLOAD_TIMEOUT_S)`，返回 `"success"`/`"manual"`。 |
 | `run_standard_flow(browser, start, end)` | 方法 | 串起上述四步；平台脚本 `export()` 里 `return self.run_standard_flow(...)` 即采用骨架。**不调用则行为完全不变**（SmartExporter 默认实现保留）。 |
+| `SELECTORS`                             | 类属性 | 关键元素的选择器表（`{"export_btn": "button.export"}` 之类）。声明后导出前会被自动校验；目前只有微信支付声明了它。 |
+| `check_selectors(browser)`              | 方法  | 自检 `SELECTORS` 是否都在页面上，返回 `(ok, missing)`。**由 `_run_single_export` 在导出前自动调用一次**，缺失只写日志不拦截导出；未声明的平台直接跳过。 |
+| `assert_selector(browser, key)`         | 方法  | 步骤级断言：关键元素不在就抛（附失败截图），用于脚本内部确认走到正确页面。 |
 
 ### 5.4 `SmartExporter`（core/exporters.py）— 智能导出器
 
@@ -450,6 +453,7 @@ liushui_export/
   browser.set_export_context(平台名, 起, 止, 商户)        # 下载归档上下文
   注入 wait_user/单步回调（弹窗经 _ui 回主线程执行）
   登录预检 plat.check_login：失效则记 "manual"（error 写明原因），不执行导出
+  自检 plat.check_selectors（声明了 SELECTORS 才跑）：缺元素只写日志，不拦截本次导出
   result = plat.export(browser, start_date, end_date)    # 平台插件逻辑
   └─ 平台自定义实现 / 采用 run_standard_flow 骨架 / PlatformBase 默认走 SmartExporter
        ├─ 填日期 → 点查询 → begin_wait_download → 点导出
@@ -598,8 +602,9 @@ python -m playwright install chromium
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
 | `core/platform_admin.py` | 约 310 行 | 平台管理/脚本调试（骨架生成 + DebugProbe + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
-| `tests/` | 约 700 行 | pytest 测试：日志、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列、有赞日期 |
-| `requirements-dev.txt` | — | 开发依赖（pytest；本仓库 `.venv` 未安装，可用全局 `py -m pytest` 跑） |
+| `tests/` | 11 个文件约 1140 行 | pytest 测试：日志、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列、有赞日期、录制生成器 |
+| `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
+| `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台约 1040 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝），其中快手已改用 `run_standard_flow` 骨架，其余仍为逐步写法 |
 | `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |

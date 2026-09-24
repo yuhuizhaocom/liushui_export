@@ -985,7 +985,8 @@ class LiushuiApp:
 
     def _open_recording_dialog(self):
         """录制 → 脚本骨架弹窗: 列出 recordings/*.jsonl,选中后生成骨架预览/保存。"""
-        from tools.recording_to_script import list_recordings, load_records, render_skeleton
+        from tools.recording_to_script import (list_recordings, load_records,
+                                               render_skeleton, write_skeleton)
 
         win = tk.Toplevel(self.root)
         win.title("录制 → 脚本骨架")
@@ -1080,9 +1081,15 @@ class LiushuiApp:
                 filetypes=[("Python", "*.py"), ("All", "*.*")])
             if not path:
                 return
+            # 默认落点在 platforms/ 下, 很容易选中已手工调过的 export.py
+            if os.path.exists(path) and not messagebox.askyesno(
+                    "覆盖已有文件",
+                    f"目标文件已存在:\n{path}\n\n"
+                    f"覆盖会丢掉里面手工调整过的逻辑。\n"
+                    f"建议先另存为 export_skeleton.py 再对比合并。确定仍要覆盖吗?"):
+                return
             try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(current_code["text"])
+                write_skeleton(path, current_code["text"], force=True)
                 self._set_status(f"骨架已保存到 {path}")
                 self._append_log(f"[录制→脚本] 骨架已保存: {path}")
                 messagebox.showinfo("已保存", f"骨架已保存:\n{path}\n\n需手工调整日期/弹窗等复杂控件。")

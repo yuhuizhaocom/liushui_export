@@ -217,11 +217,18 @@ class CronScheduler:
         return nxt is not None and nxt <= now
 
     def trigger(self, job, now):
-        try:
-            self.app.trigger_job(job)
-        finally:
-            job.last_run = now.isoformat()
-            self.store.save()
+        """执行一个到期任务; 只有 app 真的开始跑了才记 last_run。
+
+        app 正忙时(手动导出还在跑) trigger_job 会返回 False, 以前仍然无条件写
+        last_run —— 这一次定时导出就彻底丢了, 要等下一个点位。不记则下个轮询
+        周期自动再试一次。老 app 没返回值时按"已开始"处理, 行为不变。
+        """
+        started = self.app.trigger_job(job)
+        if started is False:
+            return False
+        job.last_run = now.isoformat()
+        self.store.save()
+        return True
 
 
 class SchedulerDialog(tk.Toplevel):

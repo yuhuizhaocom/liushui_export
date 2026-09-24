@@ -734,9 +734,10 @@ class LiushuiApp:
 
     iter_selected_merchants = __iter_merchants
 
-    def _run_async(self, target):
+    def _run_async(self, target, notify_busy=True):
         """起后台线程跑 target; running 标志由 _task_lock 保护。
-        调用方可能是界面按钮(主线程), 也可能是 CronScheduler 线程。"""
+        返回是否真的开始执行(忙则 False), 调用方据此决定要不要重试。
+        notify_busy=False 用于定时任务: 到点却撞上手动导出时, 不该弹窗打扰用户。"""
         with self._task_lock:
             if self.running:
                 busy = True
@@ -744,13 +745,15 @@ class LiushuiApp:
                 self.running = True
                 busy = False
         if busy:
-            # 定时任务线程也会走到这里, 弹窗只能在主线程做
-            self._ui(lambda: messagebox.showwarning("提示", "已有任务正在执行,请等待完成。"))
-            return
+            if notify_busy:
+                # 定时任务线程也会走到这里, 弹窗只能在主线程做
+                self._ui(lambda: messagebox.showwarning("提示", "已有任务正在执行,请等待完成。"))
+            return False
         for key in self.platform_vars:
             self.set_platform_status(key, "idle")
         t = threading.Thread(target=self._thread_wrapper, args=(target,), daemon=True)
         t.start()
+        return True
 
     def _thread_wrapper(self, target):
         try:
@@ -1227,7 +1230,15 @@ class LiushuiApp:
         end = datetime.now().strftime("%Y-%m-%d")
         start = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         log(f"定时任务触发: {job.name} ({len(tasks)} 项)", callback=self._append_log)
-        self._run_async(lambda: self._execute_export_tasks(tasks, start, end, label=f"定时任务[{job.name}]"))
+        started = self._run_async(
+            lambda: self._execute_export_tasks(tasks, start, end, label=f"定时任务[{job.name}]"),
+            notify_busy=False)
+        if not started:
+            # 到点时手动导出还在跑: 记日志而不是弹窗, 且不写 last_run,
+            # 让调度器下个轮询周期再试一次(见 CronScheduler.trigger)。
+            log(f"[定时] 「{job.name}」到点但有任务正在执行, 稍后自动重试",
+                callback=self._append_log)
+        return started
 
     def _copy_export_outputs(self, start_date, end_date):
         """导出完成后汇总本次日期区间的文件到 downloads/开始_结束_时间戳/ 并返回该目录。

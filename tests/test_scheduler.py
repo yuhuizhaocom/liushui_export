@@ -169,3 +169,51 @@ def test_pair_job_targets_empty_or_unknown_yields_nothing():
     from core.main_gui import pair_job_targets
     assert pair_job_targets(["youzan"], [], {"youzan": ["旗舰店A"]}) == []
     assert pair_job_targets(["youzan"], ["旗舰店A"], {}) == []
+
+
+class _App:
+    def __init__(self, accepted):
+        self.accepted = accepted
+        self.calls = 0
+
+    def trigger_job(self, job):
+        self.calls += 1
+        return self.accepted
+
+
+def _store_with_job(tmp_path):
+    store = TaskStore(str(tmp_path / "t.json"))
+    store.save([_job(name="每日", cron="* * * * *", last_run="2026-09-04T17:00:00")])
+    return store
+
+
+def test_busy_app_does_not_consume_the_scheduled_run(tmp_path):
+    """到点时手动导出还在跑: 不记 last_run, 否则这次定时导出就彻底丢了。"""
+    store = _store_with_job(tmp_path)
+    app = _App(accepted=False)
+    s = CronScheduler(app=app, store=store)
+    now = datetime(2026, 9, 4, 18, 0)
+    s.check_all(now)
+    assert app.calls == 1
+    assert store.load()[0].last_run == "2026-09-04T17:00:00"
+
+
+def test_deferred_job_is_retried_on_next_poll(tmp_path):
+    store = _store_with_job(tmp_path)
+    app = _App(accepted=False)
+    s = CronScheduler(app=app, store=store)
+    now = datetime(2026, 9, 4, 18, 0)
+    s.check_all(now)
+    s.check_all(now + timedelta(seconds=30))
+    assert app.calls == 2                       # 下个轮询周期再试
+    app.accepted = True
+    s.check_all(now + timedelta(minutes=1))
+    assert store.load()[0].last_run == (now + timedelta(minutes=1)).isoformat()
+
+
+def test_started_job_stamps_last_run(tmp_path):
+    store = _store_with_job(tmp_path)
+    s = CronScheduler(app=_App(accepted=True), store=store)
+    now = datetime(2026, 9, 4, 18, 0)
+    s.check_all(now)
+    assert store.load()[0].last_run == now.isoformat()

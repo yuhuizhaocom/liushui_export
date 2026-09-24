@@ -50,11 +50,29 @@ def discover_platforms():
     return platforms
 
 
+def _drop_platform_bytecode():
+    """删除 platforms/ 各脚本目录下 __pycache__ 里的字节码文件。
+
+    .pyc 头里存的是"截断到秒"的源文件 mtime 加上源文件字节数。在平台管理里改完
+    脚本马上 reload 时, 只要这次改动没改变文件长度又落在同一秒内, 旧字节码就会被
+    判定为仍然有效并再次执行 —— sys.modules 已经清干净了也没用, 重新 import 读到的
+    还是旧代码(表现为"保存了但没生效")。
+    """
+    for dirpath, _dirnames, filenames in os.walk(PLATFORMS_DIR):
+        if os.path.basename(dirpath) != "__pycache__":
+            continue
+        for name in filenames:
+            try:
+                os.remove(os.path.join(dirpath, name))
+            except OSError:
+                pass   # 被占用时跳过, 最坏是这一次没生效, 不能让 reload 抛错
+
+
 def reload_platforms():
     """清除平台模块缓存后重新发现。
 
-    通过平台管理修改/新增 export.py 后调用, 使改动无需重启立即生效
-    (importlib 会将模块缓存于 sys.modules, 必须显式删除)。
+    通过平台管理修改/新增 export.py 后调用, 使改动无需重启立即生效。三处缓存都要
+    清: sys.modules 里的模块对象、importlib 的目录/源码 stat 缓存、磁盘上的 .pyc。
     """
     if os.path.isdir(PLATFORMS_DIR):
         for folder in os.listdir(PLATFORMS_DIR):
@@ -64,4 +82,6 @@ def reload_platforms():
             for mod_name in (f"platforms.{folder}", f"platforms.{folder}.export"):
                 if mod_name in sys.modules:
                     del sys.modules[mod_name]
+        _drop_platform_bytecode()
+    importlib.invalidate_caches()
     return discover_platforms()

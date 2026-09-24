@@ -1513,6 +1513,7 @@ class LiushuiApp:
                 result = "manual"
                 err_msg = "登录已失效(导出前预检)"
             else:
+                self._self_check_selectors(plat)
                 result = plat.export(self.browser, start_date, end_date)
         except Exception as e:
             result = "failed"
@@ -1537,6 +1538,21 @@ class LiushuiApp:
         else:
             self._append_log(f"[失败] {plat.name} 导出失败")
         return result
+
+    def _self_check_selectors(self, plat):
+        """导出前校验平台声明的 SELECTORS, 页面改版时在日志里先指出缺哪个元素。
+
+        只报警不拦截: 缺元素不代表这次导出一定失败; 自检自身出错更不能影响导出。
+        没声明 SELECTORS 的平台直接跳过(目前只有微信支付声明了)。
+        """
+        if not getattr(plat, "SELECTORS", None):
+            return
+        try:
+            ok, missing = plat.check_selectors(self.browser)
+            if not ok:
+                self._append_log(f"[自检] {plat.name} 页面缺少关键元素: {', '.join(missing)}")
+        except Exception as e:
+            self._append_log(f"[自检] {plat.name} 自检异常,跳过: {str(e)[:80]}")
 
     def _apply_export_result(self, key, plat, result, date_str):
         """结果状态灯与弹窗(manual 时弹窗)。"""

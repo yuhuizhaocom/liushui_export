@@ -26,7 +26,10 @@ class _FakeBrowser:
 
 
 class _FakeApp:
-    """只挂 _run_single_export 用到的那几个成员, 不创建 Tk 窗口。"""
+    """只挂 _run_single_export 用到的那几个成员, 不创建 Tk 窗口。
+    _self_check_selectors 用真实实现, 自检逻辑本身也被覆盖到。"""
+
+    _self_check_selectors = LiushuiApp._self_check_selectors
 
     def __init__(self):
         self.browser = _FakeBrowser()
@@ -168,3 +171,44 @@ def test_startup_failure_goes_through_retry(monkeypatch):
     assert result == "success"
     assert app.attempts == 3
     assert plat.export_called == 1
+
+
+class _DeclaredPlat(_FakePlat):
+    """声明了 SELECTORS 的平台: 基类自检应当在导出前被跑到。"""
+
+    SELECTORS = {"export_btn": "button.export"}
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.checked = 0
+
+    def check_selectors(self, browser, timeout=2):
+        self.checked += 1
+        return False, ["export_btn"]
+
+
+def test_declared_selectors_checked_before_export(monkeypatch):
+    plat = _DeclaredPlat()
+    _result, recs, app = _run(monkeypatch, plat)
+    assert plat.checked == 1
+    assert any("export_btn" in line for line in app.logs)
+    assert recs[0][0][4] == "success"       # 自检不通过不改变本次结果
+
+
+def test_selector_check_crash_does_not_break_export(monkeypatch):
+    class _Boom(_DeclaredPlat):
+        def check_selectors(self, browser, timeout=2):
+            raise RuntimeError("page 已关闭")
+
+    plat = _Boom()
+    result, _recs, app = _run(monkeypatch, plat)
+    assert result == "success"
+    assert plat.export_called == 1
+    assert any("自检异常" in line for line in app.logs)
+
+
+def test_platform_without_selectors_skips_check(monkeypatch):
+    plat = _FakePlat()                      # 没有 SELECTORS, 也没有 check_selectors
+    result, _recs, app = _run(monkeypatch, plat)
+    assert result == "success"
+    assert not any("自检" in line for line in app.logs)

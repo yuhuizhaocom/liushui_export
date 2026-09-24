@@ -1414,31 +1414,35 @@ class LiushuiApp:
             self.browser.set_step_debug(True, _step_cb)
         else:
             self.browser.set_step_debug(False)
-        # 登录态预检: 失效则直接返回 manual,避免空等 90s 下载并误计入失败统计
-        try:
-            if not plat.check_login(self.browser):
-                self._append_log(
-                    f"[预检] {plat.name}({merchant}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
-                return "manual"
-        except Exception as e:
-            self._append_log(f"[预检] {plat.name} 登录状态检查异常,继续尝试导出: {str(e)[:80]}")
-        # 记录起始时间,用于统计耗时
+        # 登录态预检: 失效则不再执行导出, 避免空等 90s 下载
+        # 预检结果同样要落统计: 原来这里直接 return, 登录失效这一最主要的失败原因
+        # 永远不进 stats.jsonl, 看板成功率因此虚高。
         t0 = time.time()
         err_msg = ""
+        login_ok = True
         try:
-            result = plat.export(self.browser, start_date, end_date)
+            login_ok = plat.check_login(self.browser)
         except Exception as e:
-            result = "failed"
-            err_msg = str(e)[:200]
-            self._append_log(f"[失败] {plat.name} 导出异常: {err_msg}")
-        finally:
-            # 导出结束关闭单步调试/用户等待回调,避免影响后续任务
-            self.browser.set_step_debug(False)
-            self.browser.set_user_wait_callback(None)
+            self._append_log(f"[预检] {plat.name} 登录状态检查异常,继续尝试导出: {str(e)[:80]}")
+        if not login_ok:
+            self._append_log(
+                f"[预检] {plat.name}({merchant}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
+            result = "manual"
+            err_msg = "登录已失效(导出前预检)"
+        else:
+            try:
+                result = plat.export(self.browser, start_date, end_date)
+            except Exception as e:
+                result = "failed"
+                err_msg = str(e)[:200]
+                self._append_log(f"[失败] {plat.name} 导出异常: {err_msg}")
+        # 导出结束关闭单步调试/用户等待回调,避免影响后续任务
+        self.browser.set_step_debug(False)
+        self.browser.set_user_wait_callback(None)
         # 落稳定性统计(每次导出一条 JSON,供看板汇总)
         duration = time.time() - t0
         record_stat(plat.name, merchant, start_date, end_date, result,
-                    duration_s=duration, error=err_msg if result == "failed" else "")
+                    duration_s=duration, error=err_msg)
         if result == "success":
             self._append_log(f"[完成] {plat.name} 流水导出成功({duration:.1f}s)")
         elif result == "manual":

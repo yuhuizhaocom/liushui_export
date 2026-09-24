@@ -21,6 +21,7 @@ from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          SELECTION_FILE, load_settings, save_settings)
 from core.loader import discover_platforms, reload_platforms
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
+from core.outputs import copy_to_summary_dir, sanitize_name
 from core.keepalive import KeepAliveService
 
 
@@ -1229,58 +1230,17 @@ class LiushuiApp:
         self._run_async(lambda: self._execute_export_tasks(tasks, start, end, label=f"定时任务[{job.name}]"))
 
     def _copy_export_outputs(self, start_date, end_date):
-        """导出完成后,把各平台各商户该日期区间的最新文件复制汇总到 downloads/时间文件夹
-        文件夹名: 开始日期_结束日期_导出时间(如 2026-09-01_2026-09-01_20260902_221329)
+        """导出完成后汇总本次日期区间的文件到 downloads/开始_结束_时间戳/ 并返回该目录。
+        具体查找/复制逻辑在 core/outputs.py(纯文件操作, 可脱离界面单测)。
         """
-        if not start_date or not end_date:
-            return None
-        import shutil
-        base = os.path.abspath(DOWNLOAD_DIR)
-        folder = f"{start_date}_{end_date}"
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        ts_dir = os.path.join(base, f"{start_date}_{end_date}_{ts}")
-        copied = 0
-        seen = set()
-        for plat in self.platforms.values():
-            plat_dir = os.path.join(base, plat.name)
-            if not os.path.isdir(plat_dir):
-                continue
-            for sub in os.listdir(plat_dir):
-                sub_dir = os.path.join(plat_dir, sub)
-                if not os.path.isdir(sub_dir):
-                    continue
-                candidates = []
-                if sub == folder:                       # 旧结构: 平台/日期
-                    candidates.append(sub_dir)
-                task_dir = os.path.join(sub_dir, folder)  # 新结构: 平台/商户/日期
-                if os.path.isdir(task_dir):
-                    candidates.append(task_dir)
-                for d in candidates:
-                    for f in os.listdir(d):
-                        fp = os.path.join(d, f)
-                        if not os.path.isfile(fp) or f.endswith((".crdownload", ".tmp", ".part")):
-                            continue
-                        if fp in seen:
-                            continue
-                        seen.add(fp)
-                        try:
-                            os.makedirs(ts_dir, exist_ok=True)
-                            shutil.copy2(fp, os.path.join(ts_dir, f))
-                            copied += 1
-                        except Exception:
-                            pass
-        if copied:
-            self._append_log(f"[汇总] 已将 {copied} 个导出文件复制到: {ts_dir}")
-        else:
-            self._append_log("[汇总] 未找到可汇总的导出文件,跳过打开文件夹")
-            ts_dir = None
-        return ts_dir
+        return copy_to_summary_dir(os.path.abspath(DOWNLOAD_DIR),
+                                   [p.name for p in self.platforms.values()],
+                                   start_date, end_date, log=self._append_log)
 
     @staticmethod
     def _sanitize_name(name):
-        """商户名清理(去除路径非法字符)"""
-        import re
-        return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or "")).strip() or ""
+        """商户名清理(去除路径非法字符);空结果返回空串以便提示用户重填。"""
+        return sanitize_name(name)
 
     def _show_login_prompt(self, plat_name, merchant, guide):
         """主线程显示"请登录"弹窗;用户点确定后唤醒登录线程继续"""

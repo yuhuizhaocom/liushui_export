@@ -45,9 +45,9 @@ class BrowserManager:
 
     @staticmethod
     def _safe_name(name):
-        """清理名称中的路径非法字符,避免目录逃逸"""
-        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or "")).strip()
-        return name or "default"
+        """清理名称中的路径非法字符,避免目录逃逸(profile 目录不能为空, 兜底 default)"""
+        from .outputs import sanitize_name
+        return sanitize_name(name, fallback="default")
 
     def set_browser_profile(self, platform_key="", merchant=""):
         """按 平台key/商户 设置独立浏览器数据目录(登录态隔离)

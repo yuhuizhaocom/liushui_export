@@ -57,6 +57,21 @@ def discover_merchants(platform_keys):
     return result
 
 
+def find_duplicate_merchant(name, existing):
+    """existing 中与 name 视为同一家商户的那个名字, 没有则返回空串。
+
+    按 Windows 目录名的规矩比: 忽略首尾空格、不区分大小写(`Shop` 与 `shop` 建出来是
+    同一个 profile 目录)。
+    """
+    norm = (name or "").strip().casefold()
+    if not norm:
+        return ""
+    for e in existing or ():
+        if (e or "").strip().casefold() == norm:
+            return e
+    return ""
+
+
 def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):
     """通用重试: fn 返回非 "failed" 视为成功; 失败按 retry_times 重试, 间隔递增(×2)。
     retry_times=0 表示失败一次即返回, 不重试。"""
@@ -1106,6 +1121,36 @@ class LiushuiApp:
             f"操作提示: {guide}\n\n登录完成后点击确定继续。")
         self._login_confirm.set()
 
+    def _add_merchant(self, key, raw_name):
+        """建商户 profile 目录并加一行勾选; 返回 (是否成功, 给用户看的一句话)。
+
+        重名以前不拦: `makedirs(exist_ok=True)` 照样建、界面照样塞一行, 而
+        `merchant_vars[key][name]` 是字典 —— 新 Var 把旧的顶掉, 于是屏幕上两行同名,
+        勾上面那一行等于没勾(两个勾选框共用一个 key), 重启后按目录重建才塌成一行。
+        """
+        name = self._sanitize_name(raw_name)
+        if not name:
+            return False, "商户名称不能为空"
+        if not name.strip("._ "):
+            # sanitize 只换掉 <>:"/\ 这类字符, ".." 原样留着 —— 直接拼进 profile 路径
+            # 会指到 browser_data 本身, 把别的商户的登录目录当成自己的 profile
+            return False, "商户名称得有点实际内容(不能只用 . 或 _)"
+        plat = self.platforms[key]
+        known = list(self.merchants.get(key, [])) + list(self.merchant_vars.get(key, {}))
+        dup = find_duplicate_merchant(name, known)
+        if dup:
+            return False, f"商户「{dup}」已经存在, 请勿重复添加"
+        from core.browser import BrowserManager
+        prof = os.path.join(os.path.abspath(BROWSER_DATA_DIR),
+                            BrowserManager._safe_name(plat.key), name)
+        try:
+            os.makedirs(prof, exist_ok=True)
+        except Exception as e:
+            return False, f"创建商户失败: {e}"
+        self.merchants = discover_merchants(self.platforms.keys())
+        self._add_merchant_checkbox(key, name, True)       # 动态加入勾选框
+        return True, f"已添加商户:{plat.name} / {name},请对其执行\"首次登录\""
+
     def _prompt_add_merchant(self, key, plat_name):
         """弹窗输入商户名 → 创建 browser_data/平台key/商户/ 目录并刷新列表"""
         dlg = tk.Toplevel(self.root)
@@ -1123,24 +1168,13 @@ class LiushuiApp:
         entry.focus_set()
 
         def do_add():
-            name = self._sanitize_name(entry.get())
-            if not name:
-                self._append_log("商户名称不能为空")
-                return
-            from core.browser import BrowserManager
-            plat = self.platforms[key]
-            prof = os.path.join(os.path.abspath(BROWSER_DATA_DIR),
-                                BrowserManager._safe_name(plat.key),
-                                name)
-            try:
-                os.makedirs(prof, exist_ok=True)
-            except Exception as e:
-                self._append_log(f"创建商户失败: {e}")
+            ok, msg = self._add_merchant(key, entry.get())
+            self._append_log(msg)
+            if not ok:
+                # 名字留着让用户改, 窗口不关
+                messagebox.showwarning("添加商户", msg, parent=dlg)
                 return
             dlg.destroy()
-            self.merchants = discover_merchants(self.platforms.keys())
-            self._add_merchant_checkbox(key, name, True)   # 动态加入勾选框
-            self._append_log(f"已添加商户:{plat_name} / {name},请对其执行\"首次登录\"")
 
         def on_enter(_):
             do_add()

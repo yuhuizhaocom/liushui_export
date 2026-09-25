@@ -934,9 +934,11 @@ class LiushuiApp:
                     pass
                 self.browser = None
 
-    def _ensure_browser(self, plat=None, merchant="", force_visible=False):
+    def _ensure_browser(self, plat=None, merchant="", force_visible=False,
+                        force_headless=False):
         """启动浏览器,并按 平台/商户 设置独立数据目录(登录态隔离)。
         force_visible=True(登录流程)时始终显示窗口;
+        force_headless=True(登录后的核实)时始终不显示, 免得多弹一个窗口闪一下;
         否则按"显示浏览器窗口"配置决定 headless(显示/后台运行)。
         """
         if self.browser:
@@ -947,11 +949,26 @@ class LiushuiApp:
         from core.browser import BrowserManager
         # 该复选框的 trace 会把值同步进 settings.json, 这里读文件而不是读 BooleanVar:
         # _ensure_browser 跑在任务线程上, 跨线程读 Tk 变量不安全。
-        show = force_visible or bool(load_settings().get("show_browser", True))
+        show = (not force_headless) and (
+            force_visible or bool(load_settings().get("show_browser", True)))
         self.browser = BrowserManager(headless=not show, log_callback=self._append_log)
         if plat is not None:
             self.browser.set_browser_profile(plat.key, merchant)
         self.browser.start()
+
+    def _close_browser(self):
+        """关掉当前浏览器实例并置空。
+
+        `BrowserManager.close()` 内部会先导出登录态再关(Chromium 一退 session cookie
+        就没了), 所以"该存的"都在这里落盘。关失败只说一声, 不影响下一次任务。
+        """
+        if not self.browser:
+            return
+        try:
+            self.browser.close()
+        except Exception as e:
+            self._append_log(f"[提示] 关闭浏览器时出错(不影响下一次任务): {str(e)[:80]}")
+        self.browser = None
 
     def _get_selected_merchants(self, key):
         """返回某平台下已勾选的商户名列表"""
@@ -1407,6 +1424,41 @@ class LiushuiApp:
             time.sleep(self.LOGIN_POLL_S)
         return "timeout", saved
 
+    def _verify_login_after_close(self, plat, key, merchant, saved_seen):
+        """用户关掉登录窗口后, 用同一 profile 后台重开浏览器**真的**核实一次。
+
+        只看 cookie 变化不足以说明登录成功(可能只是页面种了个埋点 cookie), 而"能不能
+        打开后台"这件事只有 `check_login` 说得清 —— 此时用户已经不在那个窗口里了, 导航
+        走不会打扰任何人。核实结果不好只是提示一下, 既不拦用户关窗口, 也不中断后面的
+        商户。返回 True/False, 核实本身跑不动时返回 None。
+        """
+        self._set_status(f"正在核实 {plat.name}({merchant}) 的登录状态...")
+        try:
+            self._ensure_browser(plat, merchant, force_headless=True)
+            logged_in = bool(plat.check_login(self.browser))
+        except Exception as e:
+            self._append_log(f"  [核实] {plat.name}({merchant}) 没能核实"
+                             f"(不影响其它平台): {str(e)[:80]}")
+            self.set_platform_status(key, "warn")
+            return None
+        if logged_in:
+            extra = "" if saved_seen else "(等待期间没看到 cookie 变化, 靠的是 profile 里已有的登录态)"
+            self._append_log(f"  {plat.name}({merchant}) 已核实登录成功{extra}")
+            self.set_platform_status(key, "ok")
+            return True
+        why = ("cookie 有写入但页面仍未登录(可能登录被服务端拒绝或还没走完)"
+               if saved_seen else "关窗口时没检测到任何登录写入")
+        self._append_log(f"  [警告] {plat.name}({merchant}) 核实结果: 未登录 —— {why}")
+        self.set_platform_status(key, "error")
+        # 只是把坏消息说清楚: showwarning 经 _ui 投递到主线程, 后台线程不等它
+        self._ui(lambda n=plat.name, m=merchant, w=why:
+                 messagebox.showwarning(
+                     "这家还没登录成功",
+                     f"{n} · {m}\n\n关闭窗口后核实: 这个账号仍是**未登录**状态。\n"
+                     f"原因: {w}\n\n可以重新点「首次登录」再做一次;"
+                     "关掉本提示不影响其它平台。"))
+        return False
+
     def _add_merchant(self, key, raw_name):
         """建商户 profile 目录并加一行勾选; 返回 (是否成功, 给用户看的一句话)。
 
@@ -1530,6 +1582,7 @@ class LiushuiApp:
         # tasks 由主线程 _collect_tasks 备好, 这里只消费(工作线程不读界面)
         self._set_status("正在登录...")
         self._set_progress(maximum=len(tasks), value=0)
+        results = []   # 每家商户的最终核实结果, 收尾统计用
         for i, (key, plat, merchant) in enumerate(tasks):
             if self._aborted():
                 self._append_log(f"[中止] 剩余 {len(tasks) - i} 项未登录")
@@ -1549,36 +1602,34 @@ class LiushuiApp:
                          self._show_login_hint(n, m, g))
                 outcome, saved = self._wait_login_window_closed(browser)
                 self._ui(self._close_login_hint)
-                if outcome == "closed":
-                    if saved:
-                        self._append_log(f"  {plat.name}({merchant}) 窗口已关闭, 登录态已保存")
-                        self.set_platform_status(key, "ok")
-                    else:
-                        # 没检测到任何 cookie 写入: 多半是窗口令人误关了, 如实说不好听但比假绿灯强
-                        self._append_log(
-                            f"  [警告] {plat.name}({merchant}) 关窗口期间没检测到登录写入,"
-                            "可能并未登录成功, 请用「检查登录状态」核实后重新登录")
-                        self.set_platform_status(key, "warn")
-                elif outcome == "aborted":
+                if outcome == "aborted":
                     self._append_log(f"[中止] {plat.name}({merchant}) 的登录等待已结束")
-                else:
+                    results.append("skip")
+                elif outcome == "timeout":
                     self._append_log(
                         f"[提示] {plat.name}({merchant}) 等待关闭登录窗口超时"
                         f"({self.LOGIN_WAIT_TIMEOUT_S // 60} 分钟), 继续下一个")
+                    results.append("skip")
+                else:
+                    # 窗口是用户关的: 先释放这个 profile, 再后台重开一次做真核实
+                    self._close_browser()
+                    verdict = self._verify_login_after_close(plat, key, merchant, saved)
+                    results.append({True: "ok", False: "bad"}.get(verdict, "unknown"))
             except Exception as e:
                 self._append_log(f"打开 {plat.name}({merchant}) 失败: {e}")
                 self.set_platform_status(key, "error")
+                results.append("bad")
             self._set_progress(value=i + 1)
-            # 用户确认后再关闭,进入下一个商户(避免窗口提前被关)
-            if self.browser:
-                try:
-                    self.browser.close()
-                except Exception:
-                    pass
-                self.browser = None
+            # 核实用的浏览器在这里收掉(BrowserManager.close 会顺手导出登录态)
+            self._close_browser()
         if not tasks:
             self._append_log("[提示] 未勾选任何平台商户,请先添加/勾选商户。")
-        self._append_log("登录流程完成,各商户登录状态已按目录保存")
+        else:
+            self._append_log(
+                f"登录流程完成: 已核实登录成功 {results.count('ok')} / "
+                f"未登录 {results.count('bad')} / 没能核实 {results.count('unknown')} / "
+                f"未完成 {results.count('skip')}"
+                "(登录态按 browser_data/平台/商户/ 目录保存)")
         self._set_status("登录完成")
 
     def _do_export(self, tasks, start_date, end_date, step_debug=False):

@@ -171,6 +171,7 @@ class LiushuiApp:
         self.settings = load_settings()
         self.login_urls = {key: plat.login_url for key, plat in self.platforms.items()}
         self.merchant_vars = {}   # platform_key -> {商户名: BooleanVar}
+        self._merchant_memory = {}   # platform_key -> {商户名: bool} 平台被取消勾选那一刻的样子
         self.merchants = discover_merchants(self.platforms.keys())
         self.selection = self._load_selection()   # 上次勾选状态(重启后恢复)
         self._login_confirm = threading.Event()  # 登录弹窗确认事件(等待用户)
@@ -262,10 +263,8 @@ class LiushuiApp:
         row = tk.Frame(self.list_frame, bg=BG_PANEL)
         row.pack(fill=tk.X, pady=(4, 0))
 
-        def _toggle_platform(k=key, v=var, p=plat):
-            on = v.get()
-            for mv in self.merchant_vars.get(k, {}).values():
-                mv.set(on)
+        def _toggle_platform(k=key):
+            self._on_platform_toggled(k)
 
         cb = tk.Checkbutton(row, variable=var, text=plat.name,
                             bg=BG_PANEL, fg=FG_MAIN,
@@ -606,6 +605,26 @@ class LiushuiApp:
             if mv.get():
                 pv.set(True)
                 break
+
+    def _on_platform_toggled(self, key):
+        """平台勾选框切换: 取消时先记住每家商户的勾选, 再勾回来时按原样恢复。
+
+        以前是"取消=商户全不勾, 勾回=商户全勾", 于是取消勾一下再勾回来, 用户辛苦
+        取消掉的那几家(比如同一平台下已停业的店)又全被勾上了, 下一次导出就把它们也跑了。
+        """
+        pv = self.platform_vars.get(key)
+        if pv is None:
+            return
+        mvs = self.merchant_vars.get(key, {})
+        if not pv.get():
+            self._merchant_memory[key] = {n: bool(mv.get()) for n, mv in mvs.items()}
+            for mv in mvs.values():
+                mv.set(False)
+            return
+        saved = self._merchant_memory.get(key)
+        for n, mv in mvs.items():
+            # 从没记过 = 第一次勾上, 沿用"整平台全选"的旧行为; 记过就按当时的样子还原
+            mv.set(True if saved is None else bool(saved.get(n, True)))
 
     def _load_selection(self):
         """读取上次保存的平台/商户勾选状态,返回 {"platform": {}, "merchant": {}}"""

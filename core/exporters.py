@@ -106,10 +106,31 @@ class SmartExporter:
                     continue
         return False
 
-    def _setup_dialog_handler(self):
-        """自动接受所有JS弹窗"""
+    # 只有这些字样说明弹窗是导出流程里的"确认导出/开始下载", 才可以替用户点确定
+    _AUTO_ACCEPT_WORDS = ("导出", "下载", "生成报表", "账单", "对账单")
+
+    def _handle_dialog(self, dialog):
+        """JS 弹窗: 只有明确与导出/下载相关的才代用户接受, 其余一律取消。
+
+        以前是 page.on("dialog", lambda d: d.accept()) —— 无条件点确定, 商家后台
+        弹"确定要作废这张发票吗"之类破坏性确认时也会被自动接受。
+        处理弹窗本身出问题绝不能拖垮导出流程, 所以整体包在 try 里。
+        """
         try:
-            self.page.on("dialog", lambda d: d.accept())
+            msg = str(getattr(dialog, "message", "") or "")
+            if any(w in msg for w in self._AUTO_ACCEPT_WORDS):
+                self._log(f"  [自动] 接受导出相关弹窗: {msg[:40]}")
+                dialog.accept()
+            else:
+                self._log(f"  [提示] 弹窗内容与导出无关, 已取消(需人工确认): {msg[:40]}")
+                dialog.dismiss()
+        except Exception as e:
+            self._log(f"  [提示] 弹窗处理失败, 交由页面自身处理: {str(e)[:60]}")
+
+    def _setup_dialog_handler(self):
+        """注册弹窗处理(见 _handle_dialog: 只接受导出相关的, 不是全部 accept)。"""
+        try:
+            self.page.on("dialog", self._handle_dialog)
         except Exception:
             pass
 

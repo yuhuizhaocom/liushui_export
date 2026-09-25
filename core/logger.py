@@ -37,14 +37,51 @@ def record_stat(platform, merchant, start_date, end_date, result, duration_s=0, 
         pass
 
 
+def _read_tail_lines(path, max_lines, block=65536):
+    """从文件末尾反向按块读最后 max_lines 行(返回文件顺序)。
+
+    stats.jsonl 是每次导出追加一行、永不清理的; 整文件 readlines 会让"打开看板"
+    随使用时长越来越慢。汇总表仍走全量(它要统计全部历史), 只有明细用这个。
+    """
+    block = 65536
+    out = []
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        leftover = b""
+        while pos > 0 and len(out) < max_lines:
+            step = min(block, pos)
+            pos -= step
+            f.seek(pos)
+            parts = (f.read(step) + leftover).split(b"\n")
+            leftover = parts[0]          # 块首这行可能被切断, 留到下一轮再拼
+            out = [_decode(p) for p in parts[1:] if p.strip()] + out
+            if len(out) > max_lines:
+                out = out[-max_lines:]   # 丢最靠前的(离文件末尾最远)
+        if leftover.strip():
+            out.insert(0, _decode(leftover))
+    return out[-max_lines:]
+
+
+def _decode(raw):
+    """一行字节 → 去掉行尾符的字符串(与 readlines() 的结果保持同一种类型)。"""
+    return raw.decode("utf-8", "replace").strip()
+
+
 def load_stats(limit=None):
     """读取 stats.jsonl 返回记录列表(按时间倒序,默认全部)"""
     records = []
     if not os.path.isfile(STATS_FILE):
         return records
     try:
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        if limit:
+            # 只要最近 limit 条: 尾部反向读, 不把整个文件吃进内存
+            lines = _read_tail_lines(STATS_FILE, limit)
+            lines.reverse()
+        else:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            lines.reverse()   # 倒序(最新在前)
         for line in lines:
             line = line.strip()
             if not line:
@@ -55,7 +92,6 @@ def load_stats(limit=None):
                 pass
     except Exception:
         pass
-    records.reverse()   # 倒序(最新在前)
     if limit:
         records = records[:limit]
     return records

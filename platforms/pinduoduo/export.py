@@ -51,8 +51,13 @@ class PinduoduoExporter(PlatformBase):
 
         # ===== 3. 设置日期范围 =====
         # 拼多多日期选择器: 需要点击日期框,然后输入起止日期
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
+        ok_start = browser.fill_placeholder("开始日期", start_date[:10])
+        ok_end = browser.fill_placeholder("结束日期", end_date[:10])
+        if not (ok_start and ok_end):
+            # 日期没填进去就不能继续: 页面按默认区间出账单, 归档名却是本次请求区间
+            browser._log("[中止] 拼多多: 起止日期未能全部填入日期框, 已停止自动导出",
+                         "warning")
+            return "manual"
         browser.wait_for(timeout=1)
 
         # ===== 4. 点击"查询" =====

@@ -32,6 +32,8 @@ class _Recorder:
                 return self.download_path
             if name == "run_standard_flow":
                 return "success"
+            if name.startswith("fill_"):
+                return True      # 真实 BrowserManager 填成功时返回 True
         return _record
 
 

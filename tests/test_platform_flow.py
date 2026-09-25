@@ -32,15 +32,18 @@ GOLDEN_KUAISHOU = [
 class Recorder:
     """记录每次 browser 调用; wait_download 的返回值可注入。"""
 
-    def __init__(self, download_path="快手货款账单.csv"):
+    def __init__(self, download_path="快手货款账单.csv", fill_ok=True):
         self.calls = []
         self.download_path = download_path
+        self.fill_ok = fill_ok
 
     def __getattr__(self, name):
         def _record(*args, **kwargs):
             self.calls.append((name, args, kwargs))
             if name == "wait_download":
                 return self.download_path
+            if name.startswith("fill_"):
+                return self.fill_ok      # 真实 BrowserManager: 填成功 True / 找不到框 False
         return _record
 
 
@@ -87,3 +90,42 @@ def test_base_export_default_still_uses_smart_exporter(monkeypatch):
 
     assert _NoFlow().export(Recorder(), "2026-09-01", "2026-09-02") == "manual"
     assert calls == [("2026-09-01", "2026-09-02")]
+
+
+class _FillBrowser:
+    """只模拟 fill_placeholder 的成功/失败, 用于验证 set_date_range 的返回契约。"""
+
+    def __init__(self, missing=()):
+        self.missing = tuple(missing)
+        self.calls = []
+
+    def fill_placeholder(self, placeholder, value):
+        self.calls.append((placeholder, value))
+        return placeholder not in self.missing
+
+    def sleep(self, seconds):
+        pass
+
+    def _log(self, msg, level="info"):
+        pass
+
+
+def test_set_date_range_reports_which_boxes_missed():
+    p = KuaishouExporter()
+    assert p.set_date_range(_FillBrowser(), "2026-09-01", "2026-09-02") is True
+    # 只填进一个框 = 另一端仍是页面默认区间, 不能算成功
+    only_start = _FillBrowser(missing=("结束日期",))
+    assert p.set_date_range(only_start, "2026-09-01", "2026-09-02") is False
+    assert [c[0] for c in only_start.calls] == ["开始日期", "结束日期"]  # 两个都尝试过
+
+
+def test_flow_stops_before_clicking_export_when_dates_missing():
+    """回归: 日期没填进去照样往下点, 会得到页面默认区间的账单,
+    而归档文件名用的却是请求区间 —— 从产物上完全看不出错。"""
+    browser = Recorder(fill_ok=False)
+    result = KuaishouExporter().export(browser, "2026-09-01", "2026-09-02")
+    names = [c[0] for c in browser.calls]
+    assert result == "manual"
+    assert names.count("fill_placeholder") == 2       # 两个框都试过
+    assert "click_text" not in names                  # 没去点查询/导出/下载
+    assert "begin_wait_download" not in names

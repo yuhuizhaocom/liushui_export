@@ -146,11 +146,16 @@ class PlatformBase:
         browser.close_popup()
 
     def set_date_range(self, browser, start_date, end_date):
-        """按 placeholder 填起止日期(多数后台的日期框都叫"开始日期/结束日期")。"""
+        """按 placeholder 填起止日期(多数后台的日期框都叫"开始日期/结束日期")。
+
+        返回 False 表示至少有一个框没填进去 —— 调用方必须据此停止: 否则会拿页面
+        默认区间的账单, 却按"请求区间"命名归档, 从文件名上根本看不出错了。
+        """
         n = self.DATE_VALUE_SLICE
-        browser.fill_placeholder("开始日期", (start_date or "")[:n])
-        browser.fill_placeholder("结束日期", (end_date or "")[:n])
+        ok_start = browser.fill_placeholder("开始日期", (start_date or "")[:n])
+        ok_end = browser.fill_placeholder("结束日期", (end_date or "")[:n])
         browser.sleep(1)
+        return bool(ok_start) and bool(ok_end)
 
     def trigger_export(self, browser, start_date, end_date):
         """查询 + 点导出。需要额外步骤(如先切标签、再去历史报表页)的平台覆盖本方法。"""
@@ -170,9 +175,20 @@ class PlatformBase:
         return "success" if path else "manual"
 
     def run_standard_flow(self, browser, start_date, end_date):
-        """标准四步骨架。平台脚本在 export() 里 return 本方法即可。"""
+        """串起上述四步。平台脚本在 export() 里 return 本方法即可。
+
+        日期没全部填进日期框时就中止并返回 manual: 继续点查询/导出会得到页面默认
+        区间的账单, 而归档文件名用的是本次请求的区间, 从产物上完全看不出区间错了。
+        """
         self.open_export_page(browser)
-        self.set_date_range(browser, start_date, end_date)
+        if not self.set_date_range(browser, start_date, end_date):
+            browser._log(f"[中止] {self.name}: 起止日期未能全部填入日期框, "
+                         f"已停止自动导出(继续会得到错区间的账单)。"
+                         f"若反复出现, 说明该平台日期框的 placeholder 不是"
+                         f"\"开始日期/结束日期\", 需要在脚本里覆盖 set_date_range。",
+                         "warning")
+            browser.snapshot("日期未填入")
+            return "manual"
         self.trigger_export(browser, start_date, end_date)
         return self.download_export_file(browser)
 

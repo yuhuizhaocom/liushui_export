@@ -922,11 +922,17 @@ class BrowserManager:
         return self.safe_click(selector, description=selector, retries=retries)
 
     def fill_placeholder(self, placeholder, value, retries=2):
-        """向placeholder匹配的输入框填写内容"""
+        """向placeholder匹配的输入框填写内容; 找不到该输入框返回 False。
+
+        找不到时以前是静默循环到结束 —— 调用方(平台脚本)几乎都会把返回值丢掉,
+        于是"日期根本没填进去"和"填成功了"在日志上长得一样。
+        """
+        found = False
         for attempt in range(1, retries + 1):
             try:
                 loc = self.page.get_by_placeholder(placeholder)
                 if loc.count() > 0:
+                    found = True
                     loc.first.click(timeout=3000)
                     loc.first.fill(value)
                     self._log(f"填写成功: {placeholder} = {value}")
@@ -935,6 +941,9 @@ class BrowserManager:
                 self._log(f"填写失败(第{attempt}次): {placeholder} - {str(e)[:60]}", "warning")
                 if attempt < retries:
                     time.sleep(2)
+        if not found:
+            self._log(f"未找到输入框(placeholder={placeholder}): 页面可能改版或该框名称不同",
+                      "warning")
         return False
 
     def fill_selector(self, selector, value, retries=2):

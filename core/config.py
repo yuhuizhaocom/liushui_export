@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "keepalive_interval_min": 30,    # 保活巡检间隔(分钟)
     "retry_times": 2,                # 失败自动重试次数(0=不重试)
     "retry_interval_s": 30,          # 首次重试间隔秒(后续递增×2)
+    "cleanup_keep_days": 365,        # 老日志/老汇总副本保留天数(0=不清理)
 }
 
 

@@ -30,6 +30,7 @@ from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
 from core.loader import discover_platforms, reload_platforms
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
 from core.outputs import copy_to_summary_dir, sanitize_name
+from core.cleanup import describe as describe_cleanup, run_cleanup
 from core.keepalive import KeepAliveService
 from core.theme import (BG_MAIN, BG_PANEL, BG_BUTTON, BG_BUTTON_HOVER,
                         BG_SUCCESS, BG_WARN, BG_ERROR, BG_LOG, FG_LOG,
@@ -237,6 +238,30 @@ class LiushuiApp:
         from core.scheduler import CronScheduler
         self.scheduler = CronScheduler(self, poll_interval=30)
         self.scheduler.start()
+
+        # 老日志/老汇总副本的清理: 后台跑一次, 不挡界面也不碰账单原件
+        self._start_cleanup()
+
+    def _run_cleanup_once(self):
+        """跑一次清理并把结果写日志。
+
+        清理是家务事: 目录不存在、文件被占用、设置里写了怪东西, 都只配在日志上写一句,
+        绝不能把启动带崩(业务用户看到的是"双击没反应"的话, 锅不该由清理来背)。
+        """
+        default = int(DEFAULT_SETTINGS.get("cleanup_keep_days", 365))
+        try:
+            keep = int(load_settings().get("cleanup_keep_days", default))
+        except Exception:
+            keep = default
+        try:
+            report = run_cleanup(LOG_DIR, DOWNLOAD_DIR, keep)
+        except Exception as e:
+            self._append_log(f"[清理] 自动清理没跑成, 已跳过: {e}")
+            return
+        self._append_log(f"[清理] {describe_cleanup(report, keep)}")
+
+    def _start_cleanup(self):
+        threading.Thread(target=self._run_cleanup_once, daemon=True).start()
 
     def _setup_window(self):
         self.root.title("流水自动导出工具 v1.0")
@@ -516,6 +541,23 @@ class LiushuiApp:
         self.retry_times.insert(0, str(int(self.settings.get("retry_times", 2))))
         self.retry_times.bind("<FocusOut>", lambda *_: self._on_retry_setting())
         self.retry_times.pack(side=tk.LEFT)
+
+        # 日志/汇总副本保留天数(0=不清理)
+        clean_row = tk.Frame(middle, bg=BG_PANEL)
+        clean_row.pack(fill=tk.X, pady=(2, 0))
+        tk.Label(clean_row, text="日志/汇总保留(天,0=不清理):", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.cleanup_days = tk.Spinbox(clean_row, from_=0, to=3650, width=6,
+                                       font=("Microsoft YaHei", 9))
+        self.cleanup_days.delete(0, tk.END)
+        self.cleanup_days.insert(0, str(int(self.settings.get(
+            "cleanup_keep_days", DEFAULT_SETTINGS.get("cleanup_keep_days", 365)))))
+        self.cleanup_days.bind("<FocusOut>", lambda *_: self._on_cleanup_setting())
+        self.cleanup_days.bind("<Return>", lambda *_: self._on_cleanup_setting())
+        self.cleanup_days.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(clean_row, text="(只清很旧的运行日志和汇总副本, 账单原件不动)",
+                 bg=BG_PANEL, fg="#95a5a6", font=("Microsoft YaHei", 8)
+                 ).pack(side=tk.LEFT, padx=(6, 0))
 
         # 单步调试开关(脚本调试时开启,导出流程每步暂停弹"继续/中止")
         debug_row = tk.Frame(middle, bg=BG_PANEL)
@@ -820,6 +862,19 @@ class LiushuiApp:
         retry_times = times if enabled else 0
         save_settings({"retry_times": retry_times})
         self.settings["retry_times"] = retry_times
+
+    def _on_cleanup_setting(self, *_):
+        """保留天数改动即时保存(0=不清理); 读不到合理数字时退回默认值。"""
+        default = int(DEFAULT_SETTINGS.get("cleanup_keep_days", 365))
+        try:
+            days = int(str(self.cleanup_days.get()).strip())
+        except Exception:
+            days = default
+        days = max(0, min(3650, days))
+        save_settings({"cleanup_keep_days": days})
+        self.settings["cleanup_keep_days"] = days
+        self._append_log(f"[设置] 日志/汇总副本保留 {days} 天"
+                         f"{'(已关闭自动清理)' if days == 0 else ''},下次启动时生效")
 
     def __iter_merchants(self):
         """供保活复用的迭代: (platform_key, merchant)。

@@ -434,6 +434,26 @@ class BrowserManager:
 
     # ===== 下载文件完整性/内容校验(避免"下完了但实为空表") =====
 
+    # ===== 下载文件类型识别(按文件头, 不看扩展名) =====
+    # 兜底扫描会把 downloads/ 根目录里"最新出现的文件"当成本次下载认领, 而
+    # screenshot() 恰好把 PNG 写在同一个根目录: 之前一张页面截图会被改名成
+    # 平台_商户_起_止.xlsx 并通过校验上报 success —— 交出去的是截图。
+    _IMAGE_MAGICS = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a",
+                     b"BM", b"RIFF", b"IDNA", b"\x00\x00\x01\x00")
+
+    @staticmethod
+    def _file_head(path, n=12):
+        try:
+            with open(path, "rb") as f:
+                return f.read(n)
+        except Exception:
+            return b""
+
+    @classmethod
+    def _is_image_file(cls, path):
+        head = cls._file_head(path)
+        return any(head.startswith(m) for m in cls._IMAGE_MAGICS)
+
     # 命中即判定为 manual/无效的错误文案
     _VALIDATE_ERROR_KEYWORDS = [
         "登录失效", "重新登录", "请登录", "系统繁忙", "操作失败", "请求超时",
@@ -448,6 +468,14 @@ class BrowserManager:
         try:
             size = os.path.getsize(path)
         except Exception:
+            return False
+        # 0) 文件头是图片 → 一定不是账单; 归档时扩展名已被改成 .xlsx, 只能看内容
+        if self._is_image_file(path):
+            self._log(f"[校验] 文件头是图片, 不可能是对账单: {os.path.basename(path)}", "warning")
+            return False
+        low = (os.path.basename(path) or "").lower()
+        if low.endswith(".xlsx") and not self._file_head(path, 2).startswith(b"PK"):
+            self._log(f"[校验] 扩展名是 .xlsx 但内容不是 zip: {os.path.basename(path)}", "warning")
             return False
         # 1) 内容/文案检查(错误页、登录失效等识别)
         text = self._read_text_content(path)
@@ -541,6 +569,10 @@ class BrowserManager:
                     continue
                 # 跳过下载中间态
                 if f.endswith((".crdownload", ".tmp", ".part", ".download", ".dat")):
+                    continue
+                # 截图和其他图片不是账单: 兜底扫描不能把它们认领成本次下载
+                if self._is_image_file(fp):
+                    self._log(f"[兜底] 忽略图片文件: {f}", "debug")
                     continue
                 try:
                     st = os.stat(fp)

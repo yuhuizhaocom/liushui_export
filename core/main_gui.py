@@ -817,9 +817,15 @@ class LiushuiApp:
         self._append_log(f">>> 正在打开 {plat.name}({merchant}) 浏览器窗口(手工测试用)...")
         self._run_async(lambda: self._open_merchant_browser(plat, merchant))
 
+    MERCHANT_PROBE_TIMEOUT_S = 30 * 60   # 手工测试窗口最长占用时间
+
     def _open_merchant_browser(self, plat, merchant):
         """后台: 用该商户独立 profile 启动浏览器并打开导出页,不执行自动化,等待用户手工操作。
-        线程保持存活直到用户手工关闭浏览器窗口,防止任务结束逻辑自动关闭浏览器。"""
+        线程保持存活直到用户手工关闭浏览器窗口,防止任务结束逻辑自动关闭浏览器。
+
+        这个窗口开着期间 running 一直为 True, 手动导出会被挡、定时任务会被推迟,
+        所以要能中止, 也不能无限期挂着(见 MERCHANT_PROBE_TIMEOUT_S)。
+        """
         try:
             self._ensure_browser(plat, merchant, force_visible=True)
             # 开启操作追踪: 记录页面上的点击/输入元素信息到日志,辅助编写脚本
@@ -827,10 +833,19 @@ class LiushuiApp:
             self.browser.navigate(plat.export_url)
             self.browser.sleep(3)
             self._append_log(f"已打开 {plat.name}({merchant}) 页面(已恢复登录态)")
-            self._append_log("请手工操作测试,日志会记录点击/输入的元素信息;完成后直接关闭浏览器窗口即可")
+            self._append_log("请手工操作测试,日志会记录点击/输入的元素信息;"
+                             "完成后直接关闭浏览器窗口即可(也可点\"中止本次任务\"关掉)")
             # 轮询等待用户手工关闭浏览器窗口(page 关闭后访问会抛异常)
+            deadline = time.time() + self.MERCHANT_PROBE_TIMEOUT_S
             while True:
                 self.browser.sleep(2)
+                if self._aborted():
+                    self._append_log(f"[中止] 关闭 {plat.name}({merchant}) 手工测试窗口")
+                    break
+                if time.time() > deadline:
+                    self._append_log(f"[提示] 手工测试窗口超过 {self.MERCHANT_PROBE_TIMEOUT_S // 60}"
+                                     " 分钟未关闭, 自动关闭以释放任务执行权")
+                    break
                 try:
                     self.browser.page.title()
                 except Exception:

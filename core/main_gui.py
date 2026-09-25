@@ -73,6 +73,22 @@ def find_duplicate_merchant(name, existing):
     return ""
 
 
+def merchant_changes(before, after):
+    """两次扫目录的结果({平台key: [商户名]})对比, 返回 (新增的, 消失的)。
+
+    只比"多了/少了哪些", 顺序变了不算改动。
+    """
+    added, removed = {}, {}
+    for k in set(before or {}) | set(after or {}):
+        old = set((before or {}).get(k, []))
+        new = set((after or {}).get(k, []))
+        if new - old:
+            added[k] = sorted(new - old)
+        if old - new:
+            removed[k] = sorted(old - new)
+    return added, removed
+
+
 def merchant_profile_dir(base_dir, plat_key, merchant):
     """按运行期取 profile 的同一套规矩算出目录: browser_data/<key>/<商户>。"""
     from core.browser import BrowserManager
@@ -207,6 +223,9 @@ class LiushuiApp:
                   font=("Microsoft YaHei", 9), width=6).pack(side=tk.LEFT, padx=(0, 5))
         tk.Button(btn_frame, text="取消全选", command=self._deselect_all,
                   font=("Microsoft YaHei", 9), width=6).pack(side=tk.LEFT)
+        # 商户是扫目录发现的: 手工建/从别的电脑拷进来的目录不刷新就看不见
+        tk.Button(btn_frame, text="刷新商户", command=self._refresh_merchants,
+                  font=("Microsoft YaHei", 9), width=8).pack(side=tk.RIGHT)
 
         list_canvas = tk.Canvas(left, bg=BG_PANEL, highlightthickness=0)
         list_scroll = tk.Scrollbar(left, orient=tk.VERTICAL, command=list_canvas.yview)
@@ -304,6 +323,31 @@ class LiushuiApp:
                 continue
             self._build_platform_row(key, plat)
         self._refresh_summary()
+
+    def _refresh_merchants(self):
+        """重新扫 browser_data 并重建左栏: 外部建的商户目录不用重启也能看见。
+
+        勾选状态按 selection 恢复, 所以刷新不会把用户已勾/已取消的东西洗掉。
+        """
+        before = {k: list(v) for k, v in (self.merchants or {}).items()}
+        try:
+            self._rebuild_platform_list()
+        except Exception as e:
+            self._append_log(f"[刷新商户] 刷新失败: {e}")
+            return
+        added, removed = merchant_changes(before, self.merchants)
+
+        def label(key, names):
+            plat = (self.platforms or {}).get(key)
+            return f"{getattr(plat, 'name', key)}/{', '.join(names)}"
+
+        if not added and not removed:
+            total = sum(len(v) for v in self.merchants.values())
+            self._append_log(f"[刷新商户] 没有变化(当前共 {total} 家商户)")
+            return
+        parts = [f"新增 {label(k, v)}" for k, v in sorted(added.items())]
+        parts += [f"已消失 {label(k, v)}" for k, v in sorted(removed.items())]
+        self._append_log("[刷新商户] " + "; ".join(parts))
 
     def _build_right_panel(self):
         right = tk.Frame(self.root, bg=BG_PANEL, padx=15, pady=15)

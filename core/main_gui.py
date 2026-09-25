@@ -1477,6 +1477,33 @@ def check_dependencies():
     return True
 
 
+def report_crash(summary, detail=""):
+    """崩溃兜底: 先写日志, 再弹窗。返回值 = 日志到底写没写成。
+
+    这里以前写的是 `from logger import log`, 而根目录并没有 logger.py, 这句必然
+    ModuleNotFoundError 又被自己的 except 吞掉 —— 弹窗却告诉用户"详细信息已记录到
+    logs 文件夹"。日志通道坏掉时不能再这么讲。
+    """
+    logged = True
+    try:
+        log(f"程序运行异常: {summary}" + (f"\n{detail}" if detail else ""),
+            level="error")
+    except Exception:
+        logged = False
+    try:
+        err_root = tk.Tk()
+        err_root.withdraw()
+        tail = ("详细信息已记录到 logs 文件夹。" if logged else
+                "日志没能写成功, 请把上面这段信息截图发给维护人员。")
+        messagebox.showerror(
+            "程序出错",
+            f"程序发生异常,请把以下信息反馈给维护人员:\n\n{summary}\n\n{tail}")
+        err_root.destroy()
+    except Exception:
+        pass
+    return logged
+
+
 def main():
     try:
         if not check_dependencies():
@@ -1495,22 +1522,7 @@ def main():
     except Exception as e:
         # 业务用户容错: 任何异常都记录日志并以弹窗展示,不让程序静默崩溃
         import traceback
-        tb = traceback.format_exc()
-        try:
-            from logger import log
-            log(f"程序运行异常: {e}\n{tb}", "error")
-        except Exception:
-            pass
-        try:
-            err_root = tk.Tk()
-            err_root.withdraw()
-            messagebox.showerror(
-                "程序出错",
-                f"程序发生异常,请把以下信息反馈给维护人员:\n\n{e}\n\n"
-                f"详细信息已记录到 logs 文件夹。")
-            err_root.destroy()
-        except Exception:
-            pass
+        report_crash(str(e), traceback.format_exc())
 
 
 if __name__ == "__main__":

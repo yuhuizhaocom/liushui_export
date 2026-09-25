@@ -21,6 +21,10 @@ from playwright.sync_api import sync_playwright
 from .config import BROWSER_DATA_DIR, DOWNLOAD_DIR, ROOT_DIR
 from .logger import log
 
+# 浏览器还没下完时留在磁盘上的中间态后缀。三处扫描(兜底找新文件、目录差集、归位残留)
+# 都必须跳过它们: 半成品改名当成账单交出去, 用户拿到的是截断文件且校验可能还给过。
+PARTIAL_DOWNLOAD_SUFFIXES = (".crdownload", ".tmp", ".part", ".download", ".dat")
+
 class BrowserManager:
     def __init__(self, headless=False, log_callback=None):
         self.headless = headless
@@ -295,24 +299,37 @@ class BrowserManager:
                                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
             pending_dir = os.path.join(root, self.ORPHAN_DIR_NAME)
             moved = []
+            skipped = 0
             for f in os.listdir(root):
                 fp = os.path.join(root, f)
                 if not os.path.isfile(fp):
                     continue
+                # 还在下的半成品留给它自己写完: 搬进 待确认/ 只会多出一个残缺文件,
+                # 而且 shutil.move 一个正在被浏览器写的文件在 Windows 上必然失败
+                if f.endswith(PARTIAL_DOWNLOAD_SUFFIXES):
+                    continue
                 name, ext = os.path.splitext(f)
                 if not orphan_ok.match(name):
                     continue          # 截图/命名文件等不在考虑范围
-                os.makedirs(pending_dir, exist_ok=True)
-                dst = os.path.join(pending_dir, f)
-                if os.path.exists(dst):
-                    dst = os.path.join(pending_dir, "%s_%s%s" % (
-                        name, datetime.now().strftime("%H%M%S"), ext))
-                shutil.move(fp, dst)
-                moved.append(os.path.basename(dst))
+                # 逐个 try: 某一家被占着搬不动, 只跳过它, 不能把整轮归位中止掉
+                try:
+                    os.makedirs(pending_dir, exist_ok=True)
+                    dst = os.path.join(pending_dir, f)
+                    if os.path.exists(dst):
+                        dst = os.path.join(pending_dir, "%s_%s%s" % (
+                            name, datetime.now().strftime("%H%M%S"), ext))
+                    shutil.move(fp, dst)
+                    moved.append(os.path.basename(dst))
+                except Exception as e:
+                    skipped += 1
+                    self._log(f"[归位] {f} 暂时搬不动({str(e)[:40]}), 留到下次", "warning")
             if moved:
                 self._log(f"[归位] {len(moved)} 个无法确认归属的下载文件已移到 "
                           f"{self.ORPHAN_DIR_NAME}/ 目录, 请人工核对: "
                           + ", ".join(moved[:5]), "warning")
+            if skipped:
+                self._log(f"[归位] 另有 {skipped} 个残留文件本轮没搬动, 下次任务再试",
+                          "warning")
         except Exception:
             pass
 
@@ -427,7 +444,7 @@ class BrowserManager:
             # 2) 兜底: 目录中"等待开始后"新出现且已写完整的文件
             for fp in sorted(self._dir_snapshot(root) - known, key=os.path.getmtime, reverse=True):
                 name = os.path.basename(fp)
-                if name.endswith((".crdownload", ".tmp", ".part", ".download", ".dat")):
+                if name.endswith(PARTIAL_DOWNLOAD_SUFFIXES):
                     continue
                 if self._is_stable(fp):
                     final = self._accept_download(fp)
@@ -606,7 +623,7 @@ class BrowserManager:
                 if not os.path.isfile(fp):
                     continue
                 # 跳过下载中间态
-                if f.endswith((".crdownload", ".tmp", ".part", ".download", ".dat")):
+                if f.endswith(PARTIAL_DOWNLOAD_SUFFIXES):
                     continue
                 # 截图和其他图片不是账单: 兜底扫描不能把它们认领成本次下载
                 if self._is_image_file(fp):

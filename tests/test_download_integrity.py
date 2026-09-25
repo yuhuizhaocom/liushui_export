@@ -32,6 +32,40 @@ def _touch(root, name, data, age=3):
     return p
 
 
+def test_partial_download_is_not_carried_over(mgr):
+    """回归: 归位那一路以前不过滤中间态后缀, 于是会去搬浏览器还在写的文件 ——
+    Windows 上必然失败, 而失败会被外层 except 吞掉、整轮归位就此中断,
+    结果连本该搬走的残留文件也留在根目录。"""
+    b, root = mgr
+    partial = _touch(root, UUID + ".crdownload", "半截文件")
+    _touch(root, UUID, "订单号,金额\nOLD,1.00\n")
+    b._carry_over_orphans()
+    assert os.path.isfile(partial), "还在下的半成品不该搬"
+    assert os.path.isfile(os.path.join(root, b.ORPHAN_DIR_NAME, UUID)), "下完的残留要搬走"
+
+
+def test_one_locked_orphan_does_not_abort_the_round(mgr, monkeypatch):
+    b, root = mgr
+    logs = []
+    b.log_callback = logs.append
+    stuck = _touch(root, "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa", "x")
+    movable = _touch(root, "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb", "y")
+    real_move = bm.shutil.move
+
+    def move(src, dst):
+        if src == stuck:
+            raise OSError("另一个程序正在使用此文件")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(bm.shutil, "move", move)
+    b._carry_over_orphans()
+    assert os.path.isfile(stuck)
+    assert os.path.isfile(os.path.join(root, b.ORPHAN_DIR_NAME, os.path.basename(movable))), \
+        "搬不动那一个不能连累其它残留文件"
+    assert any("留到下次" in line for line in logs)
+    assert any("没搬动" in line for line in logs)
+
+
 def test_fallback_ignores_screenshot_but_takes_statement(mgr):
     b, root = mgr
     _touch(root, "查询结果_20260924_181000.png", PNG)

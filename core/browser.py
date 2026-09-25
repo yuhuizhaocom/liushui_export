@@ -18,7 +18,7 @@ if os.path.isdir(PW_BROWSERS_PATH):
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PW_BROWSERS_PATH
 
 from playwright.sync_api import sync_playwright
-from .config import BROWSER_DATA_DIR, DOWNLOAD_DIR, ROOT_DIR
+from .config import BROWSER_DATA_DIR, DOWNLOAD_DIR, ROOT_DIR, write_text_atomic
 from .logger import log
 
 # 浏览器还没下完时留在磁盘上的中间态后缀。三处扫描(兜底找新文件、目录差集、归位残留)
@@ -1245,14 +1245,19 @@ class BrowserManager:
         Playwright persistent context 关闭时不保留 session cookie 的问题。
 
         quiet=True 时不写日志: 首次登录期间是轮询保存的, 每次都写一行会把日志刷满。
+
+        写盘走 write_text_atomic: 这份文件是"整体重写", 而首次登录是**边等边存**、每
+        检测到一次 cookie 写入就重写一遍。直接 open("w") 时若在写入中途崩掉(或被两路
+        同时写), 留下的就是半截 JSON —— 下次启动 `_restore_login_state` 读不回来,
+        表现为"明明存过登录态却又没登录"。
         """
         try:
             if not self.context:
                 return False
             state = self.context.storage_state()
             path = os.path.join(self._profile_dir, self.LOGIN_STATE_FILE)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False)
+            # 先序列化再落盘: 序列化失败时磁盘上那份旧的完全不动
+            write_text_atomic(path, json.dumps(state, ensure_ascii=False))
             if not quiet:
                 self._log(f"登录态已保存({len(state.get('cookies', []))} 个 cookie)")
             return True

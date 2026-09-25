@@ -12,6 +12,7 @@ import os
 
 import pytest
 
+import core.browser as bm
 from core.browser import BrowserManager
 
 
@@ -117,6 +118,32 @@ def test_no_context_is_a_quiet_noop(mgr):
     mgr.close()                    # 不抛错
     assert mgr.playwright.stopped is True
     assert not os.path.exists(_state_file(mgr))
+
+
+# ===== 登录态落盘必须是原子的 =====
+
+def test_save_leaves_no_temp_file_behind(mgr):
+    mgr.context = _Ctx(cookies=[{"name": "k", "value": "v", "expires": 1}])
+    assert mgr.save_login_state() is True
+    assert os.listdir(mgr._profile_dir) == [BrowserManager.LOGIN_STATE_FILE]
+
+
+def test_a_failed_save_keeps_the_previous_state_intact(mgr, monkeypatch):
+    """回归: 以前是 `open(path,"w")` 先把文件截断再 json.dump —— 序列化一失败,
+    磁盘上那份好登录态就成了空文件, 下次启动恢复不出登录(而首次登录是边等边存,
+    这份文件被重写的次数比想象多)。现在先序列化、再原子替换。"""
+    _write_state(mgr, [{"name": "session", "value": "abc", "expires": -1}])
+    mgr.context = _Ctx(cookies=[{"name": "x", "value": "y", "expires": 1}])
+
+    def boom(*a, **k):
+        raise TypeError("这份 state 里有个不能序列化的值")
+
+    monkeypatch.setattr(bm.json, "dumps", boom)
+    assert mgr.save_login_state() is False
+    assert any("保存登录态失败" in msg for _level, msg in mgr.logs)
+    saved = json.load(open(_state_file(mgr), encoding="utf-8"))
+    assert saved["cookies"][0]["name"] == "session", "旧的登录态必须原样还在"
+    assert os.listdir(mgr._profile_dir) == [BrowserManager.LOGIN_STATE_FILE], "不留半截临时文件"
 
 
 def test_user_closed_window_does_not_make_close_blow_up(mgr):

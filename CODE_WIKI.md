@@ -176,9 +176,11 @@ liushui_export/
 
 | 方法                                 | 说明                                                                                                                                                                                                                    |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_do_login(tasks)`                   | **首次登录**：遍历主线程传入的 `(key, plat, merchant)` 列表，强制可见窗口启动独立 profile 浏览器 → `plat.login(browser)` 打开登录页 → 弹一个**不挡事的提示窗**（`_show_login_hint`）→ 后台线程等**用户自己关掉浏览器窗口**（`_wait_login_window_closed`，最长 30 分钟，可被「中止」打断）→ `_close_browser()` 释放 profile → `_verify_login_after_close` 后台核实 → 进入下一个。**界面上的「确定」按钮已经去掉**：以前用户常在短信/扫码还没完成时就点确定，程序于是存下一份没登录的 profile。收尾日志：`已核实登录成功 X / 未登录 Y / 没能核实 Z / 未完成 N`。 |
+| `_do_login(tasks)`                   | **首次登录**：逐家商户跑 `_login_one_round`（可见浏览器 → 用户**自己关掉窗口**表示登完 → 释放 profile → 后台核实）。未登录时 `_ask_login_retry` 让用户选「回去继续登录 / 放弃这家」，最多 `LOGIN_RETRY_LIMIT` 轮。**界面上的「确定」按钮已经去掉**：以前用户常在短信/扫码还没完成时就点确定，程序据此存下一份没登录的 profile。收尾日志：`已核实登录成功 X / 未登录 Y / 没能核实 Z / 未完成 N`。 |
 | `_wait_login_window_closed(browser)` | 轮询 `browser.window_closed()`；期间只要 `login_signature()`（cookie 条数+内容指纹，不触发导航）变了就 `save_login_state(quiet=True)` 当场导出。原因：persistent context 在 Chromium 退出时不保留 session cookie，等窗口关完再存就来不及了。**刻意不调用 `plat.check_login`** —— 它会把页面导航到导出地址，用户正扫码会被拽走。返回 `("closed"/"aborted"/"timeout", 是否保存过)`。 |
-| `_verify_login_after_close(plat, key, merchant, saved_seen)` | 关窗口后先释放 profile，再 `force_headless=True` 后台重开浏览器跑 `plat.check_login`（此时导航不打扰任何人）。已登录→绿灯；未登录→红灯 + `showwarning`（经 `_ui` 投递，后台线程不等它），文案区分"没检测到登录写入"与"cookie 有写入但页面仍未登录"，并写明不影响其它平台；核实自身异常→橙灯 + "没能核实"，**不冒充未登录**。中止/超时不跑核实。**顺序不能颠倒**：Chromium 的 profile 同时只能被一个进程占用。 |
+| `_login_one_round(plat, key, merchant)` | 一轮完整登录：可见浏览器 → `plat.login` → 提示窗 → `_wait_login_window_closed` → `_close_browser()` 释放 profile → `_verify_login_after_close`；`finally` 再收一次浏览器。返回 `True/False/None/"skip"`（skip = 中止/超时/登录页没打开，这一轮不核实）。重试就是再跑一轮。 |
+| `_verify_login_after_close(plat, key, merchant, saved_seen)` | 用 `force_headless=True` 重开浏览器跑 `plat.check_login`（此时导航不打扰任何人）。已登录→绿灯 `True`；未登录→红灯 `False` 并把原因存进 `_last_verify_reason`；核实异常→橙灯 + "没能核实" `None`，**不冒充未登录**。**只报结果，要不要再给一次机会由 `_do_login` 问用户。** |
+| `_ask_login_retry(plat, merchant, attempt)` | 未登录时 `askretrycancel` 二选一：「重试」=重开这家的登录页继续登，「取消」=先放弃、稍后单独重登；文案带上 `_last_verify_reason`。为什么交给用户：微信支付那类同域平台靠页面文案判断，存在"其实登上了但被判未登录"的可能。弹窗起不来/一小时无人应答都按放弃返回 False，绝不把整批卡住。每家最多 `LOGIN_RETRY_LIMIT`（3）轮，到上限不再问。 |
 | `_close_browser()`                   | 统一关闭点：`self.browser.close()` 后置 None，异常只写一句日志。因为 `BrowserManager.close()` 内部先导出登录态，导出收尾/保活/手工测试窗口/退出这些路径都会落盘。 |
 | `_do_export(tasks, start, end, step_debug)` | **导出流水**：转交 `_execute_export_tasks`；结束后调用 `_copy_export_outputs` 汇总并自动打开文件夹。任务列表/日期/单步开关均由主线程取好传入，工作线程不回读界面。 |
 | `_do_check(tasks)`                   | **检查登录态**：逐个商户启动浏览器并调用 `plat.check_login(browser)`（多数平台靠 `export_url` 是否被重定向到登录路径判断），结果反映到平台状态灯。                                                                                                                    |
@@ -479,10 +481,16 @@ liushui_export/
       browser.login_signature() 变了? → save_login_state(quiet=True) 当场导出登录态
   销毁提示窗；`_close_browser()` 释放这个 profile（close 内部顺手导出登录态）
   _verify_login_after_close: force_headless=True 重开浏览器 → plat.check_login 真核实
-      已登录 → 绿灯；未登录 → 红灯 + showwarning（不拦关窗口、不影响其它平台）
-      核实异常 → 橙灯 + "没能核实"（不冒充未登录）
+      已登录 → 绿灯 → 进下一个商户
+      未登录 → 红灯 + 「重试 / 取消」二选一(_ask_login_retry)
+                 重试 → 重新走一轮(最多 LOGIN_RETRY_LIMIT=3 次, 到上限不再问)
+                 取消 → 记"未登录", 进下一个商户
+      核实异常 → 橙灯 + "没能核实"（不冒充未登录、也不弹窗）
   进入下一个商户；收尾汇总 "已核实登录成功 / 未登录 / 没能核实 / 未完成"
 ```
+
+> 一整个"开浏览器→等关窗→核实"打包在 `_login_one_round` 里，所以"重试"就是再跑一轮，
+> 进度条只在商户边界推进。中止或 30 分钟超时的那一轮不核实、也不问。
 
 > 核实必须排在 `_close_browser()` 之后：Chromium 的 profile 目录同时只能被一个进程占用，
 > 登录用的窗口不先释放，后台这次重开就起不来。
@@ -655,7 +663,7 @@ python -m playwright install chromium
 | `core/cleanup.py` | 约 120 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/platform_admin.py` | 约 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
-| `tests/` | 33 个文件约 4450 行 | pytest 测试（312 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫） |
+| `tests/` | 33 个文件约 4600 行 | pytest 测试（322 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |

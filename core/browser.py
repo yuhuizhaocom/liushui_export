@@ -496,23 +496,29 @@ class BrowserManager:
         if low.endswith(".xlsx") and not self._file_head(path, 2).startswith(b"PK"):
             self._log(f"[校验] 扩展名是 .xlsx 但内容不是 zip: {os.path.basename(path)}", "warning")
             return False
-        # 1) 内容/文案检查(错误页、登录失效等识别)
-        text = self._read_text_content(path)
-        hit = self._match_error_keyword(text)
-        if hit:
-            self._log(f"[校验] 内容命中错误文案[{hit}]: {os.path.basename(path)}", "warning")
-            return False
-        # 2) 表格行数检查
+        # 1) 先数数据行: 能读出数据行的表格就是真账单, 不再拿文案判生死。
+        #    以前是"整个文件文本 子串匹配 错误文案"优先 —— 账单里退款备注写一句
+        #    "客户申请操作失败"或"请登录后台查看明细", 真账单就会被判无效并被
+        #    _accept_download 删掉, 用户看到的是"下载成功但文件没了"。
         rows = self._count_rows(path)
+        if rows is not None and rows > 0:
+            self._log(f"[校验] 文件通过完整性校验({size}B, {rows} 个数据行)")
+            return True
+        # 2) 读不出数据行时才用错误文案区分"空表"和"错误页/未登录页"
+        hit = self._match_error_keyword(self._read_text_content(path))
+        if hit:
+            self._log(f"[校验] 无有效数据行且内容命中错误文案[{hit}]: "
+                      f"{os.path.basename(path)}", "warning")
+            return False
         if size < 1024:
             # 极小文件: 仅当能解析出有效数据行才算正常(空表/错误页无数据)
-            if rows is None or rows == 0:
-                self._log(f"[校验] 文件过小({size}B)且无有效数据: {os.path.basename(path)}", "warning")
-                return False
-        elif rows is not None and rows == 0:
+            self._log(f"[校验] 文件过小({size}B)且无有效数据: {os.path.basename(path)}", "warning")
+            return False
+        if rows == 0:
             self._log(f"[校验] 表格无有效数据行: {os.path.basename(path)}", "warning")
             return False
-        self._log(f"[校验] 文件通过完整性校验({size}B)")
+        # rows is None: 这种格式读不出行(如老 .xls), 维持原有的宽松判定
+        self._log(f"[校验] 文件通过完整性校验({size}B, 无法解析行数)")
         return True
 
     def _read_text_content(self, path):

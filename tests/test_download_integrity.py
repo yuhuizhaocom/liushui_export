@@ -72,6 +72,52 @@ def test_missing_file_is_not_an_image(tmp_path):
     assert BrowserManager._is_image_file(str(tmp_path / "不存在.png")) is False
 
 
+CSV_WITH_KEYWORD_CELLS = (
+    "订单号,交易状态,金额,备注\n"
+    "A001,支付成功,120.00,\n"
+    "A002,退款,-30.00,客户申请操作失败,已线下处理\n"
+    "A003,支付成功,88.00,请登录后台查看明细\n")
+
+
+def test_valid_statement_with_error_words_in_cells_passes(mgr):
+    """回归: 备注/状态列里出现"操作失败""请登录"是真账单, 以前整文件子串命中就把
+    文件判无效并删除, 用户看到"下载成功但文件没了"。"""
+    b, root = mgr
+    p = _touch(root, "有赞_流水.csv", CSV_WITH_KEYWORD_CELLS)
+    assert b._validate_download(p) is True
+
+
+def test_html_error_page_still_rejected(mgr):
+    b, root = mgr
+    p = _touch(root, "错误页.csv", "<html><body>系统繁忙,请稍后重试</body></html>" * 40)
+    assert b._validate_download(p) is False
+
+
+def test_header_only_table_still_rejected(mgr):
+    b, root = mgr
+    assert b._validate_download(_touch(root, "空表.csv", "订单号,金额\n")) is False
+
+
+def test_xlsx_with_rows_and_keyword_cells_passes(mgr):
+    import zipfile
+    b, root = mgr
+    p = os.path.join(root, "快手_账单.xlsx")
+    rows = "".join('<row r="%d"><c t="inlineStr"><is><t>操作失败</t></is></c></row>'
+                   for i in range(1, 40))
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("xl/worksheets/sheet1.xml", "<sheetData>%s</sheetData>" % rows)
+        zf.writestr("pad", "x" * 2000)
+    assert b._validate_download(p) is True
+
+
+def test_legacy_xls_still_accepted_when_rows_unparseable(mgr):
+    """.xls 读不出行数时维持原有的宽松判定(不能因为新增顺序而开始误拒)。"""
+    b, root = mgr
+    p = _touch(root, "银联对账单.xls", b"\xd0\xcf\x11\xe0" + b"x" * 2000)
+    assert b._count_rows(p) is None
+    assert b._validate_download(p) is True
+
+
 UUID = "3f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
 
 

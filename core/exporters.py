@@ -144,8 +144,15 @@ class SmartExporter:
 
         # 1. 填入日期范围
         filled = self._fill_dates(start_date, end_date)
-        if filled > 0:
+        if filled == 2:
             self._log(f"  [自动] 已填入日期范围: {start_date} ~ {end_date}")
+        elif filled == 1:
+            # 只填进一个框意味着另一端还是页面默认区间; 而归档文件名用的是"请求的"
+            # 区间, 导出一份错区间的账单还会被记成 success —— 不如直接交人工。
+            self._log("  [提示] 起止日期只成功填入了 1 个输入框, 页面很可能仍按默认"
+                      "区间导出, 已转为手动处理(避免拿到错区间的账单)")
+            self.browser.screenshot(f"manual_{int(time.time())}")
+            return "manual"
         else:
             self._log("  [提示] 未找到日期输入框,可能使用日期选择器组件")
             self._log("  [提示] 将尝试直接查找导出按钮")

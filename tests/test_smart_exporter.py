@@ -81,3 +81,90 @@ def test_broken_dialog_does_not_break_export():
 
     ex._handle_dialog(_Nasty("请导出账单"))          # 不应抛出
     assert any("弹窗处理失败" in line for line in logs)
+
+
+# ===== 日期框只填进一半的情形 =====
+
+class _El:
+    def __init__(self, placeholder, filled):
+        self.placeholder = placeholder
+        self.filled = filled
+        self.value = None
+
+    def get_attribute(self, name):
+        return self.placeholder if name == "placeholder" else None
+
+    def click(self, timeout=None):
+        pass
+
+    def fill(self, value):
+        self.value = value
+        self.filled.append((self.placeholder, value))
+
+
+class _Inputs:
+    def __init__(self, els):
+        self.els = els
+
+    def count(self):
+        return len(self.els)
+
+    def nth(self, i):
+        return self.els[i]
+
+
+class _DatePage(_Page):
+    def __init__(self, placeholders):
+        super().__init__()
+        self.filled = []
+        self.els = [_El(p, self.filled) for p in placeholders]
+
+    def locator(self, sel):
+        return _Inputs(self.els)
+
+
+class _DateBrowser(_Browser):
+    def __init__(self, placeholders):
+        super().__init__()
+        self.page = _DatePage(placeholders)
+        self.download_attempts = 0
+        self.shots = []
+
+    def begin_wait_download(self):
+        self.download_attempts += 1
+
+    def screenshot(self, name):
+        self.shots.append(name)
+        return name
+
+
+def _date_exporter(placeholders):
+    logs = []
+    browser = _DateBrowser(placeholders)
+    ex = SmartExporter(browser, log_callback=logs.append)
+    return ex, logs, browser
+
+
+def test_both_date_boxes_filled_is_reported_as_filled():
+    ex, logs, browser = _date_exporter(["开始日期", "结束日期"])
+    ex.export("2026-09-01", "2026-09-02")
+    assert any("已填入日期范围: 2026-09-01 ~ 2026-09-02" in l for l in logs)
+    assert browser.download_attempts == 1          # 正常走下去
+
+
+def test_half_filled_range_goes_to_manual_without_downloading():
+    """只填进一个框 = 另一端仍是页面默认区间, 报 success 就是交出一份错区间的账单。"""
+    ex, logs, browser = _date_exporter(["开始日期"])
+    assert ex.export("2026-09-01", "2026-09-02") == "manual"
+    assert any("只成功填入了 1 个输入框" in l for l in logs)
+    assert not any("已填入日期范围" in l for l in logs)
+    assert browser.download_attempts == 0          # 根本没去点导出
+    assert browser.shots                            # 留了截图便于排查
+
+
+def test_no_date_box_still_attempts_export():
+    """一个都找不到时维持原有行为: 提示后继续尝试(很多页面用日期选择器组件)。"""
+    ex, logs, browser = _date_exporter(["关键字搜索"])
+    ex.export("2026-09-01", "2026-09-02")
+    assert any("未找到日期输入框" in l for l in logs)
+    assert browser.download_attempts == 1

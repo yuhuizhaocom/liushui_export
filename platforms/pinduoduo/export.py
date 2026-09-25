@@ -66,7 +66,10 @@ class PinduoduoExporter(PlatformBase):
         browser.wait_for(text="导出", timeout=15)
 
         # ===== 5. 点击"导出"按钮 =====
-        browser.click_text("导出")
+        # 同一页上"导出"和"导出历史"都含"导出"三个字, 子串匹配下点中哪个由 DOM
+        # 顺序决定。先精确匹配按钮文字, 确实找不到再退回子串匹配。
+        if not browser.click_text("导出", exact=True):
+            browser.click_text("导出")
         # 等待导出完成生成"导出历史"入口
         browser.wait_for(text="导出历史", timeout=15)
 

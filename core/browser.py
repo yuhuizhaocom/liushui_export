@@ -878,9 +878,17 @@ class BrowserManager:
         return True
 
     @staticmethod
-    def _text_pattern(text):
-        """把文本转成可忽略任意空白的正则,解决"确 定"这类按钮文案匹配不到的问题"""
-        return re.compile(r"\s*".join(re.escape(ch) for ch in text))
+    def _text_pattern(text, whole=False):
+        r"""把文本转成"忽略内部空白"的正则, 解决"确 定"这类按钮文案匹配不到的问题。
+
+        whole=True 时两端锚定, 元素整段文字就是 text 才算命中。请求 exact=True 的
+        点击要走这一路: 不锚定的 `导\s*出` 照样命中"导出历史", 精确匹配被自己的
+        回退链削弱。只是等页面出现某段文字时不必这么严, 保持原来的非锚定行为。
+        """
+        core = r"\s*".join(re.escape(ch) for ch in text)
+        if whole:
+            return re.compile(r"^\s*" + core + r"\s*$")
+        return re.compile(core)
 
     def click_text(self, text, exact=False, retries=3):
         """点击包含指定文字的按钮/链接
@@ -895,9 +903,10 @@ class BrowserManager:
                     return True
             except Exception as e:
                 self._log(f"点击文字失败(第{attempt}次): {text} - {str(e)[:60]}", "warning")
-                # 回退1: 忽略空白匹配("确 定" → /确\s*定/)
+                # 回退1: 忽略空白匹配("确 定" → /确\s*定/); 要求精确点击时整段匹配
                 try:
-                    loc = self.page.get_by_text(self._text_pattern(text), exact=False)
+                    loc = self.page.get_by_text(self._text_pattern(text, whole=exact),
+                                                exact=False)
                     if loc.count() > 0:
                         loc.first.click(timeout=5000)
                         self._log(f"点击文字成功(忽略空格): {text}")

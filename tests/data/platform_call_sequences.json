@@ -256,8 +256,7 @@
     [
      "'https://biz.jr.jd.com/fund/account/flow/billQuery'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
@@ -265,22 +264,19 @@
     {
      "text": "'日账单'",
      "timeout": "15"
-    },
-    true
+    }
    ],
    [
     "close_popup",
     [],
-    {},
-    true
+    {}
    ],
    [
     "click_text",
     [
      "'日账单'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
@@ -288,8 +284,7 @@
     {
      "text": "'查询'",
      "timeout": "10"
-    },
-    true
+    }
    ],
    [
     "fill_placeholder",
@@ -297,8 +292,7 @@
      "'开始日期'",
      "'2026-09-01'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "fill_placeholder",
@@ -306,24 +300,21 @@
      "'结束日期'",
      "'2026-09-02'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
     [],
     {
      "timeout": "1"
-    },
-    true
+    }
    ],
    [
     "click_text",
     [
      "'查询'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
@@ -331,57 +322,50 @@
     {
      "text": "'账单下载'",
      "timeout": "15"
-    },
-    true
+    }
    ],
    [
     "click_text",
     [
      "'账单下载'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
     [],
     {
-     "text": "'去'",
+     "text": "'去下载列表'",
      "timeout": "10"
-    },
-    true
+    }
    ],
    [
     "is_visible_text",
     [
-     "'去'"
+     "'去下载列表'"
     ],
     {
      "timeout": "5"
-    },
-    true
+    }
    ],
    [
     "click_text",
     [
-     "'去'"
+     "'去下载列表'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
     [],
     {
      "timeout": "1"
-    },
-    true
+    }
    ],
    [
     "begin_wait_download",
     [],
-    {},
-    true
+    {}
    ],
    [
     "is_visible_text",
@@ -390,32 +374,28 @@
     ],
     {
      "timeout": "3"
-    },
-    true
+    }
    ],
    [
     "click_text",
     [
      "'立即下载'"
     ],
-    {},
-    true
+    {}
    ],
    [
     "wait_for",
     [],
     {
      "timeout": "1"
-    },
-    true
+    }
    ],
    [
     "wait_download",
     [],
     {
      "timeout": "60"
-    },
-    true
+    }
    ]
   ]
  },

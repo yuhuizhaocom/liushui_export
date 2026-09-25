@@ -73,11 +73,13 @@ class JingdongExporter(PlatformBase):
 
         # ===== 5. 点击目标行的"账单下载" =====
         browser.click_text("账单下载")
-        browser.wait_for(text="去", timeout=10)
+        # 弹窗里的按钮是"去下载列表"。以前只匹配一个"去"字, 页面上任何含"去"的
+        # 文案("去掉""过去 30 天"…)都会被判成"弹窗已出现"并被点掉。
+        browser.wait_for(text="去下载列表", timeout=10)
 
         # ===== 6. 处理"操作提示"弹窗 → 点击"去下载列表" =====
-        if browser.is_visible_text("去", timeout=5):
-            browser.click_text("去")
+        if browser.is_visible_text("去下载列表", timeout=5):
+            browser.click_text("去下载列表")
             browser.wait_for(timeout=1)
 
         # ===== 7. 在下载列表中点击"查看文件"或"立即下载" =====

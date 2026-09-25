@@ -80,9 +80,15 @@ def write_json_atomic(path, data):
 
 
 def save_settings(settings):
-    """保存用户设置到文件"""
+    """保存用户设置: 只覆盖传进来的那几个键, 没传的键保持文件里的现状。
+
+    界面各处都是"点一下只写自己那一两个键"(显示浏览器、文件名模式、保活开关、失败
+    重试), 而旧实现是 `dict(DEFAULT_SETTINGS)` 再 update —— 于是勾一下"失败重试"就把
+    首次重试间隔写回 30, 动一下保活开关就把文件名模式、显示浏览器统统恢复默认, 用户
+    改过的设置在毫无提示的情况下被抹平。
+    """
     try:
-        merged = dict(DEFAULT_SETTINGS)
+        merged = load_settings()          # 已按 DEFAULT_SETTINGS 兜底过缺失键
         if isinstance(settings, dict):
             merged.update(settings)
         write_json_atomic(SETTINGS_FILE, merged)

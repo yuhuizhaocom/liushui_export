@@ -766,16 +766,20 @@ class LiushuiApp:
         self.keepalive.interval_min = interval
 
     def _on_retry_setting(self, *_):
-        """失败重试设置变化即时保存(运行时从 settings 读取,无需运行时状态)。"""
+        """失败重试设置变化即时保存(运行时从 settings 读取,无需运行时状态)。
+
+        只写 retry_times: 首次间隔 `retry_interval_s` 界面上没有输入框, 以前每次点勾
+        都被这里写回默认 30, 手工在 settings.json 里调过的值等于一勾就没了。
+        """
         enabled = bool(self.enable_retry_var.get())
         try:
-            times = int(self.retry_times.get())
+            times = int(str(self.retry_times.get()).strip())
         except Exception:
-            times = 2
+            times = int(DEFAULT_SETTINGS.get("retry_times", 2))
         times = max(0, min(5, times))
         retry_times = times if enabled else 0
-        save_settings({"retry_times": retry_times,
-                       "retry_interval_s": int(DEFAULT_SETTINGS.get("retry_interval_s", 30))})
+        save_settings({"retry_times": retry_times})
+        self.settings["retry_times"] = retry_times
 
     def __iter_merchants(self):
         """供保活复用的迭代: (platform_key, merchant)。

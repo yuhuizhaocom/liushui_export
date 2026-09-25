@@ -44,6 +44,49 @@ def test_overwrite_is_complete(tmp_path):
     assert _read(p) == {"platform": {"youzan": False}, "merchant": {"youzan": {}}}
 
 
+def test_partial_save_keeps_the_settings_that_were_not_touched(tmp_path, monkeypatch):
+    """界面各处都是"点一下只写自己那一两个键": 合并必须以现有文件为底。
+
+    旧实现是 `dict(DEFAULT_SETTINGS)` 再 update, 于是勾一下"失败重试"就把首次重试间隔
+    写回 30, 动一下保活开关就把文件名模式/是否显示浏览器恢复默认 —— 用户改过的设置
+    在毫无提示的情况下被抹平。
+    """
+    import core.config as cfg
+    path = str(tmp_path / "settings.json")
+    monkeypatch.setattr(cfg, "SETTINGS_FILE", path)
+    cfg.save_settings({"download_name_mode": "original",
+                       "keepalive_interval_min": 10,
+                       "retry_interval_s": 5})
+    cfg.save_settings({"retry_times": 0})
+    saved = _read(path)
+    assert saved["retry_times"] == 0
+    assert saved["download_name_mode"] == "original"
+    assert saved["keepalive_interval_min"] == 10
+    assert saved["retry_interval_s"] == 5, "点勾不该动没传的那个键"
+
+
+def test_partial_save_on_a_missing_file_still_writes_every_key(tmp_path, monkeypatch):
+    import core.config as cfg
+    path = str(tmp_path / "settings.json")
+    monkeypatch.setattr(cfg, "SETTINGS_FILE", path)
+    cfg.save_settings({"show_browser": False})
+    saved = _read(path)
+    assert set(saved) == set(cfg.DEFAULT_SETTINGS), "缺失的键仍要按默认补齐"
+    assert saved["show_browser"] is False
+
+
+def test_corrupt_file_falls_back_to_defaults_before_merging(tmp_path, monkeypatch):
+    """坏文件读不出内容时按默认值兜底, 但传进来的键一定生效。"""
+    import core.config as cfg
+    path = str(tmp_path / "settings.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"retry_time')            # 截断的 JSON
+    monkeypatch.setattr(cfg, "SETTINGS_FILE", path)
+    cfg.save_settings({"retry_times": 4})
+    saved = _read(path)
+    assert saved["retry_times"] == 4 and saved["keepalive_interval_min"] == 30
+
+
 def test_task_store_save_uses_atomic_path(tmp_path, monkeypatch):
     """TaskStore.save 走同一个写入器, 且坏数据不会清空已有任务文件。"""
     from core.scheduler import CronJob, TaskStore

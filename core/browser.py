@@ -1081,6 +1081,9 @@ class BrowserManager:
         return False
 
     def close(self):
+        # 趁 context 还活着导出一次登录态: Chromium 退出时不保留 session cookie,
+        # 而"关掉浏览器"这个动作不止首次登录会做(导出收尾、保活巡检、手工测试窗口都会)。
+        self.save_login_state_on_close()
         try:
             if self.context:
                 self.context.close()
@@ -1091,6 +1094,36 @@ class BrowserManager:
                 self.playwright.stop()
         except Exception:
             pass
+
+    def _saved_cookie_count(self):
+        """已落盘的 login_state.json 里有多少 cookie; 没有/读不出返回 -1。"""
+        try:
+            path = os.path.join(self._profile_dir, self.LOGIN_STATE_FILE)
+            if not os.path.isfile(path):
+                return -1
+            with open(path, "r", encoding="utf-8") as f:
+                return len(json.load(f).get("cookies") or [])
+        except Exception:
+            return -1
+
+    def save_login_state_on_close(self):
+        """关闭前保存登录态, 但**不用更空的版本盖掉已有的好登录态**。
+
+        加这道比较是因为关闭点很多: 导出前预检、保活巡检、手工测试窗口都会关浏览器。
+        万一某个平台的页面会清 cookie(登出跳转、风控), 直接存就会把上次好不容易存的
+        登录态换成一份空的。返回是否真的写了文件。
+        """
+        try:
+            if not self.context:
+                return False
+            live = len(self.context.cookies())
+        except Exception:
+            return False          # 窗口已经被用户关掉/通讯断了, 存不了也不该吵
+        saved = self._saved_cookie_count()
+        if saved >= 0 and live < saved:
+            self._log(f"当前 cookie({live}) 比已保存的登录态({saved})少, 不覆盖")
+            return False
+        return self.save_login_state(quiet=True)
 
     # ===== 操作追踪(辅助编写平台脚本: 记录测试浏览器中的点击/输入元素信息) =====
 

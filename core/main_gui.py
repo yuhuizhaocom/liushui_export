@@ -21,9 +21,9 @@ import shutil
 import threading
 import time
 import tkinter as tk
+from collections import namedtuple
 from datetime import datetime, timedelta
 from tkinter import ttk, messagebox, scrolledtext
-
 from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          SELECTION_FILE, load_settings, save_settings,
                          write_json_atomic)
@@ -153,6 +153,46 @@ _UI_PUMP_BATCH = 300
 # 导出结果的用户可读文案与"最差优先"排序(一个平台只有一盏状态灯, 多商户时亮最差的那个)
 RESULT_LABEL = {"success": "成功", "manual": "需手动完成", "failed": "失败"}
 _RESULT_RANK = {"success": 0, "manual": 1, "failed": 2}
+
+# 超过这么多天就先问一句: 多数后台一次给不出整年的账单(微信支付单次上限 30 天),
+# 硬着头皮导只会等满超时再报 manual, 用户白等几个小时的重试。
+DATE_MAX_SPAN_DAYS = 92
+
+# check_date_range 的结果: 结论 + 弹窗标题/文案 + 规范化(补零)后的起止日期
+DateCheck = namedtuple("DateCheck", "verdict title message start end")
+
+
+def check_date_range(start_text, end_text, today=None):
+    """校验日期区间, 返回 DateCheck(结论, 弹窗标题, 文案, 规范化的起止日期)。
+
+    结论: ok 放行 / ask 要用户确认 / bad 拦下。只管界面能判的事: 格式、顺序、未来
+    日期、超长区间。某个平台具体支持多少天要真页才知道, 这里不替平台猜。
+    """
+    try:
+        ds = datetime.strptime((start_text or "").strip(), "%Y-%m-%d")
+        de = datetime.strptime((end_text or "").strip(), "%Y-%m-%d")
+    except ValueError:
+        return DateCheck("bad", "日期格式",
+                         "日期格式应为 YYYY-MM-DD(如 2026-09-01),请检查后重试。", "", "")
+    if de < ds:
+        return DateCheck("bad", "日期范围",
+                         "结束日期不能早于开始日期,请检查后重试。", "", "")
+    ref = (today or datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
+    norm_start, norm_end = ds.strftime("%Y-%m-%d"), de.strftime("%Y-%m-%d")
+    if ds > ref or de > ref:
+        # 两头都在未来时报"开始日期": 那是用户先看到的那一个框
+        which = "开始日期" if ds > ref else "结束日期"
+        return DateCheck("bad", "日期范围",
+                         f"{which}晚于今天({ref:%Y-%m-%d}): 那之后的账单还没产生,"
+                         "现在导只会白等到下载超时。", norm_start, norm_end)
+    span = (de - ds).days + 1
+    if span > DATE_MAX_SPAN_DAYS:
+        return DateCheck("ask", "日期范围",
+                         f"这次区间共 {span} 天(超过 {DATE_MAX_SPAN_DAYS} 天)。\n\n"
+                         "不少后台一次给不出这么长的账单(例如微信支付单次最多 30 天),"
+                         "建议按季度或按月分批导。\n\n仍要按这个区间导出吗?",
+                         norm_start, norm_end)
+    return DateCheck("ok", "", "", norm_start, norm_end)
 
 class LiushuiApp:
     def __init__(self, root):
@@ -879,20 +919,26 @@ class LiushuiApp:
         return tasks
 
     def _validate_dates(self, show_warning=True):
-        """校验日期输入(格式 YYYY-MM-DD、结束>=开始),供导出/登录前调用"""
-        s = self.date_start.get().strip()
-        e = self.date_end.get().strip()
-        try:
-            ds = datetime.strptime(s, "%Y-%m-%d")
-            de = datetime.strptime(e, "%Y-%m-%d")
-        except ValueError:
+        """校验日期输入(格式、起止顺序、不晚于今天),供导出/登录前调用。
+
+        超长区间不拦、只问: 有人确实要一次导一年, 那是他的选择; 但未来日期一定导不出
+        东西, 直接拦下, 免得他等满重试才发现。`show_warning=False`(检查登录状态)时
+        不打扰用户: 该放行就放行, 只是不弹窗。
+
+        校验通过时顺手把输入框写成补零的标准写法(`2026-9-2` → `2026-09-02`): 这个字符
+        串会直接进日期框填写、归档目录名和汇总文件夹名, 两种写法混着用会分成两个目录。
+        """
+        check = check_date_range(self.date_start.get(), self.date_end.get())
+        if check.verdict == "bad":
             if show_warning:
-                messagebox.showwarning("日期格式", "日期格式应为 YYYY-MM-DD(如 2026-09-01),请检查后重试。")
+                messagebox.showwarning(check.title, check.message)
             return False
-        if de < ds:
-            if show_warning:
-                messagebox.showwarning("日期范围", "结束日期不能早于开始日期,请检查后重试。")
-            return False
+        if check.verdict == "ask" and show_warning:
+            if not messagebox.askyesno(check.title, check.message):
+                return False
+        for var, value in ((self.date_start, check.start), (self.date_end, check.end)):
+            if value and var.get().strip() != value:
+                var.set(value)
         return True
 
     def _action_login_all(self):

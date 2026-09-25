@@ -890,6 +890,23 @@ class BrowserManager:
             return re.compile(r"^\s*" + core + r"\s*$")
         return re.compile(core)
 
+    def _ambiguity_note(self, loc, text):
+        """页面上有多处同样文字时, 把"到底点中了哪一处"写进日志。
+
+        平台脚本普遍点第一个匹配项(导出历史列表里的"下载账单"就是最新一条), 而这个
+        假设一旦落空 —— 第一行还是"生成中"、或是上个月的旧记录 —— 拿到的文件仍会被按
+        本次区间命名并报 success。离线没法核对行内日期, 至少要让人看得见点的是哪一行。
+        """
+        try:
+            n = loc.count()
+            if n < 2:
+                return
+            first = (loc.first.inner_text() or "").strip().replace("\n", " ")
+            self._log(f"[提醒] 页面有 {n} 处含\"{text}\"的文字, 已点中第一处: "
+                      f"{first[:40]}", "warning")
+        except Exception:
+            pass  # 只是补一条诊断日志, 取不到文字也不能影响已经成功的点击
+
     def click_text(self, text, exact=False, retries=3):
         """点击包含指定文字的按钮/链接
         匹配优先级: 普通文本 → 忽略空白(确 定)→ JS 直接触发。
@@ -900,6 +917,7 @@ class BrowserManager:
                 if loc.count() > 0:
                     loc.first.click(timeout=5000)
                     self._log(f"点击文字成功: {text}")
+                    self._ambiguity_note(loc, text)
                     return True
             except Exception as e:
                 self._log(f"点击文字失败(第{attempt}次): {text} - {str(e)[:60]}", "warning")

@@ -1,9 +1,13 @@
-"""exact=True 的点击不能被自己的回退链削弱成子串匹配。
+"""click_text 的两条底线: 精确匹配不能被回退链削弱; 点第一个匹配项要留下痕迹。
 
 复现的是拼多多那一类页面: "导出" 按钮和"导出历史"入口同屏。click_text 在真实按钮
 点不动(被遮挡/不可交互而抛错)时会走回退链; 回退1 的"忽略空白"正则以前不锚定, 于是
 exact=True 也能命中 DOM 里更靠前的"导出历史", 点开完全不相干的入口。回退2 是 JS 直接
 el.click(), 只按首路的确切选择器取元素, 因此不会跑偏。
+
+另一半是"下载账单"这类列表: 脚本点的永远是第一处匹配, 而首行可能是上个月的旧记录或
+还"生成中"的行 —— 文件照样按本次区间命名并报 success。行内日期离线核对不了, 至少要把
+"共几处、点中了哪一处"写进日志。
 
 等待文字出现(is_visible_text)是另一套语义: 页面上出现相关文字就算到位, 所以那条路径
 保持原来的非锚定匹配, 本文件特意钉住这一点。
@@ -37,6 +41,11 @@ class _Node:
         if not self._texts:
             raise TimeoutError("等待超时")
 
+    def inner_text(self):
+        if self._page.text_unreadable:
+            raise RuntimeError("取不到文字")
+        return self._texts[0]
+
     def evaluate(self, script):
         # JS 的 el.click() 不看可见性与遮挡, 一律成功 —— 与真实浏览器一致
         self._page.clicked.append(self._texts[0])
@@ -45,9 +54,10 @@ class _Node:
 class FakePage:
     """按 Playwright 语义实现 get_by_text: 字符串看 exact, 正则一律按 search。"""
 
-    def __init__(self, texts, blocked=()):
+    def __init__(self, texts, blocked=(), text_unreadable=False):
         self.texts = texts
         self.blocked = set(blocked)
+        self.text_unreadable = text_unreadable
         self.clicked = []
 
     def get_by_text(self, needle, exact=False):
@@ -64,10 +74,11 @@ class FakePage:
         return _Node(self, hit)
 
 
-def _mgr(texts, blocked=()):
+def _mgr(texts, blocked=(), text_unreadable=False):
     b = BrowserManager(headless=True)          # 不 start(), 不碰浏览器
-    b.page = FakePage(texts, blocked)
-    b._log = lambda msg, level="info": None
+    b.page = FakePage(texts, blocked, text_unreadable)
+    b.logs = []
+    b._log = lambda msg, level="info": b.logs.append((level, msg))
     return b
 
 
@@ -100,3 +111,28 @@ def test_whole_text_pattern_anchors_but_default_does_not():
 def test_wait_for_text_still_matches_inside_a_longer_label():
     b = _mgr(["本月可导出 12 条记录"])
     assert b.is_visible_text("导出", timeout=0) is True
+
+
+# ===== 点中哪一处要看得见 =====
+
+def test_multiple_matches_are_reported_with_the_clicked_row():
+    b = _mgr(["2026-08-31 下载账单", "2026-09-01 下载账单"])
+    assert b.click_text("下载账单", retries=1) is True
+    notes = [m for lv, m in b.logs if lv == "warning"]
+    assert len(notes) == 1
+    assert "2 处" in notes[0] and "2026-08-31" in notes[0]
+    # 原有日志字串保持不变, 提醒是另起一行
+    assert ("info", "点击文字成功: 下载账单") in b.logs
+
+
+def test_single_match_logs_nothing_extra():
+    b = _mgr(["下载账单"])
+    assert b.click_text("下载账单", retries=1) is True
+    assert b.logs == [("info", "点击文字成功: 下载账单")]
+
+
+def test_unreadable_row_text_does_not_undo_a_successful_click():
+    b = _mgr(["2026-08-31 下载账单", "2026-09-01 下载账单"], text_unreadable=True)
+    assert b.click_text("下载账单", retries=1) is True
+    assert b.page.clicked == ["2026-08-31 下载账单"]
+    assert b.logs == [("info", "点击文字成功: 下载账单")]

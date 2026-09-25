@@ -28,10 +28,14 @@ class _App:
         self.merchants = merchants
         self.merchant_vars = merchant_vars
         self.added = []
+        self.badges = {}
 
     def _add_merchant_checkbox(self, key, name, checked=True):
         self.added.append((key, name, checked))
         self.merchant_vars.setdefault(key, {})[name] = object()
+
+    def _refresh_merchant_badge(self, key):
+        self.badges[key] = len(self.merchant_vars.get(key, {}))
 
 
 @pytest.fixture()
@@ -70,6 +74,7 @@ def test_new_name_creates_profile_dir_and_one_row(app):
     assert ok is True
     assert msg == '已添加商户:有赞 / 新店B,请对其执行"首次登录"'
     assert app.added == [("youzan", "新店B", True)]
+    assert app.badges["youzan"] == 2, "商户数徽标要跟着一同刷新"
     assert os.path.isdir(os.path.join(
         os.path.abspath(main_gui.BROWSER_DATA_DIR), "youzan", "新店B"))
 

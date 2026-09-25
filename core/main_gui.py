@@ -17,6 +17,7 @@ install_crash_guard()
 
 import json
 import queue
+import shutil
 import threading
 import time
 import tkinter as tk
@@ -70,6 +71,46 @@ def find_duplicate_merchant(name, existing):
         if (e or "").strip().casefold() == norm:
             return e
     return ""
+
+
+def merchant_profile_dir(base_dir, plat_key, merchant):
+    """按运行期取 profile 的同一套规矩算出目录: browser_data/<key>/<商户>。"""
+    from core.browser import BrowserManager
+    return os.path.normpath(os.path.join(
+        os.path.abspath(base_dir),
+        BrowserManager._safe_name(plat_key),
+        BrowserManager._safe_name(merchant)))
+
+
+def delete_merchant_profile(base_dir, plat_key, merchant):
+    """删除一个商户的登录目录, 返回 (是否成功, 给用户看的一句话)。
+
+    只碰 `browser_data/<key>/<商户>` 这一层。名字清洗只替换掉 `<>:"/\\` 这类字符,
+    `..` 是原样留下的, 所以这里算完路径还要再核一遍"是不是正好深一层"——少一层就会把
+    整个平台目录甚至整个 browser_data 删掉。已导出的账单在 downloads 下, 不在本函数射程内。
+    """
+    from core.browser import BrowserManager
+    if not (merchant or "").strip():
+        return False, "商户名为空, 已拒绝删除"
+    target = merchant_profile_dir(base_dir, plat_key, merchant)
+    base_real = os.path.normcase(os.path.abspath(base_dir))
+    key_dir = os.path.normcase(os.path.join(base_real, BrowserManager._safe_name(plat_key)))
+    parent = os.path.normcase(os.path.dirname(target))
+    if (parent != key_dir or os.path.normcase(target) == parent
+            or os.path.normcase(os.path.basename(target)) !=
+            os.path.normcase(BrowserManager._safe_name(merchant))):
+        return False, f"路径不是 browser_data/平台/商户 这一层, 已拒绝删除: {merchant}"
+    if not os.path.isdir(target):
+        return True, f"目录本来就不存在, 无需删除: {merchant}"
+    last_err = None
+    for _ in range(4):
+        try:
+            shutil.rmtree(target)
+            return True, f"已删除登录目录: {plat_key}/{merchant}"
+        except Exception as e:
+            last_err = e
+            time.sleep(0.5)      # Chromium 刚退出时目录锁常有几秒残留
+    return False, f"删除失败(浏览器可能还占着这个目录): {last_err}"
 
 
 def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):
@@ -179,6 +220,8 @@ class LiushuiApp:
         self.list_frame = list_frame   # 供 _rebuild_platform_list 重建使用
 
         self.merchant_frames = {}   # platform_key -> Frame(商户 checkbox 容器)
+        self.merchant_rows = {}     # platform_key -> {商户名: 该行的 Frame(删除时要拆行)}
+        self.merchant_badges = {}   # platform_key -> 商户数徽标 Label
         for key, plat in self.platforms.items():
             if not getattr(plat, "enabled", True):
                 continue
@@ -207,11 +250,12 @@ class LiushuiApp:
                             activebackground=BG_PANEL,
                             command=_toggle_platform)
         cb.pack(side=tk.LEFT)
-        # 商户数徽标(灰字小计数,便于一眼看清)
-        merch_cnt = len(self.merchants.get(key, []))
-        tk.Label(row, text=str(merch_cnt),
-                 bg="#eeeeee", fg="#7f8c8d",
-                 font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=(3, 0))
+        # 商户数徽标(灰字小计数,便于一眼看清);增删商户后要刷新,所以留引用
+        badge = tk.Label(row, text=str(len(self.merchants.get(key, []))),
+                         bg="#eeeeee", fg="#7f8c8d",
+                         font=("Microsoft YaHei", 8))
+        badge.pack(side=tk.LEFT, padx=(3, 0))
+        self.merchant_badges[key] = badge
         status_label = tk.Label(row, text="●", fg="#bdc3c7",
                                 font=("Microsoft YaHei", 10),
                                 bg=BG_PANEL)
@@ -249,6 +293,8 @@ class LiushuiApp:
         self.platform_vars = {}
         self.merchant_vars = {}
         self.merchant_frames = {}
+        self.merchant_rows = {}
+        self.merchant_badges = {}
         for key, plat in self.platforms.items():
             if not getattr(plat, "enabled", True):
                 continue
@@ -484,9 +530,10 @@ class LiushuiApp:
         # 勾选任一商户时,自动勾选其所属平台(反向联动)
         mv.trace_add("write", lambda *_, k=key: self._sync_platform_on_merchant(k))
         self.merchant_vars.setdefault(key, {})[name] = mv
-        # 每商户一行: 勾选 + 右侧"打开"按钮(打开该商户浏览器,供手工测试页面元素)
+        # 每商户一行: 勾选 + 右侧"打开"(手工测试页面) 与 "删"(移除该商户)
         mrow = tk.Frame(frame, bg=BG_PANEL)
         mrow.pack(anchor="w", fill=tk.X, padx=(26, 0))
+        self.merchant_rows.setdefault(key, {})[name] = mrow
         tk.Checkbutton(
             mrow, variable=mv, text=name,
             bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
@@ -495,6 +542,11 @@ class LiushuiApp:
                   fg="#ffffff", bg="#e67e22", cursor="hand2",
                   font=("Microsoft YaHei", 8),
                   command=lambda k=key, m=name: self._action_open_merchant(k, m)
+                  ).pack(side=tk.RIGHT, padx=(4, 2))
+        tk.Button(mrow, text="删", width=2, relief=tk.FLAT,
+                  fg="#ffffff", bg="#95a5a6", cursor="hand2",
+                  font=("Microsoft YaHei", 8),
+                  command=lambda k=key, m=name: self._prompt_delete_merchant(k, m)
                   ).pack(side=tk.RIGHT, padx=(4, 2))
 
     def _sync_platform_on_merchant(self, key, *_):
@@ -1149,7 +1201,58 @@ class LiushuiApp:
             return False, f"创建商户失败: {e}"
         self.merchants = discover_merchants(self.platforms.keys())
         self._add_merchant_checkbox(key, name, True)       # 动态加入勾选框
+        self._refresh_merchant_badge(key)
         return True, f"已添加商户:{plat.name} / {name},请对其执行\"首次登录\""
+
+    def _refresh_merchant_badge(self, key):
+        """商户数徽标跟着当前列表刷新(建好就不管的话, 加/删商户后数字是骗人的)。"""
+        badge = self.merchant_badges.get(key)
+        if badge is None:
+            return
+        try:
+            badge.config(text=str(len(self.merchant_vars.get(key, {}))))
+        except Exception:
+            pass
+
+    def _remove_merchant_row(self, key, name):
+        """从界面上摘掉一家商户的那一行(目录由 delete_merchant_profile 负责)。"""
+        row = self.merchant_rows.get(key, {}).pop(name, None)
+        if row is not None:
+            try:
+                row.destroy()
+            except Exception:
+                pass
+        self.merchant_vars.get(key, {}).pop(name, None)
+        self.merchants = discover_merchants(self.platforms.keys())
+        self._refresh_merchant_badge(key)
+        self._refresh_summary()
+        self._save_selection()
+
+    def _prompt_delete_merchant(self, key, merchant):
+        """删商户: 二次确认 → 删 profile 目录 → 摘掉那一行。已导出的账单不动。"""
+        plat = self.platforms.get(key)
+        if plat is None:
+            return
+        if self.running:
+            messagebox.showwarning("删除商户",
+                                   "任务正在导出, 请先等它跑完或点「中止」再删除。")
+            return
+        prof = merchant_profile_dir(BROWSER_DATA_DIR, plat.key, merchant)
+        if not messagebox.askyesno(
+                "删除商户",
+                f"确定删除 {plat.name} / {merchant} 吗?\n\n"
+                "会删掉这家商户的浏览器登录目录(以后要重新登录),\n"
+                "已经导出到 downloads 的账单不受影响。\n\n"
+                f"要删除的目录:\n{prof}"):
+            return
+        ok, msg = delete_merchant_profile(BROWSER_DATA_DIR, plat.key, merchant)
+        if not ok:
+            self._append_log(f"[删除商户失败] {plat.name} / {merchant}: {msg}")
+            messagebox.showerror("删除商户", msg + "\n\n目录还在, 商户列表也没改动。")
+            return
+        self._remove_merchant_row(key, merchant)
+        self._append_log(f"已删除商户:{plat.name} / {merchant}"
+                         f"(如需重建, 点平台右侧\"+\");{msg}")
 
     def _prompt_add_merchant(self, key, plat_name):
         """弹窗输入商户名 → 创建 browser_data/平台key/商户/ 目录并刷新列表"""

@@ -102,6 +102,7 @@ liushui_export/
 │   ├── browser.py           # 浏览器管理（BrowserManager）
 │   ├── exporters.py         # 智能导出器（SmartExporter）
 │   ├── config.py            # 全局配置与用户设置读写
+│   ├── cleanup.py           # 过期日志与汇总副本的按保留期清理
 │   ├── crashguard.py        # 启动期崩溃兜底（sys/threading.excepthook）
 │   ├── logger.py            # 日志模块
 │   ├── loader.py            # 平台加载器（自动发现）
@@ -129,7 +130,8 @@ liushui_export/
 | `core/dialogs.py` | **查看类对话框**。`show_log_history(root)` 历史日志窗口、`show_stats_dashboard(app)` 稳定性看板；只读根窗口/状态栏，与导出流程无关。 |
 | `core/theme.py` | **界面配色常量**。单独成模块供 `dialogs.py` 复用，避免反向 import `main_gui` 成环。 |
 | `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。                      |
-| `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；提供 `load_settings()/save_settings()` 读写 `settings.json`，以及 `write_json_atomic(path, data)`（临时文件 + `os.replace` 原子替换）——`settings.json`/`scheduled_tasks.json`/`selection_state.json` 三处整体重写都用它，避免写一半崩溃后被读取端"except 用默认值"静默清空。 |
+| `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；`load_settings()` 读设置（缺字段回默认），`save_settings(部分字典)` **以现有文件为底只覆盖传进来的键**——以前是以 `DEFAULT_SETTINGS` 为底，界面各处"点一下只写自己那一两个键"于是每次点勾都把别的设置抹回默认值；另有 `write_text_atomic`/`write_json_atomic`（临时文件 + `os.replace` 原子替换）——`settings.json`/`scheduled_tasks.json`/`selection_state.json` 三处整体重写都用它，避免写一半崩溃后被读取端"except 用默认值"静默清空。 |
+| `core/cleanup.py` | **过期文件清理**。工具长期跑会累积"每次启动一个 run_日期.log"+"每次导出一个 起_止_时间戳/ 汇总副本目录"。`prune_logs`/`prune_summary_dirs` 按 mtime 删超过保留天数的这两类，**按文件名正则白名单认领**（不合规矩的名字原样留着），`stats.jsonl`（看板唯一历史）、`downloads/待确认/`（无人认领的账单）、`downloads/<平台>/…`（账单原件）任何情况下都不碰；`keep_days<=0` 表示关闭。清理失败只写日志，绝不影响启动。 |
 | `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀）；`record_stat`/`load_stats`/`summarize_stats` 管稳定性统计，其中 `load_stats(limit)` 用尾部反向分块读（`_read_tail_lines`），不再把整个 `stats.jsonl` 读进内存。 |
 | `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
 | `core/crashguard.py` | **启动期崩溃兜底**。工具用 `pythonw` + 隐藏窗口启动，没有控制台；以前导入阶段抛错（缺 tkinter、`logs` 建不出来）的表现就是"图标闪一下，什么也没有"。`install()` 把 `sys.excepthook`/`threading.excepthook` 指向 `report_uncaught`：堆栈写进 `logs/crash_日期_时间_微秒.txt`，主线程再弹窗告知文件位置（一个进程只弹一次）。子线程那条**只落文件不弹窗**——在非主线程里拉 Tk 窗口可能把界面吊住。`main_gui` 在其余 import 之前装好它，所以模块自身的导入失败也覆盖得到。 |
@@ -165,7 +167,10 @@ liushui_export/
 | `_action_open_folder()`                | 打开 `downloads/` 目录。                                          |
 | `_request_abort()`                     | 「中止本次任务」按钮：置 `_abort` 事件并记日志。只在**商户边界**生效（`_execute_export_tasks`/`_do_login`/`_do_check` 每轮开头查 `_aborted()`），不会中途掐浏览器留下半截下载；按钮由 `_run_async` 启用、`_thread_wrapper` 结束时置灰。 |
 | `_action_help()`                       | 弹出简化使用说明。                                                    |
-| `_prompt_add_merchant(key, plat_name)` | 弹窗输入商户名 → 清洗非法字符 → 创建 `browser_data/平台key/商户/` 目录 → 动态刷新勾选框。 |
+| `_prompt_add_merchant(key, plat_name)` | 弹窗输入商户名 → 调 `_add_merchant`；失败(名字空/重名)时弹窗说明并**留着窗口让用户改**。 |
+| `_add_merchant(key, raw_name)`         | 建 profile 目录 + 加一行勾选，返回 `(是否成功, 文案)`。先查重再动手：按 Windows 目录规矩比（忽略首尾空格、不分大小写），重名直接拒绝——以前重名会 `makedirs(exist_ok=True)` 照样建、界面照样塞一行，而 `merchant_vars[平台][名字]` 是字典，新 Var 顶掉旧的，于是两行同名共用一个勾选框（勾上面那行等于没勾）。也拒绝 `..`/`.`/`___` 这类"清洗后没内容"的名字（`sanitize_name` 只换 `<>:"/\`，`..` 原样通过，拼进路径就指到 `browser_data` 本身）。 |
+| `_prompt_delete_merchant(key, merchant)` | 商户行右侧「删」：任务进行中先拒绝；二次确认里写明要删哪个目录；只删 `browser_data/<key>/<商户>` 这一层（`delete_merchant_profile` 按 normpath 复核深度），**已导出的账单与 `downloads/待确认/` 不动**；删不成(目录被浏览器占着)如实报错且不改列表。成功后摘掉那一行并刷新商户数徽标。 |
+| `_refresh_merchants()`                 | 左栏「刷新商户」：重新扫 `browser_data` 并走 `_rebuild_platform_list`（勾选按 `selection` 还原，不会被洗掉），日志写明新增了谁、外部删了谁，没变化也报总数。以前手工放进目录或从别的电脑拷来的 profile 要重启才看得见。 |
 
 #### 核心业务流程方法
 
@@ -198,7 +203,11 @@ liushui_export/
 
 #### 其他
 
-- `_validate_dates()`：校验日期格式（`YYYY-MM-DD`）与起止大小关系。
+- `_validate_dates(show_warning=True)`：日期区间的四道校验（格式、起止顺序、**不晚于今天**、**超过 92 天先问一句**），见 `check_date_range`。超长不拦只问（有人确实要一次导一年）；未来日期直接拦（后台只会给空列表，等满超时+两轮重试等于白等半天）。校验通过时把 `2026-9-2` 回写成 `2026-09-02`——这串字符同时进日期框填写、归档目录名和汇总文件夹名，两种写法会分成两个目录。`show_warning=False`（检查登录态）时不弹窗。
+
+- `_on_platform_toggled(key)`：平台勾选框联动商户。**取消勾选时先记住每家商户的样子，再勾回来按原样还原**；从没记过的（第一次勾平台）仍按旧行为整平台全选，取消之后新建的商户默认勾上。以前是"取消=全不勾、勾回=全勾"，常年不勾的那几家只要手滑点一次平台框就悄悄回到任务里。
+
+- `_run_cleanup_once()` / `_start_cleanup()`：启动后在**后台守护线程**跑一次 `core.cleanup.run_cleanup`，结果写成一行 `[清理] …`；目录不存在/文件被占用/设置写了怪值都只在日志上记一句，不影响启动。设置区新增「日志/汇总保留(天,0=不清理)」，默认 365。
 
 - `_get_selected()` / `_get_selected_merchants(key)`：取勾选的平台 key / 商户名列表。**只能在主线程调用**（读 Tk 变量），任务用 `_collect_tasks(selected)` 一次性展成 `(key, plat, merchant)` 列表再交给后台线程。
 
@@ -353,6 +362,11 @@ liushui_export/
 | `log(message, level, callback)`       | `core/logger.py`   | 统一日志：输出控制台（容错 `pythonw` 无 stdout 场景）→ 写入 `logs/run_YYYYMMDD.log` → 转发 GUI 回调。                                |
 | `check_dependencies()` / `main()`     | `core/main_gui.py` | 依赖检测与自动安装；程序入口。 |
 | `report_crash(summary, detail)`       | `core/main_gui.py` | `main()` 的异常兜底：先用模块顶部已导入的 `log` 记 ERROR，再弹窗。**返回值=日志是否真写成功**，弹窗文案跟着变（写不成功就不谎称"已记录到 logs 文件夹"）。与 crashguard 的区别：这里兜的是 `main()` 内部已起来之后的异常。 |
+| `find_duplicate_merchant(name, existing)` | `core/main_gui.py` | 返回 `existing` 中与该名字视为同一家商户的那个名字（忽略首尾空格、不分大小写），没有则空串。 |
+| `merchant_profile_dir(base, key, merchant)` / `delete_merchant_profile(...)` | `core/main_gui.py` | 前者按 `BrowserManager.set_browser_profile` 同一套算法算出 profile 路径（有测试钉住两者一致）；后者只删这一层目录，路径深度不对/名字为空一律拒绝，被占用时重试 4 次后如实返回失败。 |
+| `merchant_changes(before, after)`    | `core/main_gui.py` | 两次扫目录结果的差集，返回 `(新增, 消失)`，顺序变化不算改动。 |
+| `check_date_range(start, end, today=None)` | `core/main_gui.py` | 返回 `DateCheck(verdict, title, message, start, end)`，`verdict` ∈ `ok`/`ask`/`bad`；`start/end` 是补零规范化后的日期。纯函数，`today` 可注入以便测试。 |
+| `run_cleanup(log_dir, downloads_dir, keep_days, dry_run=False)` | `core/cleanup.py` | 删除过期 `run_*.log`/`crash_*.txt` 与过期汇总副本目录，返回 `{"logs": [...], "summary_dirs": [...]}`；`keep_days<=0` 完全不动，`dry_run` 只列不删。 |
 
 ***
 
@@ -439,7 +453,8 @@ liushui_export/
       │    ├─ discover_platforms()    # 加载已实现平台插件
       │    ├─ load_settings()         # 读取 settings.json
       │    ├─ discover_merchants()    # 扫描已建档商户
-      │    └─ 构建三栏界面
+      │    ├─ 构建三栏界面
+      │    └─ _start_cleanup()        # 后台线程清一次很旧的日志/汇总副本(失败只写日志)
       └─ root.mainloop()              # 进入事件循环
           └─ 逃逸出 main() 的异常 → report_crash(): 记 ERROR 日志 + 弹窗(文案如实说明日志是否写成)
 ```
@@ -601,7 +616,7 @@ python -m playwright install chromium
 | `scheduled_tasks.json`            | 是              | 定时任务持久化（新增/编辑后自动保存）                                                                        |
 | `logs/run_YYYYMMDD.log`          | 是              | 当日统一日志（系统+操作，DEBUG 级）                                                                        |
 | `logs/crash_YYYYMMDD_HHMMSS_微秒.txt` | 崩溃时才生成 | 未捕获异常的完整堆栈（含子线程里的）。**双击没反应/闪一下就退时先看这里**，弹窗上写的是它的路径；写不进 `logs` 时退回项目根同名文件。                        |
-| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟） |
+| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
 
 ***
 
@@ -609,18 +624,19 @@ python -m playwright install chromium
 
 | 文件                       | 规模（约）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
-| `core/main_gui.py`       | 约 1500 行      | GUI 主程序与三大业务流程、界面更新队列、中止控制          |
-| `core/browser.py`        | 约 1140 行      | 浏览器管理与下载归档（项目体量最大的核心模块）         |
+| `core/main_gui.py`       | 约 1850 行    | GUI 主程序与三大业务流程、界面更新队列、中止控制、商户增删改与刷新、日期区间校验 |
+| `core/browser.py`        | 约 1240 行      | 浏览器管理与下载归档（项目体量最大的核心模块）         |
 | `core/exporters.py`      | 约 190 行       | 智能导出器（默认兜底导出）                   |
 | `core/platform_base.py`  | 约 190 行       | 平台基类（元信息 + 登录态自检 + 通用导出骨架钩子）  |
 | `core/loader.py`         | 约 90 行        | 平台加载器与免重启 reload                 |
 | `core/config.py`         | 约 60 行        | 配置与设置读写                         |
 | `core/logger.py`         | 约 130 行       | 日志通道 + 稳定性统计（stats.jsonl 读写与汇总） |
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
-| `core/crashguard.py` | 约 90 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
+| `core/crashguard.py` | 约 96 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
+| `core/cleanup.py` | 约 120 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/platform_admin.py` | 约 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
-| `tests/` | 23 个文件约 3000 行 | pytest 测试（202 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序 |
+| `tests/` | 30 个文件约 3400 行 | pytest 测试（281 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理 |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |

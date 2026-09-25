@@ -1429,8 +1429,8 @@ class LiushuiApp:
 
         只看 cookie 变化不足以说明登录成功(可能只是页面种了个埋点 cookie), 而"能不能
         打开后台"这件事只有 `check_login` 说得清 —— 此时用户已经不在那个窗口里了, 导航
-        走不会打扰任何人。核实结果不好只是提示一下, 既不拦用户关窗口, 也不中断后面的
-        商户。返回 True/False, 核实本身跑不动时返回 None。
+        走不会打扰任何人。这里只报结果, **要不要再给用户一次机会由调用方问**
+        (`_ask_login_retry`)。返回 True=已登录 / False=未登录 / None=没能核实。
         """
         self._set_status(f"正在核实 {plat.name}({merchant}) 的登录状态...")
         try:
@@ -1450,14 +1450,77 @@ class LiushuiApp:
                if saved_seen else "关窗口时没检测到任何登录写入")
         self._append_log(f"  [警告] {plat.name}({merchant}) 核实结果: 未登录 —— {why}")
         self.set_platform_status(key, "error")
-        # 只是把坏消息说清楚: showwarning 经 _ui 投递到主线程, 后台线程不等它
-        self._ui(lambda n=plat.name, m=merchant, w=why:
-                 messagebox.showwarning(
-                     "这家还没登录成功",
-                     f"{n} · {m}\n\n关闭窗口后核实: 这个账号仍是**未登录**状态。\n"
-                     f"原因: {w}\n\n可以重新点「首次登录」再做一次;"
-                     "关掉本提示不影响其它平台。"))
+        self._last_verify_reason = why
         return False
+
+    LOGIN_RETRY_LIMIT = 3      # 每家商户总共给几次机会(含第一次), 防止无限回圈
+
+    def _login_one_round(self, plat, key, merchant):
+        """一轮完整的登录: 开可见浏览器 → 等用户关窗 → 释放 profile → 后台核实。
+
+        返回 `_verify_login_after_close` 的 True/False/None, 或 "skip" 表示这一轮没
+        走到核实(用户没关窗口/被中止/登录页就没打开)。
+        """
+        self.set_platform_status(key, "warn")
+        self._ensure_browser(plat, merchant, force_visible=True)
+        self._append_log(f">>> 正在打开 {plat.name}({merchant}) 登录页面...")
+        try:
+            plat.login(self.browser)
+            self._append_log(f"请在浏览器中完成 {plat.name}({merchant}) 登录")
+            self._append_log(f"操作提示: {plat.guide}")
+            self._append_log("  登录好之后直接关掉那个浏览器窗口即可, "
+                             "程序会自动保存并继续下一个(不用回来点确定)")
+            self._ui(lambda n=plat.name, m=merchant, g=plat.guide:
+                     self._show_login_hint(n, m, g))
+            outcome, saved = self._wait_login_window_closed(self.browser)
+            self._ui(self._close_login_hint)
+            if outcome != "closed":
+                self._append_log(
+                    f"[提示] {plat.name}({merchant}) {'已中止' if outcome == 'aborted' else '等待超时'}"
+                    f", 本轮不核实")
+                return "skip"
+            # 先释放这个 profile(Chromium 同时只允许一个进程占用), 才能后台重开核实
+            self._close_browser()
+            return self._verify_login_after_close(plat, key, merchant, saved)
+        except Exception as e:
+            self._append_log(f"打开 {plat.name}({merchant}) 失败: {e}")
+            self.set_platform_status(key, "error")
+            return "skip"
+        finally:
+            self._close_browser()
+
+    def _ask_login_retry(self, plat, merchant, attempt):
+        """未登录时让用户二选一: 回去继续登录 / 确认放弃这家。
+
+        用 `askretrycancel`(按钮上就是"重试/取消"), 并写明各自对应什么 —— 有些平台
+        (微信支付那类扫码页与后台同域的)只能靠页面文案判断, 存在"其实登上了但被判未
+        登录"的可能, 所以这个选择必须交给用户, 程序不自己决定。
+        返回 True=再登录一轮, False=放弃。
+        """
+        answer = {"v": False}
+        done = threading.Event()
+
+        def _ask():
+            try:
+                answer["v"] = messagebox.askretrycancel(
+                    "这家还没登录成功",
+                    f"{plat.name} · {merchant}\n\n"
+                    f"核实结果: 仍是未登录状态"
+                    f"({getattr(self, '_last_verify_reason', '未登录')})。\n\n"
+                    "「重试」= 重新打开这家商户的登录页, 继续登录\n"
+                    "「取消」= 先放弃这家, 继续后面的平台"
+                    "(稍后可单独对它做一次「首次登录」)")
+            except Exception:
+                answer["v"] = False
+            finally:
+                done.set()
+
+        self._ui(_ask)
+        # 与"等待用户扫码确认"同一套上限; 真到点没人理, 按放弃处理, 不能把整批卡死
+        if not done.wait(timeout=3600):
+            self._append_log(f"[提示] {plat.name}({merchant}) 的确认框一小时无人应答, 按放弃处理")
+            return False
+        return bool(answer["v"])
 
     def _add_merchant(self, key, raw_name):
         """建商户 profile 目录并加一行勾选; 返回 (是否成功, 给用户看的一句话)。
@@ -1587,41 +1650,29 @@ class LiushuiApp:
             if self._aborted():
                 self._append_log(f"[中止] 剩余 {len(tasks) - i} 项未登录")
                 break
-            self.set_platform_status(key, "warn")
-            # 登录需要人工操作,始终显示浏览器窗口;每个商户独立 profile
-            self._ensure_browser(plat, merchant, force_visible=True)
-            self._append_log(f">>> 正在打开 {plat.name}({merchant}) 登录页面...")
-            try:
-                plat.login(self.browser)
-                self._append_log(f"请在浏览器中完成 {plat.name}({merchant}) 登录")
-                self._append_log(f"操作提示: {plat.guide}")
-                self._append_log("  登录好之后直接关掉那个浏览器窗口即可, "
-                                 "程序会自动保存并继续下一个(不用回来点确定)")
-                browser = self.browser
-                self._ui(lambda n=plat.name, m=merchant, g=plat.guide:
-                         self._show_login_hint(n, m, g))
-                outcome, saved = self._wait_login_window_closed(browser)
-                self._ui(self._close_login_hint)
-                if outcome == "aborted":
-                    self._append_log(f"[中止] {plat.name}({merchant}) 的登录等待已结束")
-                    results.append("skip")
-                elif outcome == "timeout":
-                    self._append_log(
-                        f"[提示] {plat.name}({merchant}) 等待关闭登录窗口超时"
-                        f"({self.LOGIN_WAIT_TIMEOUT_S // 60} 分钟), 继续下一个")
-                    results.append("skip")
-                else:
-                    # 窗口是用户关的: 先释放这个 profile, 再后台重开一次做真核实
-                    self._close_browser()
-                    verdict = self._verify_login_after_close(plat, key, merchant, saved)
-                    results.append({True: "ok", False: "bad"}.get(verdict, "unknown"))
-            except Exception as e:
-                self._append_log(f"打开 {plat.name}({merchant}) 失败: {e}")
-                self.set_platform_status(key, "error")
-                results.append("bad")
+            final = "skip"
+            for attempt in range(1, self.LOGIN_RETRY_LIMIT + 1):
+                verdict = self._login_one_round(plat, key, merchant)
+                final = ("ok" if verdict is True else
+                         "unknown" if verdict is None else
+                         "bad" if verdict is False else "skip")
+                if final != "bad":
+                    break                      # 成功/没能核实/这一轮没走到核实: 都不问
+                if self._aborted():
+                    self._append_log(f"[中止] {plat.name}({merchant}) 不再重试")
+                    break
+                if attempt >= self.LOGIN_RETRY_LIMIT:
+                    self._append_log(f"  [提示] {plat.name}({merchant}) 已试过 {attempt} 次"
+                                     "仍未登录, 跳过这家(稍后可单独对它做一次首次登录)")
+                    break
+                if not self._ask_login_retry(plat, merchant, attempt):
+                    self._append_log(f"  {plat.name}({merchant}) 按您的选择先放弃这家")
+                    break
+                self._append_log(
+                    f"  {plat.name}({merchant}) 重新打开登录页"
+                    f"(第 {attempt + 1}/{self.LOGIN_RETRY_LIMIT} 次尝试)")
+            results.append(final)
             self._set_progress(value=i + 1)
-            # 核实用的浏览器在这里收掉(BrowserManager.close 会顺手导出登录态)
-            self._close_browser()
         if not tasks:
             self._append_log("[提示] 未勾选任何平台商户,请先添加/勾选商户。")
         else:

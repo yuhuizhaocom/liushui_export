@@ -147,6 +147,14 @@ class BrowserManager:
                 return self.page
             except Exception as e:
                 self._log(f"浏览器启动失败(第{attempt}次): {str(e)[:100]}", "warning")
+                # launch 成功但后续步骤(挂下载监听/恢复登录态)抛错时, 这个 context 是
+                # 活的 Chromium 进程, 只置 None 不 close 会把 profile 目录锁住,
+                # 之后每次启动都失败在同一个目录上。
+                if self.context:
+                    try:
+                        self.context.close()
+                    except Exception:
+                        pass
                 # 失败后必须停掉已启动的 playwright,否则其事件循环仍处于运行状态,
                 # 下一次 start() 会被误判为 "Sync API inside asyncio loop" 而掩盖真实错误
                 if self.playwright:

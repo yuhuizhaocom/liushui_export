@@ -116,7 +116,7 @@ liushui_export/
 ├── 脚本编写指南.md          # 面向开发者的平台插件编写指南
 ├── core/                    # ★ 核心框架包（15 个模块，见 2 章分层图）
 │   ├── main_gui.py          # 2150 行 · 界面 + 批任务编排
-│   ├── browser.py           # 1312 行 · BrowserManager
+│   ├── browser.py           # 1366 行 · BrowserManager
 │   ├── scheduler.py         # 443 行 · cron 与定时任务
 │   ├── platform_admin.py    # 336 行 · 平台管理与脚本调试
 │   ├── exporters.py         # 229 行 · SmartExporter
@@ -133,7 +133,7 @@ liushui_export/
 │   └── <key>/__init__.py + export.py     # 详见 8.2
 ├── tools/
 │   └── recording_to_script.py # 272 行 · 录制 JSONL → 平台脚本骨架
-├── tests/                   # 34 个文件约 5180 行，353 项 pytest（离线，不碰真浏览器）
+├── tests/                   # 35 个文件约 5370 行，372 项 pytest（离线，不碰真浏览器）
 ├── downloads/               # 运行时创建：账单归档 + 汇总副本 + 待确认/
 ├── browser_data/            # 运行时创建：<平台key>/<商户名>/ 每商户一个 profile
 ├── recordings/              # 「打开」手工测试窗口的点击录制 jsonl（已 gitignore）
@@ -310,7 +310,7 @@ liushui_export/
 | `headless` / `log_callback` | 由 GUI 按 `show_browser` 设置传入；日志出口注入点（保活传 None，此时只落文件+控制台） |
 | `playwright` / `context` / `page` | 三层活句柄，`start()` 赋值；失败路径清空，`close()` **不置 None** |
 | `_profile_dir` | 当前浏览器数据目录；**忘记调 `set_browser_profile` 时所有平台共用一份登录态** |
-| `_export_platform` / `_export_merchant` / `_export_start` / `_export_end` / `_export_task_id` | 本次导出上下文；`task_id = 起_止`（缺一则为空 → 归档退化少一层） |
+| `_export_platform` / `_export_merchant` / `_export_start` / `_export_end` / `_export_task_id` / `_export_sub_merchant` | 本次导出上下文；`task_id = 起_止`（缺一则为空 → 归档退化少一层）。`_export_sub_merchant` **只进文件名**（多一档 `商户_子商户`），不参与目录分层 |
 | `_dl_queue` / `_dl_capture_on` / `_dl_capture_t0` / `_dl_temp_dir` | 下载捕获状态机：事件队列、开关、捕获起点（兜底扫根目录判"新文件"的唯一依据）、本次临时目录 |
 | `_step_debug` / `_step_callback` / `_user_wait_callback` | 单步调试与"等用户操作"的回调注入点 |
 | `_window_closed` | `threading.Event`，用户是否已关掉窗口（全类唯一的跨线程原语，`close` 事件里置位） |
@@ -359,13 +359,13 @@ liushui_export/
 
 | 方法                                                   | 说明                                                                                                                        |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `set_export_context(platform, start, end, merchant)` | 设置导出上下文；任务 ID = `开始日期_结束日期`，保证同平台/商户/区间落同一文件夹。                                                                            |
+| `set_export_context(platform, start, end, merchant, sub_merchant="")` | 设置导出上下文；任务 ID = `开始日期_结束日期`，保证同平台/商户/区间落同一文件夹。第 5 个参数是可选子商户，只影响文件名那一档。                                                                            |
 | `begin_wait_download()`                              | **开启捕获模式**（点击"下载"前调用）：清空事件队列 → 记录捕获起点时间 → 归位根目录残留 UUID 文件 → 清空并重建 `下载目录/平台/商户/日期/临时` 目录。                                  |
 | `end_wait_download()`                                | 结束捕获：清队列、关开关、归位根目录残留、清理临时目录（空目录 rmdir，带 8 次重试防瞬时文件锁）。                                                                     |
 | `_on_download(download)`                             | 浏览器下载事件回调：捕获模式下把 `{dl, name}` 推入队列，否则忽略。                                                                                  |
 | `wait_download(timeout=120)`                         | **等待下载完成**：优先消费事件队列（`_save_download_to_temp` 保存到临时目录 → `_finalize_download` 归档）；兜底轮询根目录新出现的稳定文件；超时返回 None 并清理残留。          |
 | `_finalize_download(path)`                           | 将文件归入 `平台/商户/日期范围/`：顶层始终保留本次最新文件，同区间已存在同名旧文件则先复制到 `历史/原名_时间戳.扩展名` 再替换；移动失败有 10 次重试 + 拷贝兜底。                                |
-| `_normalize_download_name(...)`                      | 按设置生成文件名：`unified`=统一命名 `平台_商户_日期区间.扩展名`；`original`=保留原始名+商户前缀（UUID/无名文件回退统一命名）。扩展名白名单 `.xlsx/.xls/.csv/.txt`，默认 `.xlsx`。 |
+| `_normalize_download_name(...)`                      | 按 `download_name_mode` 生成文件名。**`unified`（默认）= 前缀 + 原始文件名**：`平台_商户[_子商户]_起_止_原名.原扩展名`；原始名是完整 UUID 或为空时退化成只有前缀（有扩展名仍保留）。**`original` = 只加 `商户_` 前缀**，其余原样（UUID/无名同样回退统一命名）。**扩展名一律原样保留、大小写不动、不再过白名单**——以前 `.zip/.rar/.pdf/无后缀` 会被强行改成 `.xlsx`，压缩包顶着表格的名字进归档。末尾过 `_safe_name`（分隔符换 `_`）。已带同一前缀的名字**不再叠第二层**（`_save_download_to_temp` 已经把临时文件叫最终名，`_finalize_download` 会对同一个名字再算一次，幂等这点是硬要求）。 |
 | `_carry_over_orphans()`                              | 把下载根目录残留的 UUID 文件**原名原字节**搬进 `downloads/待确认/`（不校验、不改名）。先跳过半成品后缀（`PARTIAL_DOWNLOAD_SUFFIXES`：搬不动正在写的文件，失败还会连累整轮），再**逐个 try**——某一家被占着只跳过它并写"留到下次"，其余照常归位。同名冲突时加 `_HHMMSS`。 |
 | `_cleanup_stale_files(root)`                         | 清理 `.~`/`.crdownload/.tmp/.part` 半成品残留（**递归**）。只在 `wait_download` 超时路径调用；⚠ `keep` 形参从未被使用，且后缀匹配是全仓递归，理论上会删掉任何叫 `xxx.tmp/.part` 的正常文件。 |
 | `_save_download_to_temp(dl)`                         | 事件路径落盘：三级取文件——① `dl.path()` 已存在就 `os.replace` **移动**进临时目录（注释：避免 downloads 根目录残留原始文件）；② `save_as`；③ 轮询等 `dl.path()` 出现（30×1s，极端情况可超出调用方 deadline 约 30 秒）。`_dl_temp_dir` 为空时直接返回 None——所以**没 `begin_wait_download` 就 `wait_download` 会退化成目录轮询那条路**。 |
@@ -374,8 +374,9 @@ liushui_export/
 | `_find_new_candidate(root)`                          | 只在**下载根目录**找最新候选，四道过滤：跳过中间态后缀 → 跳过图片（注释："兜底扫描不能把它们认领成本次下载"）→ 只认 `_dl_capture_t0` 之后出现的（"避免误取上次残留"）→ 刚改过 2 秒内的视为还在写不选。`os.listdir` 异常吞掉返回 None。 |
 | `_is_stable(path)`                                   | 间隔 1 秒两次取 size 相等才算写完（每次调用固定耗时 1 秒）。 |
 | `_dir_snapshot(root)`                                | `os.walk` **递归**收集全部文件路径集合，供 `wait_download` 的路 2 差集用；与 `_find_new_candidate` 的"只看根目录"口径不同。 |
-| `_validate_download(path)`                           | **成品校验**，按顺序：空文件/读不出 size → 否；文件头是图片魔数 → 否；名字是 `.xlsx` 但头两字节不是 `PK` → 否；**先数数据行**（`_count_rows`）能读出 >0 行 → 直接通过；读不出行才用文案区分空表与错误页（`_match_error_keyword`）；<1KB 且无数据行 → 否；`rows == 0` → 否；`rows is None`（如老 `.xls`）→ 维持宽松判定放行。513 行注释记录顺序不能反的原因：**以前整文件子串匹配错误文案优先，账单备注里一句"客户申请操作失败""请登录后台查看明细"就把真账单判无效并被 `_accept_download` 删掉**，用户看到的是"下载成功但文件没了"。 |
+| `_validate_download(path)`                           | **成品校验**，按顺序：空文件/读不出 size → 否；文件头是图片魔数 → 否；名字是 `.xlsx` 但头两字节不是 `PK` → 否；**先数数据行**（`_count_rows`）能读出 >0 行 → 直接通过；读不出行才用文案区分空表与错误页（`_match_error_keyword`）；<1KB 且无数据行 → 否；`rows == 0` → 否；数不出行时还要过 **`_seems_statement_format`** 这道格式门（扩展名属于 `.xlsx/.xls/.csv/.txt/.zip/.rar/.7z`，或**没有扩展名但文件头是 `PK`**）→ 才维持原有的宽松判定放行（老 `.xls` 走这一条）。513 行注释记录顺序不能反的原因：**以前整文件子串匹配错误文案优先，账单备注里一句"客户申请操作失败""请登录后台查看明细"就把真账单判无效并被 `_accept_download` 删掉**，用户看到的是"下载成功但文件没了"。 |
 | `_count_rows(path)` / `_xlsx_row_count(path)`         | CSV 数行去表头；`.xlsx` 用 `zipfile` 数 `<row>` 标签（**不引入 openpyxl**，近似值、可能含空行、假定首行是表头）；其它扩展名或解析失败返回 `None` 表示"读不出"，不参与判空。 |
+| `_seems_statement_format(path)` + `_STATEMENT_SUFFIXES` | 数不出行时的格式门：`.xlsx/.xls/.csv/.txt/.zip/.rar/.7z` 算像对账单（zip 那几档是微信支付"账单打包完成"的真实产物），没扩展名但文件头是 `PK` 也放行。**这扇门是命名改造带出来的**：以前不认识的扩展名会被强行改成 `.xlsx`，"名字 `.xlsx` 而内容不是 PK"那条顺带把 PDF/ELF 之类挡在外面；扩展名改成原样保留后，这个拦截必须显式补回来，否则一份 PDF 也能当成品交出去（`tests/test_download_integrity.py` 钉住）。 |
 | `_read_text_content(path)` / `_match_error_keyword(text)` | 多编码宽容解码（`latin-1` 永不失败，故总能返回内容；二进制/xlsx 得到近似文本不影响关键字检查）；关键字匹配**区分大小写**——页面写 `<HTML>`/`<!DOCTYPE` 不会命中，此时只能靠"读不出数据行 + 体积阈值"兜住。 |
 | `_file_head(path, n)` / `_is_image_file(path)`        | 读前 n 字节比对 `_IMAGE_MAGICS`；文件不存在得到 `b""` → False。 |
 | `_cleanup_temp_dir()`                                | 先置 `_dl_temp_dir=""` 再动手；空目录 `rmdir`（8 次 ×0.8s 防瞬时文件锁），非空 `rmtree(ignore_errors=True)`，注释："留待下次任务 begin 时清理"。 |
@@ -508,7 +509,7 @@ liushui_export/
 | ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `discover_platforms()`                | `core/loader.py`   | 扫描 `platforms/` 下含 `export.py` 的文件夹（跳过 `_` 开头的目录），动态导入，找出继承 `PlatformBase` 且定义 `key` 的子类并实例化，返回 `{key: 实例}`。 |
 | `discover_merchants(platform_keys)`   | `core/main_gui.py` | 扫描 `browser_data/<平台key>/` 下的子目录，发现已建档商户，返回 `{key: [商户名]}`。                                                  |
-| `load_settings()` / `save_settings()` | `core/config.py`   | 读写 `settings.json`，缺失字段回退 `DEFAULT_SETTINGS`（`show_browser`、`download_name_mode`）。                           |
+| `load_settings()` / `save_settings()` | `core/config.py`   | 读写 `settings.json`，缺失字段回退 `DEFAULT_SETTINGS`（8 个键，见 10 章）。                           |
 | `log(message, level, callback)`       | `core/logger.py`   | 统一日志：输出控制台（容错 `pythonw` 无 stdout 场景）→ 写入 `logs/run_YYYYMMDD.log` → 转发 GUI 回调。                                |
 | `check_dependencies()` / `main()`     | `core/main_gui.py` | 依赖检测与自动安装；程序入口。 |
 | `report_crash(summary, detail)`       | `core/main_gui.py` | `main()` 的异常兜底：先用模块顶部已导入的 `log` 记 ERROR，再弹窗。**返回值=日志是否真写成功**，弹窗文案跟着变（写不成功就不谎称"已记录到 logs 文件夹"）。与 crashguard 的区别：这里兜的是 `main()` 内部已起来之后的异常。 |
@@ -908,7 +909,7 @@ python -m playwright install chromium
 | `browser_data/<平台key>/<商户>/`     | 是（点 `+` 添加商户时） | Chromium 持久化 profile，登录态隔离的边界；删商户只删这一层 |
 | `browser_data/<平台key>/<商户>/login_state.json` | 保存登录态时 | `context.storage_state()` 导出的 cookie+localStorage（含 session cookie）；启动时由 `_restore_login_state` 注回 |
 | `recordings/<平台>_<商户>_<时间>.jsonl` | 点商户「打开」时 | 操作录制（点击/输入的 tag/text/id/placeholder…），喂给「录制→脚本」；已 gitignore |
-| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`preflight_login_check`（导出前统一查登录，默认开；只影响手动「开始导出」，定时任务不预检）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
+| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 前缀+原始名 / `original` 只加商户前缀）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`preflight_login_check`（导出前统一查登录，默认开；只影响手动「开始导出」，定时任务不预检）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
 | `selection_state.json`            | 是              | 平台/商户勾选状态（重启恢复），同时维护内存里的 `selection` 镜像供保活线程读                          |
 | `scheduled_tasks.json`            | 是              | 定时任务持久化（`{"version":1,"jobs":[...]}`，新增/编辑后原子保存）                                    |
 | `logs/run_YYYYMMDD_HHMMSS.log`    | 是              | **每次启动一个文件**（不是按天），格式 `时间 [LEVEL] 消息`，DEBUG 级；超过 `cleanup_keep_days` 的会被清理 |
@@ -922,7 +923,7 @@ python -m playwright install chromium
 | 文件                       | 规模（当前实际行数）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
 | `core/main_gui.py`       | 2150 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、录制/调试/平台管理对话框入口 |
-| `core/browser.py`        | 1312 行      | 浏览器管理、下载捕获与归档、成品校验、登录态存取、操作录制（项目体量最大的核心模块） |
+| `core/browser.py`        | 1366 行      | 浏览器管理、下载捕获与归档、成品校验（含格式门）、登录态存取、操作录制（项目体量最大的核心模块） |
 | `core/scheduler.py` | 443 行 | 定时任务（cron 解析 / `TaskStore` 持久化 / 轮询触发 / 管理界面） |
 | `core/platform_admin.py` | 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/exporters.py`      | 229 行       | 智能导出器（无人写 `export()` 时的默认兜底导出）  |
@@ -938,7 +939,7 @@ python -m playwright install chromium
 | `core/theme.py` | 17 行 | 配色常量（供 dialogs 复用，避免反向 import main_gui 成环） |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台共 987 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 34 个文件约 5180 行 | pytest 测试（353 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手 |
+| `tests/` | 35 个文件约 5370 行 | pytest 测试（372 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门 |
 | `start.bat` / `启动工具.vbs` | 40 / 158 行 | 启动脚本（vbs 五档找 Python + 首跑装依赖；**必须保持纯 ASCII**，见 13 章） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |

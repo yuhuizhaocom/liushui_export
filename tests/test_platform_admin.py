@@ -146,3 +146,38 @@ def test_probe_still_raises_attribute_error_for_unknown_names():
 
     with pytest.raises(AttributeError):
         DebugProbe(Inner(), steps=[]).no_such_method()
+
+
+GOOD = 'from core.platform_base import PlatformBase\n\n\nclass OkExporter(PlatformBase):\n    key = "ok"\n'
+
+
+def test_save_rejects_syntax_error_without_touching_the_file(tmp_path):
+    """一次误编辑不能把原本能跑的脚本毁掉 —— 磁盘上必须还是旧的好内容。"""
+    from core.platform_admin import save_platform_script
+
+    p = tmp_path / "export.py"
+    p.write_text(GOOD, encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        save_platform_script(str(p), "def broken(:\n    pass\n")
+    assert p.read_text(encoding="utf-8") == GOOD
+    assert "语法错误" in str(e.value)
+    assert not (tmp_path / "export.py.tmp").exists()
+
+
+def test_save_writes_valid_content_without_temp_leftovers(tmp_path):
+    from core.platform_admin import save_platform_script
+
+    p = tmp_path / "platforms" / "ok" / "export.py"
+    save_platform_script(str(p), GOOD)         # 目录不存在也要能写
+    assert p.read_text(encoding="utf-8") == GOOD
+    assert not (p.parent / "export.py.tmp").exists()
+
+
+def test_save_reports_line_number(tmp_path):
+    from core.platform_admin import save_platform_script
+
+    p = tmp_path / "export.py"
+    p.write_text(GOOD, encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        save_platform_script(str(p), "x = 1\ny = (\n")
+    assert "第 2 行" in str(e.value)

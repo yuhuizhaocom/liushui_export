@@ -7,9 +7,9 @@ import os
 import re
 import tkinter as tk
 from tkinter import ttk, messagebox
-import py_compile
 
 from core.loader import PLATFORMS_DIR
+from core.config import write_text_atomic
 from core.logger import log
 
 _KEY_RE = re.compile(r"^[a-z0-9_]+$")
@@ -34,6 +34,23 @@ class {Key}Exporter(PlatformBase):
 def validate_platform_key(key):
     """平台 key 合法性: 小写字母/数字/下划线。"""
     return bool(key) and bool(_KEY_RE.match(key))
+
+
+def save_platform_script(path, content):
+    """校验语法通过后才原子写入平台脚本, 语法错误抛 ValueError。
+
+    以前是先 open("w") 写盘、再 py_compile 检查: 检查失败时磁盘上**已经是坏文件**,
+    而下一次 loader 扫描/reload 会静默跳过它(loader 只写日志) —— 用户原本能跑的
+    脚本等于被一次误编辑毁掉, 而且编辑器里那份好内容也已被覆盖。
+    """
+    try:
+        compile(content, path, "exec")
+    except SyntaxError as e:
+        raise ValueError("第 %s 行语法错误: %s" % (e.lineno, e.msg))
+    except Exception as e:                       # 编码错误等
+        raise ValueError("脚本无法编译: %s" % e)
+    write_text_atomic(path, content)
+    return path
 
 
 def generate_platform_skeleton(key, name, login_url, export_url, guide, platforms_dir=PLATFORMS_DIR):
@@ -181,11 +198,12 @@ class PlatformEditor(tk.Toplevel):
     def _save(self):
         content = self.text.get("1.0", "end-1c")
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
-                f.write(content)
-            py_compile.compile(self.path, doraise=True)
+            save_platform_script(self.path, content)
+        except ValueError as e:
+            self.status.config(text=f"保存失败: {e}(磁盘上的原文件未改动)")
+            return
         except Exception as e:
-            self.status.config(text=f"保存失败(语法错误): {e}")
+            self.status.config(text=f"写入失败: {e}")
             return
         self.status.config(text="已保存 ✓", fg="#27ae60")
         log(f"平台脚本已保存: {self.key}", callback=None)

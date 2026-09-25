@@ -49,20 +49,14 @@ def load_settings():
     return settings
 
 
-def write_json_atomic(path, data):
-    """先写同目录临时文件再 os.replace, 不留半截 JSON。
-
-    这几个文件都是"界面每次改动就整体重写"的(settings / scheduled_tasks /
-    selection_state): 直接 open("w") 覆盖时若进程在写入中途死掉, 文件会是截断的;
-    而三处读取都是 except → 用默认值/返回空, 结果用户看到的是"配置和定时任务被
-    静默清空"。os.replace 在同一磁盘卷上是原子替换。
-    """
+def write_text_atomic(path, text):
+    """先写同目录临时文件再 os.replace, 不留半截文件(文本/源码同理)。"""
     folder = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(folder, exist_ok=True)
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -72,6 +66,17 @@ def write_json_atomic(path, data):
         except OSError:
             pass
         raise
+
+
+def write_json_atomic(path, data):
+    """JSON 版原子写。
+
+    这几个文件都是"界面每次改动就整体重写"的(settings / scheduled_tasks /
+    selection_state): 直接 open("w") 覆盖时若进程在写入中途死掉, 文件会是截断的;
+    而三处读取都是 except → 用默认值/返回空, 结果用户看到的是"配置和定时任务被
+    静默清空"。os.replace 在同一磁盘卷上是原子替换。
+    """
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def save_settings(settings):

@@ -133,7 +133,7 @@ liushui_export/
 │   └── <key>/__init__.py + export.py     # 详见 8.2
 ├── tools/
 │   └── recording_to_script.py # 272 行 · 录制 JSONL → 平台脚本骨架
-├── tests/                   # 34 个文件约 4950 行，342 项 pytest（离线，不碰真浏览器）
+├── tests/                   # 34 个文件约 5180 行，353 项 pytest（离线，不碰真浏览器）
 ├── downloads/               # 运行时创建：账单归档 + 汇总副本 + 待确认/
 ├── browser_data/            # 运行时创建：<平台key>/<商户名>/ 每商户一个 profile
 ├── recordings/              # 「打开」手工测试窗口的点击录制 jsonl（已 gitignore）
@@ -327,7 +327,7 @@ liushui_export/
 | `save_login_state_on_close()`        | 上面那层守卫的实现，返回是否真的写了文件；`_saved_cookie_count()` 读已落盘的 `login_state.json` 条数。 |
 | `_cleanup_lock_files()`              | 删除 profile 目录中的 `Singleton*/lockfile/*.lock` 残留文件，防止 Chrome 启动失败。每个 `os.remove` 与整体各自吞异常，只数条数写日志。 |
 | `_restore_login_state()`             | `start()` 的最后一步：读 `profile/login_state.json` → `context.add_cookies()`（**必须在任何导航之前**）→ 把 `origins[].localStorage` 汇成 `{origin:{k:v}}`，用 `add_init_script` 在 `DOMContentLoaded` 时按 `location.origin` 写回（只覆盖同名键，因此**只对注册之后加载的页面生效**）。整体异常只 warning，不阻断启动。 |
-| `save_login_state(quiet=False)`      | `context.storage_state()` 把 cookie+localStorage（含无过期时间的 session cookie）整体写到 `profile/login_state.json`；`quiet=True` 不写日志（首次登录是"边等边存"，每次写一行会刷满屏）。返回 True/False。⚠ 用 `open("w")` 直写而非 `write_json_atomic`（见 13 章）。 |
+| `save_login_state(quiet=False)`      | `context.storage_state()` 把 cookie+localStorage（含无过期时间的 session cookie）整体写到 `profile/login_state.json`；`quiet=True` 不写日志（首次登录是"边等边存"，每次写一行会刷满屏）。返回 True/False。落盘走 `config.write_text_atomic`（**先 `json.dumps` 再原子替换**：以前 `open("w")` 会先把文件截断再序列化，一失败就把上次的登录态换成空文件）。 |
 | `save_login_state_on_close()`        | `close()` 的第一步，也是上面那条守卫的实现：取当前 cookie 条数 `live`（取不到直接返回 False——窗口已被用户关掉，存不上也不该吵），再与 `_saved_cookie_count()` 比：**仅当 `live < saved` 且已有文件时不覆盖**。注释 1112 的理由：关闭点很多（导出前预检、保活巡检、手工测试窗口、程序退出），万一某平台页面会清 cookie，直接存就把上次好不容易存的登录态换成一份空的。条数相同但值变了（续期/换 token）照存。 |
 | `_saved_cookie_count()`              | 读已落盘 `login_state.json` 的 cookie 条数；文件缺失或读不出返回 `-1`（于是"任何 live 数都不算更少"，第一次一定能存上）。 |
 | `__enter__` / `__exit__`             | `start()` / `close()`；`__exit__` 返回 None，异常照常外抛。当前主流程都是手工 start/close，上下文管理器用法只是预留。 |
@@ -366,11 +366,11 @@ liushui_export/
 | `wait_download(timeout=120)`                         | **等待下载完成**：优先消费事件队列（`_save_download_to_temp` 保存到临时目录 → `_finalize_download` 归档）；兜底轮询根目录新出现的稳定文件；超时返回 None 并清理残留。          |
 | `_finalize_download(path)`                           | 将文件归入 `平台/商户/日期范围/`：顶层始终保留本次最新文件，同区间已存在同名旧文件则先复制到 `历史/原名_时间戳.扩展名` 再替换；移动失败有 10 次重试 + 拷贝兜底。                                |
 | `_normalize_download_name(...)`                      | 按设置生成文件名：`unified`=统一命名 `平台_商户_日期区间.扩展名`；`original`=保留原始名+商户前缀（UUID/无名文件回退统一命名）。扩展名白名单 `.xlsx/.xls/.csv/.txt`，默认 `.xlsx`。 |
-| `_carry_over_orphans()`                              | 把下载根目录残留的 UUID 无扩展名文件归位（`_finalize_download`）。                                                                            |
+| `_carry_over_orphans()`                              | 把下载根目录残留的 UUID 文件**原名原字节**搬进 `downloads/待确认/`（不校验、不改名）。先跳过半成品后缀（`PARTIAL_DOWNLOAD_SUFFIXES`：搬不动正在写的文件，失败还会连累整轮），再**逐个 try**——某一家被占着只跳过它并写"留到下次"，其余照常归位。同名冲突时加 `_HHMMSS`。 |
 | `_cleanup_stale_files(root)`                         | 清理 `.~`/`.crdownload/.tmp/.part` 半成品残留（**递归**）。只在 `wait_download` 超时路径调用；⚠ `keep` 形参从未被使用，且后缀匹配是全仓递归，理论上会删掉任何叫 `xxx.tmp/.part` 的正常文件。 |
 | `_save_download_to_temp(dl)`                         | 事件路径落盘：三级取文件——① `dl.path()` 已存在就 `os.replace` **移动**进临时目录（注释：避免 downloads 根目录残留原始文件）；② `save_as`；③ 轮询等 `dl.path()` 出现（30×1s，极端情况可超出调用方 deadline 约 30 秒）。`_dl_temp_dir` 为空时直接返回 None——所以**没 `begin_wait_download` 就 `wait_download` 会退化成目录轮询那条路**。 |
 | `_accept_download(path)`                             | **先 `_finalize_download` 归档、再 `_validate_download` 校验**，不过就删文件。注释 446 的理由：必须先归档，否则文件只留在临时目录，随后 `end_wait_download` 清临时目录会把它一起删掉，出现"日志说下载完成、磁盘上找不到文件"；且校验通过与否要以归档后的最终路径为准，避免"日志写 success 实为空表"。 |
-| `_take_new_download(root, deadline)`                 | ⚠ 名不副实：**不碰 `_dl_queue`**，实为在 deadline 内轮询 `_find_new_candidate` + `_finalize_download`，返回的是**已归档**路径（于是 `_accept_download` 会再归档一次，见 13 章）。 |
+| `_wait_root_download(root, deadline)`                | 事件路径没能落盘时的兜底：在 deadline 内轮询 `_find_new_candidate`，把根目录里**本次新出现的原始文件**交出去（`sleep(1.5)` 一轮）。**不归档** —— 归档统一由调用方 `_accept_download` 做一次（以前它自己 `_finalize_download` 一遍，于是同一文件被归档两次，`original` 命名下多叠一层商户前缀）。以前叫 `_take_new_download`，名字与实现不符（既不碰队列，也不该"移动到目标位置"）。 |
 | `_find_new_candidate(root)`                          | 只在**下载根目录**找最新候选，四道过滤：跳过中间态后缀 → 跳过图片（注释："兜底扫描不能把它们认领成本次下载"）→ 只认 `_dl_capture_t0` 之后出现的（"避免误取上次残留"）→ 刚改过 2 秒内的视为还在写不选。`os.listdir` 异常吞掉返回 None。 |
 | `_is_stable(path)`                                   | 间隔 1 秒两次取 size 相等才算写完（每次调用固定耗时 1 秒）。 |
 | `_dir_snapshot(root)`                                | `os.walk` **递归**收集全部文件路径集合，供 `wait_download` 的路 2 差集用；与 `_find_new_candidate` 的"只看根目录"口径不同。 |
@@ -435,7 +435,7 @@ liushui_export/
 | `login(browser)`                        | 方法  | 默认实现：`navigate(login_url)` 等待用户手动登录；可覆盖做特殊处理。唯一调用点在 `_login_one_round`。 |
 | `check_login(browser)`                   | 方法  | **登录态判据**：直接访问受保护的 `export_url` → `wait_for(timeout=3)` 等未登录重定向落地 → 用 `_is_login_url` 看当前 URL 是否落到独立登录路径。注释 62-67 说明为什么不用旧判法（"访问 login_url + URL/标题含 login/登录 就判未登录"会把"已登录但登录页标题仍带登录字样"误判成未登录）。**扫码页与后台同域的平台必须覆盖它**改用文案/元素判断（现只有微信支付覆盖，用 `is_visible_text("交易中心")` + 扫码文案表）。边界：`export_url` 自身含 `/login`、`login.` 时退化为旧判法；`login_url` 为空时 `navigate("")` 只会重试失败返回 False（不抛错），随后取到的还是旧 URL → **可能假阳性判已登录**。 |
 | `_is_login_url(url)`                     | 静态方法 | token 子串表：`/login`、`login.`、`login.cgi`、`passport`、`/signin`、`sign_in`、`sso`、`cas`、`auth.`（URL 先 lower）。⚠ `cas`/`sso` 这类短 token 可能命中普通业务路径（`/purchase_case`）而误判未登录。 |
-| `export(browser, start_date, end_date)` | 方法  | **核心接口**。返回 `"success"`（成功）/ `"manual"`（需手动）/ `"failed"`（失败）。默认实现：懒加载 `SmartExporter` 执行智能导出。⚠ 这里构造 `SmartExporter(browser)` **没传 `log_callback`**，于是默认导出路径上的 `[自动]/[提示]/[成功]` 一条都进不了日志（11 个内置平台都自带 `export()`，走不到这里）。 |
+| `export(browser, start_date, end_date)` | 方法  | **核心接口**。返回 `"success"`（成功）/ `"manual"`（需手动）/ `"failed"`（失败）。默认实现：懒加载 `SmartExporter` 执行智能导出，并把 `log_callback=browser._log` 接上——否则 SmartExporter 的 `_log()` 是空操作，默认导出全程静默（11 个内置平台都自带 `export()`，走不到这里，但"平台管理新建、还没写脚本"的平台第一次导出就会）。 |
 | `open_export_page(browser)`            | 方法  | 骨架钩子①：`navigate(export_url)` + `sleep(PAGE_SETTLE_S)` + `close_popup()`（后者当前空转，调用点保留以便恢复）。 |
 | `set_date_range(browser, start, end)`  | 方法  | 骨架钩子②：按 placeholder 填「开始日期/结束日期」（各取 `[:DATE_VALUE_SLICE]`）。**返回两个框是否都填成功**；页面改版/框名不同导致填不进去时调用方必须停手——否则后台按自己的默认区间出账单，文件名却是本次请求的区间，从产物上根本看不出错了。日期框名字不同的平台（视频号"动账开始/结束时间"、微信 `.el-range-input`）需覆盖本方法。 |
 | `trigger_export(browser, start, end)`  | 方法  | 骨架钩子③：点「查询」`sleep(3)` 再点「导出」`sleep(5)`。需先切标签、或导出后还要去历史报表页的平台覆盖此方法（现被 6 个平台覆盖）。 |
@@ -448,7 +448,7 @@ liushui_export/
 
 ### 5.4 `SmartExporter`（core/exporters.py）— 智能导出器
 
-当平台不自定义 `export()` 时由基类调用，自动执行通用导出流程。**现状核实**：11 个内置平台**没有一个**在用它（各自实现了 `export()`），它只服务"用平台管理新建、还没写脚本"的平台。构造签名是 `(browser, log_callback=None)`，而 `PlatformBase.export` 调用时**不传 `log_callback`** → `_log()` 空转，默认路径上的提示一条都进不了日志（见 13 章）。
+当平台不自定义 `export()` 时由基类调用，自动执行通用导出流程。**现状核实**：11 个内置平台**没有一个**在用它（各自实现了 `export()`），它只服务"用平台管理新建、还没写脚本"的平台。构造签名是 `(browser, log_callback=None)`；`PlatformBase.export` 现在传的是 `log_callback=browser._log`，于是它认出了几个日期框、点了哪个按钮、为什么转 manual 都会进统一日志（以前没传，默认导出全程静默）。
 
 | 方法                                  | 说明                                                                                                                        |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -543,7 +543,7 @@ liushui_export/
 | `INCOMPLETE_SUFFIXES` / `sanitize_name(name, fallback)` / `task_folder(start, end)` | 半成品后缀表；路径非法字符 `<>:"/\|?*` 与控制字符替换（兜底值由调用方决定：商户名用空串提示重填、profile 用 `default`）；日期目录名 `起_止`（与 `BrowserManager._export_task_id` 同形，两处各写一份）。 |
 | `find_output_files(base, platform_names, start, end)` | 认两种结构：`平台/日期/`（旧）与 `平台/商户/日期/`（新），都收并按出现顺序去重。**只下探一层**，所以 `历史/`、`临时/` 里的归档不进汇总（原件仍在任务目录，不算丢）。跳过非文件与半成品后缀。传入的是平台**显示名**。 |
 | `copy_to_summary_dir(base, names, start, end, log, now)` | 复制到 `downloads/起_止_<落地时间戳>/`；无起止或没有可汇总文件返回 **None**（调用方据此不再打开文件夹）。逐文件 `copy2`，**单个失败 `pass`**（注释 83：不能影响其余，更不能中断导出收尾）。 |
-| `SUMMARY_DIR_RE` / `LOG_FILE_RES` / `KEEP_FOREVER` | 汇总目录名格式 `起_止_YYYYMMDD_HHMMSS`；日志文件名白名单 `^run_\d{8}\.log$` 与 `^crash_\d{8}_\d{6}_\d{6}\.txt$`；`stats.jsonl` 再旧也不删（看板唯一历史来源）。⚠ `run_` 那条正则与实际日志名 `run_YYYYMMDD_HHMMSS.log`（每次启动一个）**不匹配**，见 13 章。 |
+| `SUMMARY_DIR_RE` / `LOG_FILE_RES` / `KEEP_FOREVER` | 汇总目录名格式 `起_止_YYYYMMDD_HHMMSS`；日志文件名白名单收三种：`^run_\d{8}\.log$`（早期按天）、`^run_\d{8}_\d{6}\.log$`（现在每次启动一个）、`^crash_\d{8}_\d{6}_\d{6}\.txt$`；`stats.jsonl` 再旧也不删（看板唯一历史来源）。白名单是用来「认名字」的——不在表里的文件一律当别人的东西不碰。 |
 | `_cutoff` / `_old_enough` | 只看 `os.path.getmtime`；stat 失败（被占用/权限）按"不动"处理。 |
 | `prune_logs(log_dir, cutoff, dry_run)` | 只删目录内**文件名匹配白名单**且够旧的普通文件；`keep_days<=0` 直接返回 `[]`。正在写的日志 mtime 一直被刷新，不会被清。 |
 | `prune_summary_dirs(dl_dir, cutoff, dry_run)` | 只看 `downloads/` **顶层**、名字匹配汇总格式的目录（`re.match` 不中就 `continue`，注释 88："平台目录/待确认/杂项一律不看"），跳过符号链接；`rmtree` 的 OSError 吞掉。 |
@@ -799,7 +799,7 @@ end_wait_download(): 清队列、归位残留、清理临时目录
 
 #### 微信支付 `wechatpay`（自检与取证最重）
 
-`check_login` 覆盖（57-74）：扫码页与后台**同域**，URL 区分不了 → 先找已登录特征 `is_visible_text("交易中心", 5)`（快，避免逐个等扫码文案超时），否则轮询「扫码登录/微信扫码/扫一扫登录/请使用微信」，都没命中**保守判未登录**。`SELECTORS` 4 个键。`_set_dates`（76-100）：`.el-range-input` ≥2 个时走 `click → Control+a → keyboard.type → Enter`（docstring 77：`fill()` 对 Vue 受控组件不生效），数量不足才退回 `fill_placeholder`。`_download_one_bill`（102-133）：`begin_wait_download` → 点账单类型链接 → 等「账单打包完成」→ 用 `.el-dialog:visible .el-button--primary` 点确认（注释 115：按钮文案是含空格的「确 定」且页面有多个隐藏 el-dialog）→ 可能再进「下载列表」→「立即下载」→ `wait_download(90)`；失败 `snapshot_on_failure`。`_export_inner`：`check_selectors` 缺失只记日志 → `assert_selector("date_range_input")` → 填日期 → `snapshot`+`step_pause` → Escape 关日期浮层 → `assert_selector("query_btn")` → **`click_text("查询", exact=True)`**（注释 168：左侧菜单有「已结算查询」，不精确会跳页）→ 循环 `bills = ["业务明细账单"]`（注释 178：要加"业务汇总账单"在这里追加，多文件落同一归档目录）→ 全成功 `success` / 部分 `manual` / 全失败 `failed`。整个 `_export_inner` 被 try 包住，任何异常 → 截图 + `"failed"`。
+`check_login` 覆盖（57-74）：扫码页与后台**同域**，URL 区分不了 → 先找已登录特征 `is_visible_text("交易中心", 5)`（快，避免逐个等扫码文案超时），否则轮询「扫码登录/微信扫码/扫一扫登录/请使用微信」，都没命中**保守判未登录**。`SELECTORS` 4 个键。`_set_dates`（76-100）：`.el-range-input` ≥2 个时走 `click → Control+a → keyboard.type → Enter`（docstring 77：`fill()` 对 Vue 受控组件不生效），数量不足才退回 `fill_placeholder`，**返回两条 placeholder 是否都填成功**；`_export_inner` 拿到 False 就停手转 `manual`（键盘那条路走通才算成功）。`_download_one_bill`（102-133）：`begin_wait_download` → 点账单类型链接 → 等「账单打包完成」→ 用 `.el-dialog:visible .el-button--primary` 点确认（注释 115：按钮文案是含空格的「确 定」且页面有多个隐藏 el-dialog）→ 可能再进「下载列表」→「立即下载」→ `wait_download(90)`；失败 `snapshot_on_failure`。`_export_inner`：`check_selectors` 缺失只记日志 → `assert_selector("date_range_input")` → 填日期 → `snapshot`+`step_pause` → Escape 关日期浮层 → `assert_selector("query_btn")` → **`click_text("查询", exact=True)`**（注释 168：左侧菜单有「已结算查询」，不精确会跳页）→ 循环 `bills = ["业务明细账单"]`（注释 178：要加"业务汇总账单"在这里追加，多文件落同一归档目录）→ 全成功 `success` / 部分 `manual` / 全失败 `failed`。整个 `_export_inner` 被 try 包住，任何异常 → 截图 + `"failed"`。
 
 #### 京东 `jingdong` / 拼多多 `pinduoduo`（事件驱动的手写流程）
 
@@ -807,7 +807,7 @@ end_wait_download(): 清队列、归位残留、清理临时目录
 
 #### 视频号 `shipinhao`（唯一需人工）
 
-`manual_intervention=True` + `intervention_hint`（注释 42 写明 True 会被排到最后）。真实 placeholder 是「动账开始/结束时间」，所以覆盖成私有 `_set_time`（46-83）：正则 placeholder 定位 → `fill()` 后**回读 `input_value()` 校验** `[:10]` 是否生效，没生效就 `click → Control+a → keyboard.type → 回车`，值拼成 `"YYYY-MM-DD 00:00:00"` / `" 23:59:59"`，结束 `Escape` 关面板。步骤：进页 → 「资金流水」→ `_set_time` → 查询 → 「全部导出」`sleep(10)` → **`wait_user("…手机上使用微信扫码确认…")`**（注释 107：平台弹"需手机微信扫码"，这里阻塞等用户）→ `begin_wait_download` → 30 秒内可见才点「下载数据」→ `wait_download(60)`。⚠ 96 行**没有检查 `_set_time` 的返回值**，日期没填进也不会中止（见 13 章）。
+`manual_intervention=True` + `intervention_hint`（注释 42 写明 True 会被排到最后）。真实 placeholder 是「动账开始/结束时间」，所以覆盖成私有 `_set_time`（46-83）：正则 placeholder 定位 → `fill()` 后**回读 `input_value()` 校验** `[:10]` 是否生效，没生效就 `click → Control+a → keyboard.type → 回车`，值拼成 `"YYYY-MM-DD 00:00:00"` / `" 23:59:59"`，结束 `Escape` 关面板。步骤：进页 → 「资金流水」→ `_set_time` → 查询 → 「全部导出」`sleep(10)` → **`wait_user("…手机上使用微信扫码确认…")`**（注释 107：平台弹"需手机微信扫码"，这里阻塞等用户）→ `begin_wait_download` → 30 秒内可见才点「下载数据」→ `wait_download(60)`。`_set_time` 返回 False（找不到输入框或过程报错）时**当场停手**：写 `[中止]` 日志 + `snapshot(「日期未填入」)` + 返回 `manual`，不再往下点查询/全部导出。
 
 #### 六个骨架平台的差异点
 
@@ -911,7 +911,7 @@ python -m playwright install chromium
 | `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`preflight_login_check`（导出前统一查登录，默认开；只影响手动「开始导出」，定时任务不预检）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
 | `selection_state.json`            | 是              | 平台/商户勾选状态（重启恢复），同时维护内存里的 `selection` 镜像供保活线程读                          |
 | `scheduled_tasks.json`            | 是              | 定时任务持久化（`{"version":1,"jobs":[...]}`，新增/编辑后原子保存）                                    |
-| `logs/run_YYYYMMDD_HHMMSS.log`    | 是              | **每次启动一个文件**（不是按天），格式 `时间 [LEVEL] 消息`，DEBUG 级。⚠ 清理白名单认的是按天格式，见 13.1 |
+| `logs/run_YYYYMMDD_HHMMSS.log`    | 是              | **每次启动一个文件**（不是按天），格式 `时间 [LEVEL] 消息`，DEBUG 级；超过 `cleanup_keep_days` 的会被清理 |
 | `logs/stats.jsonl`                | 是（每次导出一条）   | 稳定性统计流水：`ts/platform/merchant/start_date/end_date/result/duration_s/error`；看板唯一历史来源，**任何清理都不许碰** |
 | `logs/crash_YYYYMMDD_HHMMSS_微秒.txt` | 崩溃时才生成 | 未捕获异常的完整堆栈（含子线程里的）。**双击没反应/闪一下就退时先看这里**，弹窗上写的是它的路径；写不进 `logs` 时退回项目根同名文件。                        |
 
@@ -937,13 +937,11 @@ python -m playwright install chromium
 | `core/outputs.py` | 89 行 | 导出成品查找与汇总副本复制（纯文件操作，可脱离界面单测） |
 | `core/theme.py` | 17 行 | 配色常量（供 dialogs 复用，避免反向 import main_gui 成环） |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
-| `platforms/*/export.py` | 11 个平台共 973 行 | 平台导出脚本（微信支付 195 行最重，京东 98 / 拼多多 95 / 视频号 122 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 34 个文件约 4950 行 | pytest 测试（342 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检） |
+| `platforms/*/export.py` | 11 个平台共 987 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
+| `tests/` | 34 个文件约 5180 行 | pytest 测试（353 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手 |
 | `start.bat` / `启动工具.vbs` | 40 / 158 行 | 启动脚本（vbs 五档找 Python + 首跑装依赖；**必须保持纯 ASCII**，见 13 章） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
-| `tests/` | 34 个文件约 4950 行 | pytest 测试（342 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检） |
-| `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
 | `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |
@@ -967,7 +965,7 @@ python -m playwright install chromium
 7. 必须先 `_finalize_download` 归档再校验，且校验**先数数据行、后看错误文案**：顺序反了会把备注里写着"操作失败/请登录"的真账单当错误页删掉；先删后归档会出现"日志说下载完成、磁盘上找不到文件"。
 8. 兜底扫描（路 2）与事件队列（路 1）口径不同：一个递归看整个 downloads、一个只看根目录且要求 mtime 在 `_dl_capture_t0` 之后。往 downloads 根目录写文件的方法只有 `screenshot()`，它正是"截图被认领成账单"事故的源头。
 9. 归属不明的 UUID 残留一律原名原字节进 `downloads/待确认/`，**不按当前上下文改名归到某个商户目录**——对账最怕拿错人的账单。`待确认/`、`browser_data/`、账单原件、`stats.jsonl` 在任何清理逻辑里都不得碰。
-10. 日期只填进一个框就必须停手（骨架 `run_standard_flow`、京东/拼多多手写版都遵守）：另一端还是页面默认区间，硬导会得到错区间的账单，而文件名看起来完全正常。
+10. 日期没全部设成功就必须停手，不许继续点查询/导出：骨架 `run_standard_flow`、京东/拼多多的手写检查、视频号 `_set_time`、微信支付 `_set_dates` 五处都遵守（后两处曾把返回值丢掉过）。另一端还是页面默认区间时，硬导会得到一份错区间的账单，而文件名看起来完全正常。
 
 **线程与界面**
 
@@ -994,16 +992,20 @@ python -m playwright install chromium
 
 > 这一节是把"读代码时容易当成 bug、其实要么是有意的、要么确实坏着"的地方摊开。**有意为之的别顺手清理，确实坏着的改动前先确认。**
 
-### 13.1 确实失效/会出错的地方（改动前建议先确认取舍）
+### 13.1 确实失效/会出错的地方（2026-09-25 已全部修掉，留此备查）
 
-| 位置 | 现象 | 说明 |
+| 位置 | 曾经的现象 | 修法与提交 |
 | --- | --- | --- |
-| `core/cleanup.py:22` `LOG_FILE_RES` | **每次启动的运行日志永远清不掉** | 白名单是 `^run_\d{8}\.log$`（按天命名），而 `logger.log_file()` 自"按运行次命名"改造后写的是 `run_YYYYMMDD_HHMMSS.log`。实测本机 `logs/` 189 个文件里 187 个是不匹配的那个形状，只有 2 个老的按天文件会被清。`crash_*.txt` 那条格式是对的。 |
-| `core/platform_base.py:213` | 默认导出路径**完全没有日志** | `SmartExporter(browser)` 没传 `log_callback`，`_log()` 空转。11 个内置平台自带 `export()` 所以平时走不到，但"平台管理新建、还没写脚本"的平台一旦真用默认导出，全程静默。 |
-| `platforms/shipinhao/export.py:96`、`platforms/wechatpay/export.py:157` | 日期没填进去照样往下点 | 两处都忽略了 `_set_time` / `_set_dates` 的 bool 返回值，违背 12 章第 10 条；结果是"拿到页面默认区间的账单，却按本次请求区间命名"。骨架平台与京东/拼多多都做了这个检查，这两个手写的漏了。 |
-| `core/browser.py:587` `_take_new_download` | `original` 命名模式下可能二次加前缀 | 它返回的是**已归档**路径，`_accept_download` 又归档一次；`unified` 幂等所以默认设置下看不出来，`download_name_mode=original` 时会出现 `商户_商户_原名.xlsx`。另外这个方法**名不副实**（不碰 `_dl_queue`）。 |
-| `core/browser.py:1237` `save_login_state` | 登录态文件是不安全写 | 用 `open("w")` 直写，而仓库对"整体重写的文件"已统一 `write_json_atomic`。读侧都有 except 兜底，最坏后果是"这次登录没存上"。 |
-| `core/browser.py:284` `_carry_over_orphans` | 可能去搬正在写入的文件 | 与另外两处（609、430）不同，它没有 `.crdownload/.tmp/.part` 过滤；单个 `shutil.move` 失败会被外层 `except: pass` 吞掉并**中断整轮归位**。 |
+| `core/cleanup.py` `LOG_FILE_RES` | 白名单只认按天名 `^run_\d{8}\.log$`，而 logger 写的是 `run_YYYYMMDD_HHMMSS.log` → 「日志保留(天)」对运行日志一直没生效（实测本机 189 个日志里 187 个永不被清） | 白名单收进按启动时刻那一种格式；`44edef8` |
+| `core/browser.py` `_carry_over_orphans` | 不过滤中间态后缀 → 去搬浏览器还在写的文件，Windows 上 `shutil.move` 必失败，而失败被外层 `except` 吞掉、**整轮归位中止**，本该搬走的残留也留在根目录 | 先跳 `PARTIAL_DOWNLOAD_SUFFIXES`，再逐个 try，搬不动的写「留到下次」；`3a64b72` |
+| `core/browser.py` `save_login_state` | `open("w")` 先截断再序列化 → 一旦失败就把上次的登录态换成空文件，下次启动恢复不出登录 | 先 `json.dumps` 再 `config.write_text_atomic`；`e960f08` |
+| `core/browser.py` `_take_new_download` | 返回**已归档**路径，`_accept_download` 又归档一次 → `download_name_mode=original` 时多叠一层商户前缀；方法名也与实现不符 | 改名 `_wait_root_download`、只等写完不归档（归档统一在 `_accept_download` 做一次）；`4c27687` |
+| `core/platform_base.py` `export` | `SmartExporter(browser)` 没传 `log_callback` → 默认导出全程静默 | 传 `log_callback=browser._log`；`1b0c29c` |
+| `platforms/shipinhao`、`platforms/wechatpay` | `_set_time` / `_set_dates` 的 bool 返回值没人看 → 日期没设上照样点查询/导出，会得到页面默认区间的账单却按本次区间命名 | 两家都补「停手 + `[中止]` 日志 + `snapshot(日期未填入)` + 转 `manual`」；微信的回退分支改为如实返回两条 placeholder 的结果；`6f023bb` |
+
+> 同批还修了序列快照 harness 的一处失真：`tests/test_platform_sequences.py` 的 `Recorder.page` 以前返回记录函数，平台脚本里 `browser.page.locator(...)` 取属性直接 AttributeError、被脚本自己的 try 吞掉，于是录出来的是"页面操作整段失败"那一支（微信支付停在 `assert_selector` 结果 `failed`、视频号停在 `_set_time`）。给 `page` 一个可链式哑对象后两家录到完整流程（16→18、11→29 次调用，结果 `failed`→`success`），两条快照按新口径重录。
+
+新发现的问题继续往这张表里加：**每条都要有"现象"和"为什么算问题"**，不要只写"这里可以更优雅"。
 
 ### 13.2 口径不一致（两处逻辑对同一件事给出不同答案）
 
@@ -1028,7 +1030,7 @@ python -m playwright install chromium
 
 ### 13.4 文档/注释落后于实现
 
-- `browser.py` 里 `_finalize_download` docstring 还写"旧版归档到 `his/`"（实际是 `历史/`）；`begin_wait_download`/`_finalize_download`/`wait_download` 多处 docstring 只写"平台/日期"，漏了商户层；`wait_download` docstring 说事件路径"用 save_as"，实际第一优先是 `dl.path()` + `os.replace` 移动。
+- `browser.py` 里 `_finalize_download` docstring 还写"旧版归档到 `his/`"（实际是 `历史/`）；`begin_wait_download`/`_finalize_download`/`wait_download` 多处 docstring 只写"平台/日期"，漏了商户层。（`wait_download` 的 docstring 已照实改成"移动优先、save_as 是第二选择"）
 - `main_gui._action_help()` 的弹窗文案仍写"在浏览器完成登录并点『确定』"，与 `_show_login_hint` 的"关掉窗口即代表登完"新流程矛盾。
 - `使用说明.md` 第 4 节列出的"11 个平台均已内置"是对的；本文档以前写"仅实现有赞"的部分已在本版全面更正（见 1、2、3、8 章）。
 - `platforms/alipay` docstring 记着"仅支持 2025-08-24 及以后的流水"；`kuaishou`/`xiaohongshu` 的 docstring 各列了两种方式，**只实现了 A 方式**。

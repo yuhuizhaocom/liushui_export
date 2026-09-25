@@ -757,6 +757,22 @@
    [
     "sleep",
     [
+     "0.5"
+    ],
+    {},
+    true
+   ],
+   [
+    "sleep",
+    [
+     "0.5"
+    ],
+    {},
+    true
+   ],
+   [
+    "sleep",
+    [
      "1"
     ],
     {},
@@ -962,7 +978,7 @@
  },
  "wechatpay": {
   "class": "WechatpayExporter",
-  "result": "failed",
+  "result": "success",
   "calls": [
    [
     "navigate",
@@ -990,8 +1006,92 @@
    [
     "_log",
     [
-     "\"[自检] 选择器非法 date_range_input: .el-range-input - 'function' object has no attribute 'locator'\"",
-     "'warning'"
+     "'[自检] 4 个关键元素全部就位'"
+    ],
+    {},
+    true
+   ],
+   [
+    "fill_placeholder",
+    [
+     "'开始日期'",
+     "'2026-09-01'"
+    ],
+    {},
+    true
+   ],
+   [
+    "fill_placeholder",
+    [
+     "'结束日期'",
+     "'2026-09-02'"
+    ],
+    {},
+    true
+   ],
+   [
+    "sleep",
+    [
+     "1"
+    ],
+    {},
+    true
+   ],
+   [
+    "snapshot",
+    [
+     "'设置日期后'"
+    ],
+    {},
+    true
+   ],
+   [
+    "step_pause",
+    [
+     "'设置日期后'"
+    ],
+    {},
+    true
+   ],
+   [
+    "sleep",
+    [
+     "1"
+    ],
+    {},
+    true
+   ],
+   [
+    "click_text",
+    [
+     "'查询'"
+    ],
+    {
+     "exact": "True"
+    },
+    true
+   ],
+   [
+    "wait_for",
+    [],
+    {
+     "selector": "'a.popups.download:has-text(\"业务明细账单\")'",
+     "timeout": "20"
+    },
+    true
+   ],
+   [
+    "snapshot",
+    [
+     "'查询后'"
+    ],
+    {},
+    true
+   ],
+   [
+    "step_pause",
+    [
+     "'查询后'"
     ],
     {},
     true
@@ -999,59 +1099,126 @@
    [
     "_log",
     [
-     "\"[自检] 选择器非法 query_btn: button.el-button--primary - 'function' object has no attribute 'locator'\"",
-     "'warning'"
+     "'>>> 开始下载 业务明细账单'"
     ],
     {},
+    true
+   ],
+   [
+    "begin_wait_download",
+    [],
+    {},
+    true
+   ],
+   [
+    "click_selector",
+    [
+     "'a.popups.download:has-text(\"业务明细账单\")'"
+    ],
+    {},
+    true
+   ],
+   [
+    "wait_for",
+    [],
+    {
+     "text": "'账单打包完成'",
+     "timeout": "6",
+     "network_idle": "False"
+    },
+    true
+   ],
+   [
+    "is_visible_text",
+    [
+     "'账单打包完成'"
+    ],
+    {
+     "timeout": "30"
+    },
+    true
+   ],
+   [
+    "click_selector",
+    [
+     "'.el-dialog:visible .el-button--primary'"
+    ],
+    {},
+    true
+   ],
+   [
+    "wait_for",
+    [],
+    {
+     "timeout": "1"
+    },
+    true
+   ],
+   [
+    "is_visible_text",
+    [
+     "'下载列表'"
+    ],
+    {
+     "timeout": "5"
+    },
+    true
+   ],
+   [
+    "click_text",
+    [
+     "'下载列表'"
+    ],
+    {},
+    true
+   ],
+   [
+    "wait_for",
+    [],
+    {
+     "text": "'立即下载'",
+     "timeout": "10"
+    },
+    true
+   ],
+   [
+    "is_visible_text",
+    [
+     "'立即下载'"
+    ],
+    {
+     "timeout": "10"
+    },
+    true
+   ],
+   [
+    "click_text",
+    [
+     "'立即下载'"
+    ],
+    {},
+    true
+   ],
+   [
+    "wait_for",
+    [],
+    {
+     "timeout": "1"
+    },
+    true
+   ],
+   [
+    "wait_download",
+    [],
+    {
+     "timeout": "90"
+    },
     true
    ],
    [
     "_log",
     [
-     "'[自检] 选择器非法 bill_detail_link: a.popups.download:has-text(\"业务明细账单\") - \\'function\\' object has no attribute \\'locator\\''",
-     "'warning'"
-    ],
-    {},
-    true
-   ],
-   [
-    "_log",
-    [
-     "'[自检] 选择器非法 bill_summary_link: a.popups.download:has-text(\"业务汇总账单\") - \\'function\\' object has no attribute \\'locator\\''",
-     "'warning'"
-    ],
-    {},
-    true
-   ],
-   [
-    "_log",
-    [
-     "\"[自检] 微信支付页面缺失元素: ['date_range_input', 'query_btn', 'bill_detail_link', 'bill_summary_link'](可能页面改版,需复核脚本)\""
-    ],
-    {},
-    true
-   ],
-   [
-    "snapshot_on_failure",
-    [
-     "'断言失败_date_range_input'"
-    ],
-    {},
-    true
-   ],
-   [
-    "_log",
-    [
-     "\"导出异常: 关键元素 [date_range_input] 未找到: .el-range-input ('function' object has no attribute 'locator')\"",
-     "'error'"
-    ],
-    {},
-    true
-   ],
-   [
-    "snapshot_on_failure",
-    [
-     "'导出异常'"
+     "'业务明细账单 下载完成: 流水导出.csv'"
     ],
     {},
     true

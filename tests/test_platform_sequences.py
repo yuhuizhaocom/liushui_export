@@ -41,6 +41,10 @@ class _Any:
 class Recorder:
     def __init__(self):
         self.calls = []
+        # 平台脚本里大量 `browser.page.locator(...)` / `keyboard.press(...)` 这类链式访问:
+        # 早先 page 也走 _record, 返回的是个函数, 取它的属性直接 AttributeError —— 于是
+        # 脚本里那些 try 会把"页面操作"整段当异常吞掉, 录出来的序列其实是失败分支的样子。
+        self.page = _Any()
 
     def __getattr__(self, name):
         if name.startswith("_") and name != "_log":

@@ -93,7 +93,14 @@ class ShipinhaoExporter(PlatformBase):
         browser.sleep(1)
 
         # ===== 3. 设置动账时间范围 =====
-        self._set_time(browser, start_date, end_date)
+        # 日期没设成功就必须停: 继续点"查询/全部导出"会得到页面默认区间的账单,
+        # 而归档文件名用的是本次请求的区间 —— 从产物上根本看不出区间错了。
+        if not self._set_time(browser, start_date, end_date):
+            browser._log("[中止] 视频号: 动账时间未能设置(找不到\"动账开始/结束时间\""
+                         "输入框或设置过程报错), 已停止自动导出。若反复出现, 说明该平台"
+                         "日期组件又变了, 需要复核 _set_time。", "warning")
+            browser.snapshot("日期未填入")
+            return "manual"
         browser.sleep(1)
 
         # ===== 4. 点击"查询" =====

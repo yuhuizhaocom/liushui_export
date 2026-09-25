@@ -93,11 +93,11 @@ class WechatpayExporter(PlatformBase):
                 return True
         except Exception:
             pass
-        # 回退: 按 placeholder 填写
-        browser.fill_placeholder("开始日期", start_date[:10])
-        browser.fill_placeholder("结束日期", end_date[:10])
+        # 回退: 按 placeholder 填写 —— 两条都填上才算成功(返回给调用方决定是否停手)
+        ok_start = browser.fill_placeholder("开始日期", start_date[:10])
+        ok_end = browser.fill_placeholder("结束日期", end_date[:10])
         browser.sleep(1)
-        return False
+        return bool(ok_start) and bool(ok_end)
 
     def _download_one_bill(self, browser, bill_text):
         """下载单个账单(业务明细账单/业务汇总账单)。
@@ -154,7 +154,14 @@ class WechatpayExporter(PlatformBase):
         # ===== 2. 设置日期范围(键盘输入方式,确保 Vue 组件真正更新) =====
         # 步骤级断言: 确认日期输入框存在再继续(不存在说明页面结构变了)
         self.assert_selector(browser, "date_range_input")
-        self._set_dates(browser, start_date, end_date)
+        # 日期没填上就停手: 继续点查询会拿到页面默认区间(通常是一个月)的账单,
+        # 而归档文件名用的是本次请求的区间, 从产物上看不出区间错了。
+        if not self._set_dates(browser, start_date, end_date):
+            browser._log("[中止] 微信支付: 起止日期两种填法都没成功(el-range-input 键盘输入"
+                         "与 placeholder 均失败), 已停止自动导出。若反复出现, 说明日期组件"
+                         "改版, 需要复核 _set_dates。", "warning")
+            browser.snapshot("日期未填入")
+            return "manual"
         browser.snapshot("设置日期后")
         browser.step_pause("设置日期后")
         # 兜底: 关闭可能残留的日期选择器弹层,避免遮挡按钮

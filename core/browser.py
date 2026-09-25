@@ -37,6 +37,7 @@ class BrowserManager:
         self._export_start = ""
         self._export_end = ""
         self._export_merchant = ""   # 当前导出商户(用于下载目录隔离)
+        self._export_sub_merchant = ""   # 可选子商户: 只多进文件名一档, 不参与目录分层
         self._export_task_id = ""   # 当前导出任务ID(如 20260901_203000),用于按任务分文件夹
         self._dl_queue = []        # 队列: 已触发的浏览器下载([{"dl":Download}])
         self._dl_capture_on = False  # 当前是否处于下载捕获模式
@@ -72,15 +73,18 @@ class BrowserManager:
         except Exception:
             pass
 
-    def set_export_context(self, platform="", start_date="", end_date="", merchant=""):
-        """设置当前导出上下文(平台名/商户/日期)
+    def set_export_context(self, platform="", start_date="", end_date="", merchant="",
+                           sub_merchant=""):
+        """设置当前导出上下文(平台名/商户/子商户/日期)
         下载文件按 平台/商户/日期范围 分文件夹;同商户同日期范围的最新文件在顶层,
-        之前的版本自动归档到 历史/ 子目录并加时间戳
+        之前的版本自动归档到 历史/ 子目录并加时间戳。
+        sub_merchant 只影响文件名(多一段 商户_子商户), 不参与目录分层。
         """
         self._export_platform = platform
         self._export_start = start_date
         self._export_end = end_date
         self._export_merchant = merchant or ""
+        self._export_sub_merchant = sub_merchant or ""
         # 任务ID = 日期范围,保证同一平台/商户同一区间的所有导出都落在同一个文件夹
         self._export_task_id = f"{start_date}_{end_date}" if start_date and end_date else ""
 
@@ -549,9 +553,27 @@ class BrowserManager:
         if rows == 0:
             self._log(f"[校验] 表格无有效数据行: {os.path.basename(path)}", "warning")
             return False
+        # 3) 数不出行时, 至少要"像个对账单"。以前不认识的扩展名会被强行改成 .xlsx,
+        #    于是"名字是 .xlsx 但内容不是 zip"那条顺带把 PDF 之类挡掉了; 现在扩展名
+        #    原样保留, 这道门就得自己站: 表格/压缩包以外的东西不算成品。
+        if not self._seems_statement_format(path):
+            self._log(f"[校验] 读不出数据行且格式不像对账单: {os.path.basename(path)}",
+                      "warning")
+            return False
         # rows is None: 这种格式读不出行(如老 .xls), 维持原有的宽松判定
         self._log(f"[校验] 文件通过完整性校验({size}B, 无法解析行数)")
         return True
+
+    # 后台给对账单的常见格式: 表格 + 账单压缩包(微信支付"账单打包完成"给的就是 zip)
+    _STATEMENT_SUFFIXES = (".xlsx", ".xls", ".csv", ".txt", ".zip", ".rar", ".7z")
+
+    def _seems_statement_format(self, path):
+        """扩展名像对账单吗; 没有扩展名时退一步看内容是不是 zip。"""
+        low = (os.path.basename(path) or "").lower()
+        if low.endswith(self._STATEMENT_SUFFIXES):
+            return True
+        stem, ext = os.path.splitext(low)
+        return not ext and self._file_head(path, 2).startswith(b"PK")
 
     def _read_text_content(self, path):
         """读取文件文本内容(宽容解码);二进制/xlsx 等会得到近似文本,不影响关键字检查。"""
@@ -733,34 +755,38 @@ class BrowserManager:
         return result
 
     def _normalize_download_name(self, suggested, platform, start_date, end_date, merchant=None):
-        """按设置生成下载文件名(文件名中体现商户)
+        """按设置生成下载文件名。
+
         - download_name_mode =
-            "unified":   统一命名 平台名_商户_日期区间.扩展名
-            "original":  保留原始名称,加 商户_ 前缀(UUID/无名称用统一命名兜底)
-        扩展名从原始文件名推断,默认 .xlsx
+            "unified"(默认): **前缀 + 原始文件名** —— `平台_商户[_子商户]_起_止_原名.原扩展名`
+                              原始名是 UUID 或压根没名字时, 退化成只有前缀(`平台_商户_起_止.ext`)
+            "original":       只加 `商户_` 前缀, 其余原样(UUID/无名仍走统一命名兜底)
+        扩展名一律从原始文件名推断并**原样保留**: 以前不在白名单里的扩展名会被强行改成
+        .xlsx, 于是一个 .zip 压缩包顶着表格的名字进了归档, 名字、内容、图标三者不一致。
         """
         from core.config import DEFAULT_SETTINGS, load_settings
         mode = load_settings().get("download_name_mode", DEFAULT_SETTINGS["download_name_mode"])
         merchant = merchant or self._export_merchant
         raw = os.path.basename(suggested or "")
-        rn, rx = os.path.splitext(raw)
-        if mode == "original":
-            # 非UUID且有名称: 保留原始文件名,加商户前缀便于区分
-            is_uuid = bool(re.match(
-                r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-                rn))
-            if rn and not is_uuid:
-                return f"{merchant}_{raw}" if merchant else raw
-        # 统一命名(或UUID兜底)
-        name, ext = os.path.splitext(raw)
-        ext = (ext or "").lower()
-        if ext not in (".xlsx", ".xls", ".csv", ".txt"):
-            ext = ".xlsx"
-        base = platform or "download"
-        if merchant:
-            base = f"{base}_{merchant}"
-        date_part = f"_{start_date}_{end_date}" if start_date and end_date else ""
-        return f"{base}{date_part}{ext}"
+        stem, ext = os.path.splitext(raw)
+        is_uuid = bool(re.match(
+            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            stem))
+        if mode == "original" and stem and not is_uuid:
+            # 保留原始名称,只加商户前缀便于区分(维持旧行为)
+            return self._safe_name(f"{merchant}_{raw}" if merchant else raw)
+        # 统一命名: 前缀 + 原始文件名(有名字才接)
+        parts = [p for p in (platform or "download", merchant,
+                             self._export_sub_merchant) if p]
+        if start_date and end_date:
+            parts.append(f"{start_date}_{end_date}")
+        prefix = "_".join(parts)
+        if stem and not is_uuid:
+            # 已经带过这段前缀了就别再叠一层(同一文件被归档两次时是幂等的)
+            if raw.startswith(prefix + "_"):
+                return self._safe_name(raw)
+            return self._safe_name(f"{prefix}_{raw}")
+        return self._safe_name(f"{prefix}{ext}")
 
     def screenshot(self, name="screenshot"):
         """截图保存到下载根目录(通用入口)"""

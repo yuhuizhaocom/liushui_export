@@ -85,6 +85,37 @@ def test_root_fallback_archives_exactly_once(mgr, monkeypatch):
     assert not any("旗舰店A_旗舰店A" in f for f in os.listdir(task_dir))
 
 
+def test_zip_is_a_legitimate_statement(mgr):
+    """微信支付"账单打包完成"给的是压缩包: 现在扩展名原样保留, 必须照样认。"""
+    import zipfile
+    b, root = mgr
+    p = os.path.join(root, "微信支付_旗舰店A_2026-09-01_2026-09-02_资金账单.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("明细.csv", "订单号,金额\n" + "A1,10.00\n" * 100)
+    assert b._validate_download(p) is True
+
+
+def test_extensionless_archive_is_still_accepted(mgr):
+    """没扩展名但内容确实是 zip: 不能因为"名字看不出来"就把能用的账单判成失败。"""
+    import zipfile
+    b, root = mgr
+    p = os.path.join(root, "微信支付_旗舰店A_2026-09-01_2026-09-02")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("明细.csv", "订单号,金额\n" + "A1,10.00\n" * 100)
+    assert b._validate_download(p) is True
+
+
+def test_pdf_and_random_binary_are_rejected(mgr):
+    """回归: 以前不认识的后缀会被强行改成 .xlsx, "内容不是 PK"那条顺带把 PDF 挡住。
+    扩展名保留后这道门得自己站, 否则一份 PDF 也会当成成品交出去。"""
+    b, root = mgr
+    pdf = _touch(root, "微信支付_旗舰店A_2026-09-01_2026-09-02_回单.pdf",
+                 b"%PDF-1.7" + b"x" * 3000)
+    assert b._validate_download(pdf) is False
+    blob = _touch(root, "微信支付_旗舰店A_2026-09-01_2026-09-02_未知", b"\x7fELF" + b"y" * 3000)
+    assert b._validate_download(blob) is False
+
+
 def test_fallback_ignores_screenshot_but_takes_statement(mgr):
     b, root = mgr
     _touch(root, "查询结果_20260924_181000.png", PNG)

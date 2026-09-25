@@ -162,10 +162,10 @@ liushui_export/
 | 方法                                     | 说明                                                           |
 | -------------------------------------- | ------------------------------------------------------------ |
 | `_action_login_all()`                  | 校验日期/选择后，在主线程用 `_collect_tasks` 备好任务列表，启动线程执行 `_do_login(tasks)`，并记录操作历史。                          |
-| `_action_export_all()`                 | 校验后弹出任务确认框（平台·商户明细 + 日期），确认后**在主线程取好日期与单步开关**再启动 `_do_export(tasks, start, end, step_debug)`。                 |
-| `_action_check_status()`               | 启动线程执行 `_do_check(tasks)`，逐个商户调用平台自身的 `check_login` 判断登录态。                       |
+| `_action_export_all()`                 | 校验后弹出任务确认框（平台·商户明细 + 日期），确认后**在主线程取好日期、单步开关与"导出前检查登录"开关**再启动 `_do_export(tasks, start, end, step_debug, preflight)`。                 |
+| `_action_check_status()`               | 启动线程执行 `_do_check(tasks)`，逐个商户调用平台自身的 `check_login` 判断登录态（与导出前预检共用 `_probe_login` 这条探测路径）。                       |
 | `_action_open_folder()`                | 打开 `downloads/` 目录。                                          |
-| `_request_abort()`                     | 「中止本次任务」按钮：置 `_abort` 事件并记日志。只在**商户边界**生效（`_execute_export_tasks`/`_do_login`/`_do_check` 每轮开头查 `_aborted()`），不会中途掐浏览器留下半截下载；按钮由 `_run_async` 启用、`_thread_wrapper` 结束时置灰。 |
+| `_request_abort()`                     | 「中止本次任务」按钮：置 `_abort` 事件并记日志。只在**商户边界**生效（`_preflight_login_check`/`_execute_export_tasks`/`_do_login`/`_do_check` 每轮开头查 `_aborted()`），不会中途掐浏览器留下半截下载；按钮由 `_run_async` 启用、`_thread_wrapper` 结束时置灰。 |
 | `_action_help()`                       | 弹出简化使用说明。                                                    |
 | `_prompt_add_merchant(key, plat_name)` | 弹窗输入商户名 → 调 `_add_merchant`；失败(名字空/重名)时弹窗说明并**留着窗口让用户改**。 |
 | `_add_merchant(key, raw_name)`         | 建 profile 目录 + 加一行勾选，返回 `(是否成功, 文案)`。先查重再动手：按 Windows 目录规矩比（忽略首尾空格、不分大小写），重名直接拒绝——以前重名会 `makedirs(exist_ok=True)` 照样建、界面照样塞一行，而 `merchant_vars[平台][名字]` 是字典，新 Var 顶掉旧的，于是两行同名共用一个勾选框（勾上面那行等于没勾）。也拒绝 `..`/`.`/`___` 这类"清洗后没内容"的名字（`sanitize_name` 只换 `<>:"/\`，`..` 原样通过，拼进路径就指到 `browser_data` 本身）。 |
@@ -176,14 +176,17 @@ liushui_export/
 
 | 方法                                 | 说明                                                                                                                                                                                                                    |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_do_login(tasks)`                   | **首次登录**：逐家商户跑 `_login_one_round`（可见浏览器 → 用户**自己关掉窗口**表示登完 → 释放 profile → 后台核实）。未登录时 `_ask_login_retry` 让用户选「回去继续登录 / 放弃这家」，最多 `LOGIN_RETRY_LIMIT` 轮。**界面上的「确定」按钮已经去掉**：以前用户常在短信/扫码还没完成时就点确定，程序据此存下一份没登录的 profile。收尾日志：`已核实登录成功 X / 未登录 Y / 没能核实 Z / 未完成 N`。 |
+| `_do_login(tasks)`                   | **首次登录**：逐家商户跑 `_login_one_round`（可见浏览器 → 用户**自己关掉窗口**表示登完 → 释放 profile → 后台核实）。未登录时 `_ask_login_retry` 让用户选「回去继续登录 / 放弃这家」，最多 `LOGIN_RETRY_LIMIT` 轮。**界面上的「确定」按钮已经去掉**：以前用户常在短信/扫码还没完成时就点确定，程序据此存下一份没登录的 profile。收尾日志：`已核实登录成功 X / 未登录 Y / 没能核实 Z / 未完成 N`。**返回值是与 tasks 对齐的结论列表**（`ok`/`bad`/`unknown`/`skip`），导出前的登录预检靠它决定剔除谁。 |
 | `_wait_login_window_closed(browser)` | 轮询 `browser.window_closed()`；期间只要 `login_signature()`（cookie 条数+内容指纹，不触发导航）变了就 `save_login_state(quiet=True)` 当场导出。原因：persistent context 在 Chromium 退出时不保留 session cookie，等窗口关完再存就来不及了。**刻意不调用 `plat.check_login`** —— 它会把页面导航到导出地址，用户正扫码会被拽走。返回 `("closed"/"aborted"/"timeout", 是否保存过)`。 |
 | `_login_one_round(plat, key, merchant)` | 一轮完整登录：可见浏览器 → `plat.login` → 提示窗 → `_wait_login_window_closed` → `_close_browser()` 释放 profile → `_verify_login_after_close`；`finally` 再收一次浏览器。返回 `True/False/None/"skip"`（skip = 中止/超时/登录页没打开，这一轮不核实）。重试就是再跑一轮。 |
 | `_verify_login_after_close(plat, key, merchant, saved_seen)` | 用 `force_headless=True` 重开浏览器跑 `plat.check_login`（此时导航不打扰任何人）。已登录→绿灯 `True`；未登录→红灯 `False` 并把原因存进 `_last_verify_reason`；核实异常→橙灯 + "没能核实" `None`，**不冒充未登录**。**只报结果，要不要再给一次机会由 `_do_login` 问用户。** |
 | `_ask_login_retry(plat, merchant, attempt)` | 未登录时 `askretrycancel` 二选一：「重试」=重开这家的登录页继续登，「取消」=先放弃、稍后单独重登；文案带上 `_last_verify_reason`。为什么交给用户：微信支付那类同域平台靠页面文案判断，存在"其实登上了但被判未登录"的可能。弹窗起不来/一小时无人应答都按放弃返回 False，绝不把整批卡住。每家最多 `LOGIN_RETRY_LIMIT`（3）轮，到上限不再问。 |
 | `_close_browser()`                   | 统一关闭点：`self.browser.close()` 后置 None，异常只写一句日志。因为 `BrowserManager.close()` 内部先导出登录态，导出收尾/保活/手工测试窗口/退出这些路径都会落盘。 |
-| `_do_export(tasks, start, end, step_debug)` | **导出流水**：转交 `_execute_export_tasks`；结束后调用 `_copy_export_outputs` 汇总并自动打开文件夹。任务列表/日期/单步开关均由主线程取好传入，工作线程不回读界面。 |
-| `_do_check(tasks)`                   | **检查登录态**：逐个商户启动浏览器并调用 `plat.check_login(browser)`（多数平台靠 `export_url` 是否被重定向到登录路径判断），结果反映到平台状态灯。                                                                                                                    |
+| `_do_export(tasks, start, end, step_debug, preflight=True)` | **导出流水**：`preflight` 为真时先跑 `_preflight_login_check`，预检后一家不剩就直接结束（不报"导出完成"也不汇总）；否则转交 `_execute_export_tasks`，结束后调用 `_copy_export_outputs` 汇总并自动打开文件夹。任务列表/日期/单步开关/预检开关均由主线程取好传入，工作线程不回读界面。**定时任务走 `trigger_job` → `_execute_export_tasks`，不经过这里，因此不做预检。** |
+| `_preflight_login_check(tasks)`        | **导出前登录预检**：逐家 `_probe_login`（`force_headless=True`，连着探不会一家闪一个窗口）→ 失效的一次性 `_ask_preflight_login` 问「集中重登 / 本次跳过」→ 选重登就把这些交给 `_do_login`，其中仍为 `bad` 的按**下标**从本批剔除（同平台多商户时按对象比会误伤）。`ok`/`unknown`/`skip` 一律保留，交给导出时那层 inline 预检再兜；一家都没失效就记「N 家商户登录状态检查通过」，**一个框都不弹**。返回本次要继续导出的任务列表。 |
+| `_probe_login(plat, merchant, force_headless=False)` | 用这家自己的 profile 真跑一次 `plat.check_login`，返回 `(结论, 出错信息)`，结论 `True`/`False`/`None`(没能核实)。**任何异常都在内部转成 `None`**：一道附加检查把用户本该到手的账单挡掉是最坏结果。「检查登录状态」按钮与导出前预检共用。 |
+| `_ask_preflight_login(expired, ok_count)` | 预检那一个确认框（`askretrycancel`：重试=集中重登这 N 家，取消=跳过它们只导其余），文案最多列 12 家并写明"等共 N 家"。与 `_ask_login_retry` 同一套"主线程弹、后台线程等"写法；弹窗起不来或一小时无人应答都按**跳过**收，不把整批吊死。 |
+| `_do_check(tasks)`                   | **检查登录态**：逐个商户启动浏览器并调用 `plat.check_login(browser)`（多数平台靠 `export_url` 是否被重定向到登录路径判断），结果反映到平台状态灯。探测走 `_probe_login`，三档结果分别记「未登录 / 已登录 (页面标题) / 检查失败 - 原因」，读页面标题失败也只算这一家没查成。                                                                                                                    |
 | `_copy_export_outputs(start, end)` | 导出后把各平台/商户日期目录下的最新文件去重复制到 `downloads/开始日期_结束日期_时间戳/` 汇总文件夹，兼容新旧两种目录结构（平台/日期 与 平台/商户/日期）。                                                                                                                              |
 
 #### 任务线程管理
@@ -359,7 +362,8 @@ liushui_export/
 - `CronScheduler.trigger(job, now)`：**只有真的开始执行才写 `last_run`**；到点时若被手动导出占着，本次不记，下个轮询周期自动重试（"程序关闭期间错过不补跑"的语义保持不变）。
 - 界面：`SchedulerDialog` 列表的「对象」列显示 `pair_job_targets` 算出的**实际项数**（配不出来标「0 项(商户与平台不匹配)」）；`JobEditDialog` 保存时对空商户/不匹配商户先问一句再存。
 - `SchedulerDialog`/`JobEditDialog`：任务新增/编辑/删除/启停；cron 带常用模板与校验。编辑走 `CronJob.apply_edit(...)`：**改了 cron 就把起算点挪到编辑时刻**，否则老 `last_run` 配新 cron 早已"到期"，保存后 30 秒内会立刻跑一次。
-- 失败重试：`run_with_retry(fn, retry_times, retry_interval_s, log)` 与 `_execute_export_tasks`（自 `_do_export` 提炼）；settings `retry_times`(默认 2)/`retry_interval_s`(默认 30，递增 ×2)；`retry_times=0` 关闭。`_run_single_export` 对任何异常都在内部消化成返回值 `"failed"`（含浏览器启动阶段），否则抛出会让重试整批失效；导出前登录预检失败返回 `"manual"` 且同样落 `stats.jsonl`（`error` 写明「登录已失效」）。
+- 失败重试：`run_with_retry(fn, retry_times, retry_interval_s, log)` 与 `_execute_export_tasks`（自 `_do_export` 提炼）；settings `retry_times`(默认 2)/`retry_interval_s`(默认 30，递增 ×2)；`retry_times=0` 关闭。`_run_single_export` 对任何异常都在内部消化成返回值 `"failed"`（含浏览器启动阶段），否则抛出会让重试整批失效；导出时那层登录预检失败返回 `"manual"` 且同样落 `stats.jsonl`（`error` 写明「登录已失效」）。
+- 人工介入集中：settings `preflight_login_check`(默认 `True`) 让手动导出在开跑前先逐家 `_probe_login`（无头）核一遍登录态，失效的一次性列出、集中重登，仍未登录的从本批剔除；需扫码的平台按 `manual_intervention` 排在队尾。`_probe_login` 把异常折成"没能核实"并照常导出——检查失败绝不能变成业务失败。定时任务（`trigger_job`）不做预检：确认框无人应答会把整批吊住。
 
 ### 5.8 模块级关键函数
 
@@ -503,7 +507,10 @@ liushui_export/
 ### 7.3 导出流水流程（`_do_export`）
 
 ```
-主线程取好 日期/单步开关 + _collect_tasks 后 _run_async(_do_export)
+主线程取好 日期/单步开关/预检开关 + _collect_tasks 后 _run_async(_do_export)
+【登录预检】(settings.preflight_login_check，定时任务不做):
+  逐家 _probe_login(force_headless=True) → 失效的一次性弹窗: 集中重登(_do_login) / 本次跳过
+  重登后仍 bad 的按下去标剔除；没能核实的照常留下 → 一家不剩就直接结束，不进导出循环
 每个商户一次尝试 = _run_single_export，失败按 run_with_retry 递增间隔重试:
   _ensure_browser(plat, merchant)                        # headless 取决于"显示浏览器"设置
   browser.set_export_context(平台名, 起, 止, 商户)        # 下载归档上下文
@@ -516,8 +523,13 @@ liushui_export/
        └─ wait_download: 事件队列优先 + 目录轮询兜底
   任何阶段抛错（含浏览器启动）都在内部转成 "failed"，每条结果落 stats.jsonl
   result: "success"→绿 | "manual"→橙(弹窗指引手动) | 其他→红
-结算统计 → _copy_export_outputs 汇总文件 → 自动打开汇总文件夹
+需人工操作(manual_intervention)的平台在循环开始前就被排到队尾
+结算统计 → _copy_export_outputs 汇总文件 → 自动打开汇总文件夹 → 待人工的清单一窗列出
 ```
+
+> 人工介入点因此集中在三处：开跑前的预检框、队尾的扫码确认、结束时的待人工清单。
+> 以前登录失效是"跑到那一家才发现"（只在 inline 预检里被折成 `manual` 跳过），
+> 用户走开一会儿回来，批任务已经在等第 N 个框。
 
 ### 7.4 下载捕获与文件归档时序
 
@@ -643,7 +655,7 @@ python -m playwright install chromium
 | `scheduled_tasks.json`            | 是              | 定时任务持久化（新增/编辑后自动保存）                                                                        |
 | `logs/run_YYYYMMDD.log`          | 是              | 当日统一日志（系统+操作，DEBUG 级）                                                                        |
 | `logs/crash_YYYYMMDD_HHMMSS_微秒.txt` | 崩溃时才生成 | 未捕获异常的完整堆栈（含子线程里的）。**双击没反应/闪一下就退时先看这里**，弹窗上写的是它的路径；写不进 `logs` 时退回项目根同名文件。                        |
-| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
+| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`preflight_login_check`（导出前统一查登录，默认开；只影响手动「开始导出」，定时任务不预检）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
 
 ***
 
@@ -663,7 +675,7 @@ python -m playwright install chromium
 | `core/cleanup.py` | 约 120 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/platform_admin.py` | 约 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
-| `tests/` | 33 个文件约 4600 行 | pytest 测试（322 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫） |
+| `tests/` | 34 个文件约 4950 行 | pytest 测试（342 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |

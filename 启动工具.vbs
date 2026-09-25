@@ -3,6 +3,8 @@
 '  Double-click this file to start.
 '  - Uses pythonw, no console window
 '  - Auto-installs missing dependencies on first run
+'  - Debug: cscript //nologo <this file>.vbs --print-python
+'    (prints the resolved interpreters and exits without launching)
 ' ============================================
 Option Explicit
 
@@ -12,36 +14,91 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 dir = fso.GetParentFolderName(WScript.ScriptFullName)
 sh.CurrentDirectory = dir
 
-' Candidate paths (pythonw first, python second)
-Dim pw(5), pe(5)
-pw(0) = "E:\Python\Python314\pythonw.exe"
-pe(0) = "E:\Python\Python314\python.exe"
-pw(1) = "C:\Python314\pythonw.exe"
-pe(1) = "C:\Python314\python.exe"
-pw(2) = "C:\Python313\pythonw.exe"
-pe(2) = "C:\Python313\python.exe"
-pw(3) = "C:\Python312\pythonw.exe"
-pe(3) = "C:\Python312\python.exe"
-pw(4) = "C:\Python311\pythonw.exe"
-pe(4) = "C:\Python311\python.exe"
-pw(5) = "C:\Python310\pythonw.exe"
-pe(5) = "C:\Python310\python.exe"
+' ---- Locate an interpreter ----
+' Tier 1 is the historic hard-coded list, kept first on purpose: machines that work
+' today must not silently switch to another interpreter. The later tiers exist so a
+' normal Python install is no longer reported as "Python was not found".
+' launcherName is the py-launcher spelling of the same thing (py.exe / pyw.exe):
+' the launcher is never called python.exe, so it cannot be matched by exeName.
+Function FindPython(exeName, launcherName)
+    Dim p, f, windir, localApp
+    windir = sh.ExpandEnvironmentStrings("%WINDIR%")
+    localApp = sh.ExpandEnvironmentStrings("%LocalAppData%")
 
-pyw = ""
-py = ""
-For i = 0 To 5
-    If fso.FileExists(pw(i)) Then
-        pyw = pw(i)
-        Exit For
-    End If
-Next
-If pyw = "" Then
-    For i = 0 To 5
-        If fso.FileExists(pe(i)) Then
-            py = pe(i)
-            Exit For
+    ' (1) machine-wide installs this launcher used to know about
+    For Each p In Array("E:\Python\Python314\", "C:\Python314\", "C:\Python313\", _
+                        "C:\Python312\", "C:\Python311\", "C:\Python310\")
+        If fso.FileExists(p & exeName) Then
+            FindPython = p & exeName
+            Exit Function
         End If
     Next
+
+    ' (2) the Windows py launcher, which resolves every registered Python itself
+    If fso.FileExists(windir & "\" & launcherName) Then
+        FindPython = windir & "\" & launcherName
+        Exit Function
+    End If
+
+    ' (3) python.org per-user default: %LocalAppData%\Programs\Python\Python3xx
+    For Each f In PythonDirs(localApp & "\Programs\Python")
+        If fso.FileExists(f & "\" & exeName) Then
+            FindPython = f & "\" & exeName
+            Exit Function
+        End If
+    Next
+
+    ' (4) the project's own virtualenv, as a last resort
+    p = dir & "\.venv\Scripts\" & exeName
+    If fso.FileExists(p) Then
+        FindPython = p
+        Exit Function
+    End If
+
+    ' (5) any C:\Python3xx style folder
+    For Each f In PythonDirs("C:\")
+        If fso.FileExists(f & "\" & exeName) Then
+            FindPython = f & "\" & exeName
+            Exit Function
+        End If
+    Next
+
+    FindPython = ""
+End Function
+
+' Sub-folders that look like Python installs (Python3xx). A folder we are not
+' allowed to list must never abort the launcher, so enumeration is fault-tolerant.
+Function PythonDirs(parentPath)
+    Dim out(), n, subFolder
+    n = 0
+    ReDim out(0)
+    out(0) = ""
+    On Error Resume Next
+    If fso.FolderExists(parentPath) Then
+        For Each subFolder In fso.GetFolder(parentPath).SubFolders
+            If LCase(Left(subFolder.Name, 7)) = "python3" Then
+                ReDim Preserve out(n)
+                out(n) = subFolder.Path
+                n = n + 1
+            End If
+        Next
+    End If
+    If Err.Number <> 0 Then Err.Clear
+    On Error GoTo 0
+    If n > 0 Then ReDim Preserve out(n - 1)
+    PythonDirs = out
+End Function
+
+pyw = FindPython("pythonw.exe", "pyw.exe")
+py = FindPython("python.exe", "py.exe")
+
+If WScript.Arguments.Count > 0 Then
+    If LCase(WScript.Arguments(0)) = "--print-python" Then
+        ' Report what was found and stop: no install prompt, no GUI window.
+        WScript.Echo "pythonw=" & pyw
+        WScript.Echo "python=" & py
+        WScript.Quit 0
+    End If
 End If
 
 If pyw = "" And py = "" Then

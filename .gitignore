@@ -21,6 +21,8 @@
 /extract_rtf_info.py
 /ocr_images.py
 /ocr_windows.ps1
+# tests/test_launcher_vbs.py 运行时生成的 .vbs 副本(用完即删)
+/_probe_launcher.vbs
 
 # Python 缓存
 __pycache__/

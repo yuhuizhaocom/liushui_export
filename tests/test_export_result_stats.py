@@ -5,6 +5,8 @@ _run_single_export 跑在工作线程上, 日期与"单步调试"开关由主线
 """
 import threading
 
+import pytest
+
 import core.main_gui as mg
 from core.main_gui import LiushuiApp
 
@@ -266,12 +268,19 @@ class _BatchApp:
 
     _execute_export_tasks = LiushuiApp._execute_export_tasks
     _aborted = LiushuiApp._aborted
-    _prompt_manual_leftovers = LiushuiApp._prompt_manual_leftovers
+    _apply_export_result = LiushuiApp._apply_export_result
 
-    def __init__(self):
+    def __init__(self, results=None):
         self._abort = threading.Event()
         self.logs = []
         self.export_calls = 0
+        self.statuses = []
+        self.manual_items = []
+        self._results = list(results or [])
+
+    def _prompt_manual_leftovers(self, items, date_str):
+        # 真弹窗由上面 _DialogApp 那组测试覆盖; 这里只记账, 否则模态窗会把测试吊住
+        self.manual_items = list(items)
 
     def _append_log(self, line):
         self.logs.append(line)
@@ -286,17 +295,21 @@ class _BatchApp:
         pass
 
     def set_platform_status(self, key, status):
-        pass
-
-    def _apply_export_result(self, key, plat, result):
-        pass
+        self.statuses.append((key, status))
 
     def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
         self.export_calls += 1
-        return "success"
+        return self._results.pop(0) if self._results else "success"
 
 
 TASKS = [("a", _Plat("平台A"), "商户A"), ("b", _Plat("平台B"), "商户B")]
+
+
+@pytest.fixture()
+def no_retry(monkeypatch):
+    """把重试关掉: 否则一次 "failed" 会被重试掉后面排好的返回值, 还要真睡 30 秒。"""
+    monkeypatch.setattr(mg, "load_settings",
+                        lambda: {"retry_times": 0, "retry_interval_s": 0})
 
 
 def test_batch_runs_all_tasks_when_not_aborted():
@@ -312,6 +325,46 @@ def test_abort_stops_before_next_merchant():
     assert app._execute_export_tasks(list(TASKS), "2026-09-01", "2026-09-02") == (0, 0, 0)
     assert app.export_calls == 0
     assert any("剩余 2 项未执行" in line for line in app.logs)
+
+
+def test_result_line_names_the_merchant_not_just_the_platform(no_retry):
+    """一家平台多个商户时, 只写平台名的日志等于没写: 分不清是哪家没出账单。"""
+    app = _BatchApp(results=["success", "manual", "failed"])
+    same_plat = _Plat("有赞")
+    tasks = [("youzan", same_plat, "旗舰店A"), ("youzan", same_plat, "旗舰店B"),
+             ("youzan", same_plat, "打错了")]
+    assert app._execute_export_tasks(tasks, "2026-09-01", "2026-09-02") == (1, 1, 1)
+    assert "[结果] 有赞(旗舰店A): 成功" in app.logs
+    assert "[结果] 有赞(旗舰店B): 需手动完成" in app.logs
+    assert "[结果] 有赞(打错了): 失败" in app.logs
+
+
+def test_platform_light_shows_the_worst_merchant_result(no_retry):
+    """一个平台一盏灯: 先失败后成功不能把失败盖成绿色。"""
+    app = _BatchApp(results=["failed", "success"])
+    same_plat = _Plat("有赞")
+    tasks = [("youzan", same_plat, "旗舰店A"), ("youzan", same_plat, "旗舰店B")]
+    app._execute_export_tasks(tasks, "2026-09-01", "2026-09-02")
+    assert app.statuses[-1] == ("youzan", "error"), app.statuses
+
+
+def test_platform_light_upgrades_only_when_worse(no_retry):
+    """成功在前、需手动在后 → 灯转黄; 之后再来一个成功不能把它拨回绿色。"""
+    app = _BatchApp(results=["success", "manual", "success"])
+    same_plat = _Plat("有赞")
+    tasks = [("youzan", same_plat, "A"), ("youzan", same_plat, "B"),
+             ("youzan", same_plat, "C")]
+    app._execute_export_tasks(tasks, "2026-09-01", "2026-09-02")
+    assert app.statuses[-1] == ("youzan", "warn"), app.statuses
+
+
+def test_unexpected_result_value_does_not_break_the_loop(no_retry):
+    """平台脚本返回约定外的值时, 计数与状态灯都不能把整批任务带崩。"""
+    app = _BatchApp(results=["weird", "success"])
+    tasks = [("a", _Plat("平台A"), "商户A"), ("b", _Plat("平台B"), "商户B")]
+    counts = app._execute_export_tasks(tasks, "2026-09-01", "2026-09-02")
+    assert counts == (1, 0, 1), counts
+    assert any("[结果] 平台A(商户A): weird" in line for line in app.logs)
 
 
 def test_request_abort_is_noop_when_idle():

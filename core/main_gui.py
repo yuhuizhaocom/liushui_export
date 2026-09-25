@@ -134,6 +134,10 @@ def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):
 _UI_PUMP_MS = 60
 _UI_PUMP_BATCH = 300
 
+# 导出结果的用户可读文案与"最差优先"排序(一个平台只有一盏状态灯, 多商户时亮最差的那个)
+RESULT_LABEL = {"success": "成功", "manual": "需手动完成", "failed": "失败"}
+_RESULT_RANK = {"success": 0, "manual": 1, "failed": 2}
+
 class LiushuiApp:
     def __init__(self, root):
         self.root = root
@@ -1378,6 +1382,7 @@ class LiushuiApp:
         self._set_progress(maximum=len(tasks), value=0)
         exported = manual = failed = 0
         manual_items = []
+        worst = {}        # 一个平台只有一盏状态灯: 记它所有商户里最差的结果
         for i, (key, plat, merchant) in enumerate(tasks):
             if self._aborted():
                 self._append_log(f"[中止] 剩余 {len(tasks) - i} 项未执行")
@@ -1394,8 +1399,15 @@ class LiushuiApp:
                 )
             except Exception as e:
                 result = "failed"
-                self._append_log(f"[失败] {plat.name} 导出异常: {e}")
-            self._apply_export_result(key, plat, result)
+                self._append_log(f"[失败] {plat.name}({merchant}) 导出异常: {e}")
+            # 状态灯按"最差"亮: 同平台先失败后成功时, 绿灯会把失败那次盖掉, 界面上
+            # 看着全绿、其实有一家店没出账单。
+            prev = worst.get(key)
+            rank = _RESULT_RANK.get(result, len(_RESULT_RANK))
+            if prev is None or rank > _RESULT_RANK.get(prev, 0):
+                worst[key] = result
+            self._apply_export_result(key, plat, worst[key])
+            self._append_log(f"[结果] {plat.name}({merchant}): {RESULT_LABEL.get(result, result)}")
             if result == "success":
                 exported += 1
             elif result == "manual":

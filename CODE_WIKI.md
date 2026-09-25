@@ -45,7 +45,7 @@
 
 - **登录态隔离**：为每个「平台 + 商户」建立独立浏览器数据目录，登录状态按商户持久化保存（1\~7 天）；
 
-- **下载兜底机制**：事件队列 + 目录轮询双通道捕获浏览器下载，防漏、防残留（UUID 文件自动归位）；
+- **下载兜底机制**：事件队列 + 目录轮询双通道捕获浏览器下载，防漏、防残留；无人认领的 UUID 残留文件移入 `downloads/待确认/`（**不再**按当前上下文改名归到某个商户目录，避免上一商户的文件冒充本商户账单）；候选与归档校验按**文件头**判类型，截图、假 `.xlsx` 一律不算账单；
 
 - **文件归档**：下载文件按 `平台/商户/日期范围` 组织，同名旧文件自动归档至 `历史/` 子目录；
 
@@ -132,7 +132,7 @@ liushui_export/
 | `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀）；`record_stat`/`load_stats`/`summarize_stats` 管稳定性统计，其中 `load_stats(limit)` 用尾部反向分块读（`_read_tail_lines`），不再把整个 `stats.jsonl` 读进内存。 |
 | `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
 | `platforms/*/export.py`  | **平台插件**。每个文件定义一个继承 `PlatformBase` 的导出类，实现该平台的登录与导出流程；平台专项逻辑（如有赞的 URL 日期参数）直接写在平台脚本内，不放入 `core/`（见 [第 8 章](#8-平台插件体系)）。 |
-| `core/platform_admin.py` | **平台管理/脚本调试**。`generate_platform_skeleton()` 生成骨架（key 校验）、`DebugProbe` 包装浏览器逐步记录调用、`PlatformManagerDialog`（向导+内置编辑器+列表）与 `DebugDialog`（试运行）三个 Tkinter 弹窗。 |
+| `core/platform_admin.py` | **平台管理/脚本调试**。`render_platform_skeleton()` 纯函数生成骨架（输入按字面量转义，key 须字母/下划线开头）、`save_platform_script()` 先验语法再原子写（语法错误不覆盖磁盘上的好脚本）、`DebugProbe` 用 `__getattr__` 通用透传并如实抛异常、`PlatformManagerDialog`（向导+内置编辑器+列表）与 `DebugDialog`（试运行）三个 Tkinter 弹窗。 |
 | `core/scheduler.py` | **定时任务**。`CronExpr`（5 字段 cron 轻量解析/匹配/next-run）、`CronJob`/`TaskStore`（`scheduled_tasks.json` 持久化）、`CronScheduler`（后台线程到期触发 `app.trigger_job`）、`SchedulerDialog`/`JobEditDialog`（任务管理界面）；导出失败自动重试（`run_with_retry`）亦由本批提供。 |
 | `start.bat` / `启动工具.vbs` | **启动脚本**。以 `python -m core.main_gui` 方式启动：前者用控制台 Python（错误可见）；后者用 `pythonw` 免控制台，并在首次运行时自动 `pip install playwright` + 安装 Chromium。                                    |
 
@@ -608,7 +608,7 @@ python -m playwright install chromium
 | `core/config.py`         | 约 60 行        | 配置与设置读写                         |
 | `core/logger.py`         | 约 130 行       | 日志通道 + 稳定性统计（stats.jsonl 读写与汇总） |
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
-| `core/platform_admin.py` | 约 310 行 | 平台管理/脚本调试（骨架生成 + DebugProbe + 三个弹窗） |
+| `core/platform_admin.py` | 约 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
 | `tests/` | 16 个文件约 1800 行 | pytest 测试（127 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口 |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |

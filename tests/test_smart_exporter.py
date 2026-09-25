@@ -168,3 +168,85 @@ def test_no_date_box_still_attempts_export():
     ex.export("2026-09-01", "2026-09-02")
     assert any("未找到日期输入框" in l for l in logs)
     assert browser.download_attempts == 1
+
+
+# ===== 导出按钮的标签匹配 =====
+
+class _Clickable:
+    def __init__(self, text, sink):
+        self.text = text
+        self.sink = sink
+
+    def click(self, timeout=None):
+        self.sink.append(self.text)
+
+
+class _MatchList:
+    def __init__(self, items, sink):
+        self.items = items
+        self.sink = sink
+
+    @property
+    def first(self):
+        return _Clickable(self.items[0], self.sink)
+
+    def count(self):
+        return len(self.items)
+
+
+class _LabelPage(_Page):
+    """按 Playwright 的语义模拟 get_by_text: exact 要求整段文字相等(允许首尾空白),
+    非 exact 是子串匹配; 返回顺序即 DOM 顺序。"""
+
+    def __init__(self, texts):
+        super().__init__()
+        self.texts = texts
+        self.clicked = []
+
+    def get_by_text(self, text, exact=False):
+        if exact:
+            hit = [t for t in self.texts if t.strip() == text]
+        else:
+            hit = [t for t in self.texts if text in t]
+        return _MatchList(hit, self.clicked)
+
+
+class _LabelBrowser(_Browser):
+    def __init__(self, texts):
+        super().__init__()
+        self.page = _LabelPage(texts)
+
+    def begin_wait_download(self):
+        pass
+
+    def wait_download(self, timeout=120):
+        return None
+
+
+def _click_export_for(texts):
+    ex = SmartExporter(_LabelBrowser(texts), log_callback=lambda m: None)
+    ok = ex._click_export()
+    return ok, ex.page.clicked[0] if ex.page.clicked else None
+
+
+def test_specific_export_label_wins_over_static_text():
+    """旧实现: "导出" 排在列表前面且用子串匹配, 会先点中导航文字"导出记录"。"""
+    ok, clicked = _click_export_for(["导出记录", "导出报表"])
+    assert ok is True
+    assert clicked == "导出报表"
+
+
+def test_exact_label_still_matched_first():
+    ok, clicked = _click_export_for(["导出"])
+    assert ok is True and clicked == "导出"
+
+
+def test_falls_back_to_contains_match():
+    """按钮文字带图标/前后缀时精确匹配不到, 仍要能降级子串匹配。"""
+    ok, clicked = _click_export_for(["前往导出中心查看"])
+    assert ok is True and clicked == "前往导出中心查看"
+
+
+def test_no_export_button_returns_false():
+    ok, clicked = _click_export_for(["查询", "首页"])
+    assert ok is False and clicked is None

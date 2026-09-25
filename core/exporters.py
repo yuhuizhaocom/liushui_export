@@ -82,16 +82,29 @@ class SmartExporter:
                     continue
         return False
 
+    # 长标签排在前面: 子串匹配下 "导出" 会把 "导出报表" 抢先吃掉(旧实现就是这样,
+    # 结果后面几个长标签永远轮不到)
+    _EXPORT_LABELS = ["导出报表", "下载报表", "导出账单", "下载账单", "生成报表",
+                      "导出", "下载"]
+
     def _click_export(self):
-        """点击导出/下载按钮"""
-        for t in ["导出", "下载", "生成报表", "导出报表", "下载账单", "下载报表", "导出账单"]:
-            btn = self._find_button([t], exact=False)
-            if btn:
-                try:
-                    btn.click(timeout=3000)
-                    return True
-                except Exception:
-                    continue
+        """点击导出/下载按钮。
+
+        两轮: 先精确匹配(整段文字就是该标签的才算按钮), 都没有再降级子串匹配。
+        旧实现整表都是 exact=False, 页面上任何含"导出"的静态文字或"导出记录"标签
+        都会被当成按钮点掉。
+        """
+        for exact in (True, False):
+            for t in self._EXPORT_LABELS:
+                btn = self._find_button([t], exact=exact)
+                if btn:
+                    try:
+                        btn.click(timeout=3000)
+                        self._log(f"  [自动] 已点击按钮「{t}」"
+                                  f"{'(精确匹配)' if exact else '(文字包含)'}")
+                        return True
+                    except Exception:
+                        continue
         return False
 
     def _click_confirm(self):

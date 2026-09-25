@@ -4,18 +4,24 @@
 平台通过 core.loader 动态发现加载,新增平台只需在 platforms/ 下建文件夹
 """
 
-import json
 import os
-import queue
 import sys
+
+# 项目根目录: 将根加入 sys.path,保证从任意位置启动都能定位 core/ platforms/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 崩溃兜底要早于其余导入装好: 下面 tkinter 和 core.* 任何一句抛错, 在 .vbs 的
+# pythonw 隐藏窗口下都是"图标闪一下, 什么也没有"。
+from core.crashguard import install as install_crash_guard
+install_crash_guard()
+
+import json
+import queue
 import threading
 import time
 import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import ttk, messagebox, scrolledtext
-
-# 项目根目录: 将根加入 sys.path,保证从任意位置启动都能定位 core/ platforms/
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          SELECTION_FILE, load_settings, save_settings,

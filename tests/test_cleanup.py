@@ -62,6 +62,19 @@ def test_only_old_run_and_crash_files_go(tree):
     assert left == {"run_20260101.log", "stats.jsonl", "notes.txt"}, "统计与别人的文件不能动"
 
 
+def test_per_run_log_names_are_recognised(tree):
+    """回归: logger 早就改成"每次启动一个文件"(`run_YYYYMMDD_HHMMSS.log`), 而白名单
+    只认按天那一种 —— 于是界面上的"日志保留(天)"改了多少天都没东西被删, logs 只增不减。
+    """
+    log_dir, _ = tree
+    _touch(os.path.join(log_dir, "run_20250101_090000.log"), 400)
+    _touch(os.path.join(log_dir, "run_20260101_090000.log"), 1)
+    removed = {os.path.basename(p) for p in prune_logs(log_dir, keep_days=180, now_ts=NOW)}
+    assert removed == {"run_20250101.log", "run_20250101_090000.log",
+                       "crash_20250101_101010_123456.txt"}
+    assert os.path.isfile(os.path.join(log_dir, "run_20260101_090000.log"))
+
+
 def test_summary_dirs_gone_but_archives_and_pending_stay(tree):
     _, dl = tree
     removed = prune_summary_dirs(dl, keep_days=180, now_ts=NOW)

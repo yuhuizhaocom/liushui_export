@@ -19,7 +19,11 @@ from datetime import datetime
 
 # 汇总目录名: 任务日期区间 + 落地时间戳, 如 2026-09-01_2026-09-02_20260924_181000
 SUMMARY_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}_\d{8}_\d{6}$")
+# 运行日志历史上用过两种名字: 按天(`run_20260924.log`)与按启动次数
+# (`run_20260924_211344.log`, 现在 logger 写的是这一种)。只列前一种会让清理静默失灵
+# ——界面上的"日志保留(天)"改了也没东西被删, 一年下来 logs 里上千个文件。
 LOG_FILE_RES = (re.compile(r"^run_\d{8}\.log$"),
+                re.compile(r"^run_\d{8}_\d{6}\.log$"),
                 re.compile(r"^crash_\d{8}_\d{6}_\d{6}\.txt$"))
 
 # stats.jsonl 是看板唯一的历史来源, 再旧也不能删

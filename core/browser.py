@@ -418,8 +418,10 @@ class BrowserManager:
 
     def wait_download(self, timeout=120):
         """等待下载完成,返回最终文件路径(失败返回None)
-        1) 优先消费浏览器下载事件队列: 用 save_as 把下载保存到临时目录,再移动到正式位置
-        2) 兜底: 监控 downloads 根目录,检测新出现的文件(兼容未触发download事件的场景)
+        1) 优先消费浏览器下载事件队列: 把 Chromium 已落盘的文件**移动**到本次任务的
+           临时目录(save_as 只是它拿不到 path 时的第二选择), 再交给 _accept_download 归档
+        2) 兜底: 监控 downloads 根目录,检测新出现的稳定文件(兼容未触发download事件的场景)
+        两条路都只归档一次(在 _accept_download 里)。
         """
         root = os.path.abspath(DOWNLOAD_DIR)
         # 开启捕获模式(如果还没开,从此刻起记录新触发的事件)
@@ -434,7 +436,7 @@ class BrowserManager:
                 item = self._dl_queue.pop(0)
                 tmp_path = self._save_download_to_temp(item.get("dl"))
                 if not tmp_path:
-                    tmp_path = self._take_new_download(root, deadline)
+                    tmp_path = self._wait_root_download(root, deadline)
                 if tmp_path:
                     final = self._accept_download(tmp_path)
                     if final:
@@ -601,14 +603,18 @@ class BrowserManager:
         except Exception:
             return None
 
-    def _take_new_download(self, root, deadline):
-        """取走队列中最新一次下载对应文件(等待它写完并移动到目标位置)"""
+    def _wait_root_download(self, root, deadline):
+        """事件没能落盘时, 等本次下载的原始文件出现在下载根目录并返回它的路径(**不归档**)。
+
+        归档只做一次, 由调用方 `_accept_download` 负责。以前这里自己也
+        `_finalize_download` 一遍, 同一个文件于是被归档两遍: `unified` 命名恰好幂等,
+        而 `download_name_mode=original` 第二遍会再加一层商户前缀(商户_商户_原名.csv),
+        默认设置是 unified, 所以这问题一直看不出来。
+        """
         while time.time() < deadline:
             new = self._find_new_candidate(root)
             if new:
-                final = self._finalize_download(new)
-                if final:
-                    return final
+                return new
             time.sleep(1.5)
         return None
 

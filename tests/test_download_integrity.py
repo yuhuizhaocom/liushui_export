@@ -66,6 +66,25 @@ def test_one_locked_orphan_does_not_abort_the_round(mgr, monkeypatch):
     assert any("没搬动" in line for line in logs)
 
 
+def test_root_fallback_archives_exactly_once(mgr, monkeypatch):
+    """回归: 兜底那一路(_wait_root_download)以前自己归档一次, `_accept_download`
+    又归档一次。`unified` 命名幂等所以看不出来, 保留原文件名那档会多叠一层商户前缀。
+    """
+    import core.config as cfg
+    b, root = mgr
+    monkeypatch.setattr(cfg, "load_settings", lambda: {"download_name_mode": "original"})
+    src = _touch(root, "流水明细.csv", "订单号,金额\nA1,10.00\nA2,20.00\n", age=3)
+    b._dl_capture_on = True
+    b._dl_capture_t0 = time.time() - 10
+    found = b._wait_root_download(root, time.time() + 1)
+    assert found == src, "只该把根目录里的原始文件交出去, 归档留给 _accept_download"
+    final = b._accept_download(found)
+    task_dir = b._task_base_dir()
+    assert os.path.dirname(final) == task_dir
+    assert os.path.basename(final) == "旗舰店A_流水明细.csv"
+    assert not any("旗舰店A_旗舰店A" in f for f in os.listdir(task_dir))
+
+
 def test_fallback_ignores_screenshot_but_takes_statement(mgr):
     b, root = mgr
     _touch(root, "查询结果_20260924_181000.png", PNG)

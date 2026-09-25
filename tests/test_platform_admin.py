@@ -1,5 +1,7 @@
 # tests/test_platform_admin.py
 import os
+import sys
+
 import pytest
 
 from core.platform_admin import generate_platform_skeleton, validate_platform_key, DebugProbe
@@ -181,3 +183,56 @@ def test_save_reports_line_number(tmp_path):
     with pytest.raises(ValueError) as e:
         save_platform_script(str(p), "x = 1\ny = (\n")
     assert "第 2 行" in str(e.value)
+
+
+def test_skeleton_survives_quotes_and_backslashes(tmp_path):
+    """指引里一个英文引号(后台按钮常写作 点击"导出")以前直接生成语法错误文件。"""
+    from core.platform_admin import render_platform_skeleton
+
+    src = render_platform_skeleton("my_pay", '后台→"导出"按钮', "https://a\\b",
+                                   "https://a/export", '点"导出"即可')
+    ns = {}
+    exec(compile(src, "<skeleton>", "exec"), ns)          # 编译不过就在此失败
+    cls = ns["MyPayExporter"]
+    assert cls.key == "my_pay"
+    assert cls.name == '后台→"导出"按钮'                    # 值也要原样回来
+    assert cls.guide == '点"导出"即可'
+
+
+def test_skeleton_is_loadable_by_loader(tmp_path, monkeypatch):
+    """生成的骨架必须能被 loader 真正发现 —— 这才是平台"出现在界面里"的判定标准。"""
+    import types
+    import core.loader as loader
+
+    gen = tmp_path / "platforms"
+    generate_platform_skeleton("genpay", "生成平台", "https://g/login",
+                               "https://g/export", '指引: 点"导出"', str(gen))
+    stub = types.ModuleType("platforms")
+    stub.__path__ = [str(gen)]
+    monkeypatch.setitem(sys.modules, "platforms", stub)
+    monkeypatch.setattr(loader, "PLATFORMS_DIR", str(gen))
+    found = loader.discover_platforms()
+    assert "genpay" in found
+    assert found["genpay"].name == "生成平台"
+
+
+def test_digit_leading_key_rejected_before_touching_disk(tmp_path):
+    """`2mei` 会生成 `class 2MeiExporter` —— 编译不过, 而目录已建, 从此卡在"已存在"。"""
+    gen = tmp_path / "platforms"
+    with pytest.raises(ValueError):
+        generate_platform_skeleton("2mei", "梅", "", "", "", str(gen))
+    assert not (gen / "2mei").exists()
+    assert validate_platform_key("2mei") is False
+    assert validate_platform_key("_ok") is True
+    assert validate_platform_key("my_pay2") is True
+
+
+def test_failed_generation_leaves_no_half_built_dir(tmp_path, monkeypatch):
+    from core import platform_admin as pa
+
+    gen = tmp_path / "platforms"
+    monkeypatch.setattr(pa, "write_text_atomic",
+                        lambda path, text: (_ for _ in ()).throw(OSError("磁盘只读")))
+    with pytest.raises(OSError):
+        generate_platform_skeleton("newpay", "新平台", "", "", "", str(gen))
+    assert not (gen / "newpay").exists(), "残留空目录会让重试一直报\"平台已存在\""

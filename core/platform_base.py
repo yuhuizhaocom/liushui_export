@@ -210,5 +210,8 @@ class PlatformBase:
         日期输入框、查询按钮、导出按钮并自动操作
         """
         from .exporters import SmartExporter
-        exporter = SmartExporter(browser)
+        # 日志接回 BrowserManager 的通道: 以前只传 browser, SmartExporter 的
+        # log_callback 是 None, 于是它的 _log() 全成空操作 —— 默认导出到底认出了哪个
+        # 日期框、点了哪个按钮、为什么转人工, 日志里一个字都看不到。
+        exporter = SmartExporter(browser, log_callback=browser._log)
         return exporter.export(start_date, end_date)

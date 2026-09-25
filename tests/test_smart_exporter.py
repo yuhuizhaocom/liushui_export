@@ -250,3 +250,42 @@ def test_falls_back_to_contains_match():
 def test_no_export_button_returns_false():
     ok, clicked = _click_export_for(["查询", "首页"])
     assert ok is False and clicked is None
+
+
+# ===== 默认导出必须把日志接回 BrowserManager 通道 =====
+
+def test_platform_default_export_wires_the_log_callback(monkeypatch):
+    """回归: PlatformBase.export() 以前写的是 SmartExporter(browser) —— log_callback
+    为空, 于是它的 _log() 全是空操作: 用户走默认导出时, 日志里既看不到认出了哪个日期框、
+    也看不到为什么转 manual, 出问题只能猜。
+    """
+    import core.exporters as ex
+    from core.platform_base import PlatformBase
+
+    seen = {}
+
+    class _Spy(ex.SmartExporter):
+        def __init__(self, browser, log_callback=None):
+            super().__init__(browser, log_callback=log_callback)
+            seen["callback"] = log_callback
+
+        def export(self, start_date, end_date, timeout=120):
+            return "manual"
+
+    monkeypatch.setattr(ex, "SmartExporter", _Spy)
+
+    class _LoggingBrowser(_Browser):
+        def __init__(self):
+            super().__init__()
+            self.lines = []
+
+        def _log(self, msg, level="info"):
+            self.lines.append(msg)
+
+    browser = _LoggingBrowser()
+    assert PlatformBase().export(browser, "2026-09-01", "2026-09-02") == "manual"
+    callback = seen["callback"]
+    # 绑 bound method 每次取都是新对象, 只能比相等(或比 __self__/__func__)
+    assert callback == browser._log
+    callback("[自动] 找到 2 个日期框")           # 签名要兼容(单参调用)
+    assert browser.lines == ["[自动] 找到 2 个日期框"]

@@ -18,7 +18,8 @@ from tkinter import ttk, messagebox, scrolledtext
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
-                         SELECTION_FILE, load_settings, save_settings)
+                         SELECTION_FILE, load_settings, save_settings,
+                         write_json_atomic)
 from core.loader import discover_platforms, reload_platforms
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
 from core.outputs import copy_to_summary_dir, sanitize_name
@@ -507,8 +508,7 @@ class LiushuiApp:
                              for k, mvs in self.merchant_vars.items()},
             }
             self.selection = data
-            with open(SELECTION_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            write_json_atomic(SELECTION_FILE, data)
         except Exception:
             pass
 

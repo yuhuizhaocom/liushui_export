@@ -186,10 +186,9 @@ class TaskStore:
         if jobs is not None:
             self.jobs = jobs
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump({"version": 1, "jobs": [j.to_dict() for j in self.jobs]},
-                          f, ensure_ascii=False, indent=2)
+            from .config import write_json_atomic
+            write_json_atomic(self.path, {"version": 1,
+                                          "jobs": [j.to_dict() for j in self.jobs]})
         except Exception:
             pass
 

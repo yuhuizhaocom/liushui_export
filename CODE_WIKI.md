@@ -102,6 +102,7 @@ liushui_export/
 │   ├── browser.py           # 浏览器管理（BrowserManager）
 │   ├── exporters.py         # 智能导出器（SmartExporter）
 │   ├── config.py            # 全局配置与用户设置读写
+│   ├── crashguard.py        # 启动期崩溃兜底（sys/threading.excepthook）
 │   ├── logger.py            # 日志模块
 │   ├── loader.py            # 平台加载器（自动发现）
 │   └── platform_base.py     # 平台基类
@@ -131,10 +132,11 @@ liushui_export/
 | `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；提供 `load_settings()/save_settings()` 读写 `settings.json`，以及 `write_json_atomic(path, data)`（临时文件 + `os.replace` 原子替换）——`settings.json`/`scheduled_tasks.json`/`selection_state.json` 三处整体重写都用它，避免写一半崩溃后被读取端"except 用默认值"静默清空。 |
 | `core/logger.py` | **合并后的唯一日志通道**。统一输出控制台、`logs/run_YYYYMMDD.log` 与 GUI 回调；`log(msg, level, callback)` 支持级别（warning/error 界面行带 `[WARN]/[ERROR]` 前缀）；`record_stat`/`load_stats`/`summarize_stats` 管稳定性统计，其中 `load_stats(limit)` 用尾部反向分块读（`_read_tail_lines`），不再把整个 `stats.jsonl` 读进内存。 |
 | `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
+| `core/crashguard.py` | **启动期崩溃兜底**。工具用 `pythonw` + 隐藏窗口启动，没有控制台；以前导入阶段抛错（缺 tkinter、`logs` 建不出来）的表现就是"图标闪一下，什么也没有"。`install()` 把 `sys.excepthook`/`threading.excepthook` 指向 `report_uncaught`：堆栈写进 `logs/crash_日期_时间_微秒.txt`，主线程再弹窗告知文件位置（一个进程只弹一次）。子线程那条**只落文件不弹窗**——在非主线程里拉 Tk 窗口可能把界面吊住。`main_gui` 在其余 import 之前装好它，所以模块自身的导入失败也覆盖得到。 |
 | `platforms/*/export.py`  | **平台插件**。每个文件定义一个继承 `PlatformBase` 的导出类，实现该平台的登录与导出流程；平台专项逻辑（如有赞的 URL 日期参数）直接写在平台脚本内，不放入 `core/`（见 [第 8 章](#8-平台插件体系)）。 |
 | `core/platform_admin.py` | **平台管理/脚本调试**。`render_platform_skeleton()` 纯函数生成骨架（输入按字面量转义，key 须字母/下划线开头）、`save_platform_script()` 先验语法再原子写（语法错误不覆盖磁盘上的好脚本）、`DebugProbe` 用 `__getattr__` 通用透传并如实抛异常、`PlatformManagerDialog`（向导+内置编辑器+列表）与 `DebugDialog`（试运行）三个 Tkinter 弹窗。 |
 | `core/scheduler.py` | **定时任务**。`CronExpr`（5 字段 cron 轻量解析/匹配/next-run）、`CronJob`/`TaskStore`（`scheduled_tasks.json` 持久化）、`CronScheduler`（后台线程到期触发 `app.trigger_job`）、`SchedulerDialog`/`JobEditDialog`（任务管理界面）；导出失败自动重试（`run_with_retry`）亦由本批提供。 |
-| `start.bat` / `启动工具.vbs` | **启动脚本**。以 `python -m core.main_gui` 方式启动：前者用控制台 Python（错误可见）；后者用 `pythonw` 免控制台，并在首次运行时自动 `pip install playwright` + 安装 Chromium。                                    |
+| `start.bat` / `启动工具.vbs` | **启动脚本**。以 `python -m core.main_gui` 方式启动：前者用控制台 Python（错误可见）；后者用 `pythonw` 免控制台，并在首次运行时自动 `pip install playwright` + 安装 Chromium。找 Python 分五档：① 历史写死路径（`E:\Python\Python314`、`C:\Python31x`，**排第一是有意的**——现在能用的机器不许换解释器）② `%WINDIR%` 下的 `py`/`pyw` 启动器（注意它不叫 `python.exe`，得按各自名字找）③ 用户级默认目录 `%LocalAppData%\Programs\Python\Python3xx` ④ 项目自带的 `.venv\Scripts` ⑤ `C:\Python3xx`。目录枚举带 `On Error Resume Next`，没权限读 `C:\` 也只跳过不中止。诊断：`cscript //nologo 启动工具.vbs --print-python` 只打印选中的解释器，不装依赖也不起界面。 |
 
 ***
 
@@ -230,11 +232,12 @@ liushui_export/
 | `safe_click(selector, desc, retries)` | 等待选择器出现后点击，带重试。                                                                               |
 | `safe_fill(selector, value, desc)`    | 等待选择器后 `fill`。                                                                                |
 | `sleep(seconds)`                      | 固定等待（页面加载/动画）。                                                                                |
-| `click_text(text, exact, retries)`    | 点击包含指定文字的按钮/链接（`get_by_text`）。                                                                |
+| `click_text(text, exact, retries)`    | 点击包含指定文字的按钮/链接（`get_by_text`）。匹配链：普通文本 → 忽略空白（`确 定`）→ JS 直接 `el.click()`。**`exact=True` 时第二路的正则两端锚定**（`^\s*导\s*出\s*$`），否则"导出"会被 DOM 更靠前的"导出历史"抢走——精确匹配不能被自己的回退链削弱。命中后若页面有 ≥2 处同样文字，另起一行 `[提醒] 页面有 N 处含"X"的文字, 已点中第一处: <该行文字>`，把"点的是哪一行"变得可见（导出历史列表点的永远是第一条）。 |
 | `click_selector(selector)`            | 点击 CSS 选择器元素。                                                                                 |
-| `fill_placeholder(ph, value)`         | 按 placeholder 填输入框。                                                                           |
+| `fill_placeholder(ph, value)`         | 按 placeholder 填输入框，**返回是否真的填进去**（找不到框会写一条 warning 日志，不再静默返回 None）。                            |
 | `fill_selector(sel, value)`           | 按 CSS 选择器填输入框。                                                                                |
-| `is_visible_text(text, timeout)`      | 页面是否出现指定文字（`wait_for`）。                                                                       |
+| `is_visible_text(text, timeout)`      | 页面是否出现指定文字。先按"忽略内部空白"的**非锚定**正则匹配（`确 定` 这类文案命中得了，`导出` 也算出现在"导出历史"里），再退回普通文本；等待语义上宁可宽松。 |
+| `wait_for(selector, text, timeout, stable_for)` | 语义化等待，替代固定 `sleep`：条件满足即返回 True，超时返回 False 并写一条 warning（不抛异常）。平台脚本用它等"查询结果里出现导出按钮"。 |
 | `close_popup(retries)`                | 按优先级关闭广告/引导弹窗：弹窗容器关闭按钮（zent/element-ui/antd 等 8 种）→ 通用关闭图标 → 文字按钮（"我知道了/跳过/关闭"）；无弹窗自动跳过，不误操作。 |
 
 #### 下载捕获与文件归档（核心机制）
@@ -285,11 +288,11 @@ liushui_export/
 | `login(browser)`                        | 方法  | 默认实现：`navigate(login_url)` 等待用户手动登录；可覆盖做特殊处理。                                                 |
 | `export(browser, start_date, end_date)` | 方法  | **核心接口**。返回 `"success"`（成功）/ `"manual"`（需手动）/ `"failed"`（失败）。默认实现：懒加载 `SmartExporter` 执行智能导出。 |
 | `open_export_page(browser)`            | 方法  | 骨架钩子①：`navigate(export_url)` + `sleep(PAGE_SETTLE_S)` + `close_popup()`。 |
-| `set_date_range(browser, start, end)`  | 方法  | 骨架钩子②：按 placeholder 填「开始日期/结束日期」（各取 `[:10]`）。 |
+| `set_date_range(browser, start, end)`  | 方法  | 骨架钩子②：按 placeholder 填「开始日期/结束日期」（各取 `[:10]`）。**返回两个框是否都填成功**；页面改版/框名不同导致填不进去时不能继续——否则后台按自己的默认区间出账单，文件名却是本次请求的区间。 |
 | `trigger_export(browser, start, end)`  | 方法  | 骨架钩子③：点「查询」再点「导出」。需先切标签、或导出后还要去历史报表页的平台覆盖此方法。 |
 | `download_export_file(browser, label, settle_s)` | 方法 | 骨架钩子④：`begin_wait_download` → 点 `label`（默认 `DOWNLOAD_LABEL`「下载」）→ `sleep(DOWNLOAD_SETTLE_S)` → `wait_download(timeout=DOWNLOAD_TIMEOUT_S)`，返回 `"success"`/`"manual"`。 |
 | `PAGE_SETTLE_S` / `DOWNLOAD_TIMEOUT_S` / `DOWNLOAD_LABEL` / `DOWNLOAD_SETTLE_S` / `DATE_VALUE_SLICE` | 类属性 | 骨架的三个可声明差异点：打开页面后等几秒（3）、下载最多等多久（60）、下载按钮的真实文字（有的后台叫「下载全部」「下载明细」，小红书干脆就是「导出」）、点完给几秒落地、以及填进日期框的字符串长度（天猫「月汇总」只吃 `2026-09`）。 |
-| `run_standard_flow(browser, start, end)` | 方法 | 串起上述四步；平台脚本 `export()` 里 `return self.run_standard_flow(...)` 即采用骨架。**不调用则行为完全不变**（SmartExporter 默认实现保留）。 |
+| `run_standard_flow(browser, start, end)` | 方法 | 串起上述四步；日期没全部填进去时**在点导出之前停下**（截图 + `[中止]` 日志 + 返回 `"manual"`），不会拿页面默认区间的账单冒充本次区间。平台脚本 `export()` 里 `return self.run_standard_flow(...)` 即采用骨架。**不调用则行为完全不变**（SmartExporter 默认实现保留）。手写流程的京东/拼多多各自做了同样的日期检查。 |
 | `SELECTORS`                             | 类属性 | 关键元素的选择器表（`{"export_btn": "button.export"}` 之类）。声明后导出前会被自动校验；目前只有微信支付声明了它。 |
 | `check_selectors(browser)`              | 方法  | 自检 `SELECTORS` 是否都在页面上，返回 `(ok, missing)`。**由 `_run_single_export` 在导出前自动调用一次**，缺失只写日志不拦截导出；未声明的平台直接跳过。 |
 | `assert_selector(browser, key)`         | 方法  | 步骤级断言：关键元素不在就抛（附失败截图），用于脚本内部确认走到正确页面。 |
@@ -348,7 +351,8 @@ liushui_export/
 | `discover_merchants(platform_keys)`   | `core/main_gui.py` | 扫描 `browser_data/<平台key>/` 下的子目录，发现已建档商户，返回 `{key: [商户名]}`。                                                  |
 | `load_settings()` / `save_settings()` | `core/config.py`   | 读写 `settings.json`，缺失字段回退 `DEFAULT_SETTINGS`（`show_browser`、`download_name_mode`）。                           |
 | `log(message, level, callback)`       | `core/logger.py`   | 统一日志：输出控制台（容错 `pythonw` 无 stdout 场景）→ 写入 `logs/run_YYYYMMDD.log` → 转发 GUI 回调。                                |
-| `check_dependencies()` / `main()`     | `core/main_gui.py` | 依赖检测与自动安装；程序入口与全局异常兜底。                                                                                       |
+| `check_dependencies()` / `main()`     | `core/main_gui.py` | 依赖检测与自动安装；程序入口。 |
+| `report_crash(summary, detail)`       | `core/main_gui.py` | `main()` 的异常兜底：先用模块顶部已导入的 `log` 记 ERROR，再弹窗。**返回值=日志是否真写成功**，弹窗文案跟着变（写不成功就不谎称"已记录到 logs 文件夹"）。与 crashguard 的区别：这里兜的是 `main()` 内部已起来之后的异常。 |
 
 ***
 
@@ -426,9 +430,10 @@ liushui_export/
 
 ```
 启动脚本(start.bat / 启动工具.vbs)
-  → 探测 Python 解释器
+  → 探测 Python 解释器(vbs 按五档找: 写死路径 → py 启动器 → 用户级目录 → .venv → C:\Python3xx)
   → (vbs 专用)检查 playwright，缺失则自动安装
   → 运行 python -m core.main_gui
+      ├─ crashguard.install()         # 先装兜底，之后任何导入失败都会落 logs/crash_*.txt
       ├─ check_dependencies()         # 兜底依赖检测
       ├─ LiushuiApp.__init__
       │    ├─ discover_platforms()    # 加载已实现平台插件
@@ -436,6 +441,7 @@ liushui_export/
       │    ├─ discover_merchants()    # 扫描已建档商户
       │    └─ 构建三栏界面
       └─ root.mainloop()              # 进入事件循环
+          └─ 逃逸出 main() 的异常 → report_crash(): 记 ERROR 日志 + 弹窗(文案如实说明日志是否写成)
 ```
 
 ### 7.2 首次登录流程（`_do_login`）
@@ -540,7 +546,7 @@ end_wait_download(): 清队列、归位残留、清理临时目录
 | 依赖       | 要求                                     |
 | -------- | -------------------------------------- |
 | 操作系统     | Windows                                |
-| Python   | 3.10+（启动脚本探测 Python 3.10\~3.14 常见安装路径） |
+| Python   | 3.10+（`启动工具.vbs` 五档探测：写死路径 → `py`/`pyw` 启动器 → 用户级安装目录 → 项目 `.venv` → `C:\Python3xx`；见 [4 章](#4-主要模块职责)） |
 | Python 包 | `playwright==1.62.0` + Chromium 内核     |
 
 ### 9.2 启动方式（三选一）
@@ -559,6 +565,8 @@ python -m playwright install chromium
 ```
 
 > 注：`core/browser.py` 检测到 `C:\pw_browsers` 目录存在时会设置 `PLAYWRIGHT_BROWSERS_PATH`，即支持自定义浏览器内核安装目录。
+
+> 起不来时：双击 `启动工具.vbs` 后"图标闪一下什么也没有"，先翻 `logs/crash_*.txt`（未捕获异常的堆栈，主线程崩溃会另外弹窗告知路径）；想确认启动器挑中了哪个解释器，执行 `cscript //nologo 启动工具.vbs --print-python`（只打印，不装依赖、不起界面）；`start.bat` 让控制台常驻，错误直接可见。
 
 ### 9.3 典型使用路径
 
@@ -592,6 +600,7 @@ python -m playwright install chromium
 | `browser_data/<平台key>/<商户>/`     | 是（点 `+` 添加商户时） | Chromium 持久化 profile，保存登录态                                                             |
 | `scheduled_tasks.json`            | 是              | 定时任务持久化（新增/编辑后自动保存）                                                                        |
 | `logs/run_YYYYMMDD.log`          | 是              | 当日统一日志（系统+操作，DEBUG 级）                                                                        |
+| `logs/crash_YYYYMMDD_HHMMSS_微秒.txt` | 崩溃时才生成 | 未捕获异常的完整堆栈（含子线程里的）。**双击没反应/闪一下就退时先看这里**，弹窗上写的是它的路径；写不进 `logs` 时退回项目根同名文件。                        |
 | `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 统一命名 / `original` 保留原文件名）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟） |
 
 ***
@@ -608,9 +617,10 @@ python -m playwright install chromium
 | `core/config.py`         | 约 60 行        | 配置与设置读写                         |
 | `core/logger.py`         | 约 130 行       | 日志通道 + 稳定性统计（stats.jsonl 读写与汇总） |
 | `core/keepalive.py` | 约 100 行 | 登录保活服务（后台线程周期巡检） |
+| `core/crashguard.py` | 约 90 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
 | `core/platform_admin.py` | 约 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/scheduler.py` | 约 380 行 | 定时任务（cron 解析/持久化/调度/管理界面） |
-| `tests/` | 16 个文件约 1800 行 | pytest 测试（127 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口 |
+| `tests/` | 23 个文件约 3000 行 | pytest 测试（202 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序 |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 0.5 秒） |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |

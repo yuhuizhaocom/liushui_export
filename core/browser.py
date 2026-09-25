@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import zipfile
 from datetime import datetime
@@ -41,6 +42,7 @@ class BrowserManager:
         self._step_debug = False     # 单步调试模式(开启后 step_pause() 会暂停等待)
         self._step_callback = None   # 单步暂停回调(由 GUI 注入,用于弹"继续"确认框)
         self._user_wait_callback = None  # "等待用户手动操作"回调(如扫码确认,由 GUI 注入)
+        self._window_closed = threading.Event()  # 用户是否已把浏览器窗口关掉(首次登录用)
         self._setup_dirs()
 
     @staticmethod
@@ -119,6 +121,7 @@ class BrowserManager:
         for attempt in range(1, 4):
             try:
                 self._log(f"正在启动浏览器(第{attempt}次)...")
+                self._window_closed.clear()
                 self.playwright = sync_playwright().start()
                 self.context = self.playwright.chromium.launch_persistent_context(
                     user_data_dir=self._profile_dir,
@@ -141,6 +144,8 @@ class BrowserManager:
                     self.page = self.context.new_page()
                 # 监听浏览器下载事件,推入队列(即使文件先写完也不丢事件)
                 self.context.on("download", self._on_download)
+                # 用户关掉窗口 = 首次登录的人工步骤结束, 记下来给 GUI 轮询用
+                self.context.on("close", lambda ctx=None: self._window_closed.set())
                 # 恢复上次保存的登录态(session cookie 也能跨会话保留,如微信支付)
                 self._restore_login_state()
                 self._log("浏览器启动成功")
@@ -1184,10 +1189,13 @@ class BrowserManager:
 
     LOGIN_STATE_FILE = "login_state.json"
 
-    def save_login_state(self):
+    def save_login_state(self, quiet=False):
         """导出当前登录态(cookie + localStorage)到 profile 目录,供下次启动恢复。
         context.storage_state() 会包含 session cookie(无过期时间),正好解决
-        Playwright persistent context 关闭时不保留 session cookie 的问题。"""
+        Playwright persistent context 关闭时不保留 session cookie 的问题。
+
+        quiet=True 时不写日志: 首次登录期间是轮询保存的, 每次都写一行会把日志刷满。
+        """
         try:
             if not self.context:
                 return False
@@ -1195,11 +1203,43 @@ class BrowserManager:
             path = os.path.join(self._profile_dir, self.LOGIN_STATE_FILE)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False)
-            self._log(f"登录态已保存({len(state.get('cookies', []))} 个 cookie)")
+            if not quiet:
+                self._log(f"登录态已保存({len(state.get('cookies', []))} 个 cookie)")
             return True
         except Exception as e:
             self._log(f"保存登录态失败: {e}", "warning")
             return False
+
+    def window_closed(self):
+        """用户是否已经把浏览器窗口关掉(首次登录用它当"我登好了"的信号)。
+
+        三条线索任一成立即算关掉: context 的 close 事件、已经没有页面、跟 Chromium
+        的通讯断了(进程退出后任何调用都抛 Target closed)。本函数不抛异常。
+        """
+        if self._window_closed.is_set():
+            return True
+        if self.context is None:
+            return True
+        try:
+            return len(self.context.pages) == 0
+        except Exception:
+            return True
+
+    def login_signature(self):
+        """不碰页面的"登录有写入"信号: (cookie 条数, 内容指纹); 窗口没了返回 None。
+
+        首次登录期间 GUI 用它来判断该不该导出登录态。不能用 `check_login`: 它会把页面
+        导航到导出地址, 用户正扫码就会被拽走, 所以只能看不触发导航的东西。
+        """
+        try:
+            if not self.context:
+                return None
+            cookies = self.context.cookies()
+            digest = hash(tuple(sorted((c.get("name"), c.get("value"))
+                                       for c in cookies)))
+            return (len(cookies), digest)
+        except Exception:
+            return None
 
     def _restore_login_state(self):
         """启动后恢复上次保存的登录态: 注入 cookie + 用初始化脚本恢复 localStorage。"""

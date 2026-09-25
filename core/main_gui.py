@@ -215,7 +215,7 @@ class LiushuiApp:
         self._merchant_memory = {}   # platform_key -> {商户名: bool} 平台被取消勾选那一刻的样子
         self.merchants = discover_merchants(self.platforms.keys())
         self.selection = self._load_selection()   # 上次勾选状态(重启后恢复)
-        self._login_confirm = threading.Event()  # 登录弹窗确认事件(等待用户)
+        self._login_hint = None        # 首次登录的非模态提示窗(登录完关掉浏览器窗口即算完成)
         self._abort = threading.Event()          # 中止请求: 在任务边界生效(见 _aborted)
 
         self._setup_window()
@@ -1064,6 +1064,10 @@ class LiushuiApp:
 
     MERCHANT_PROBE_TIMEOUT_S = 30 * 60   # 手工测试窗口最长占用时间
 
+    # 首次登录: 等人自己关掉浏览器窗口, 最长等 30 分钟(扫码/短信/企业认证都够), 2 秒一轮
+    LOGIN_WAIT_TIMEOUT_S = 30 * 60
+    LOGIN_POLL_S = 2.0
+
     def _open_merchant_browser(self, plat, merchant):
         """后台: 用该商户独立 profile 启动浏览器并打开导出页,不执行自动化,等待用户手工操作。
         线程保持存活直到用户手工关闭浏览器窗口,防止任务结束逻辑自动关闭浏览器。
@@ -1337,13 +1341,71 @@ class LiushuiApp:
         """商户名清理(去除路径非法字符);空结果返回空串以便提示用户重填。"""
         return sanitize_name(name)
 
-    def _show_login_prompt(self, plat_name, merchant, guide):
-        """主线程显示"请登录"弹窗;用户点确定后唤醒登录线程继续"""
-        messagebox.showinfo(
-            "请登录",
-            f"请在浏览器中完成【{plat_name} · {merchant}】登录\n\n"
-            f"操作提示: {guide}\n\n登录完成后点击确定继续。")
-        self._login_confirm.set()
+    def _show_login_hint(self, plat_name, merchant, guide):
+        """主线程弹一个**不挡事**的提示窗: 登录完直接关掉浏览器窗口, 不用回来点确定。
+
+        用 Toplevel 而不是 messagebox: 模态框又要把人拽回来点一下, 正是这次要去掉的
+        动作。窗口只提示, 不参与流程。
+        """
+        try:
+            win = tk.Toplevel(self.root)
+            win.title("请登录")
+            win.configure(bg=BG_PANEL)
+            win.geometry("440x190")
+            win.attributes("-topmost", True)
+            tk.Label(win, text=f"{plat_name} · {merchant}", bg=BG_PANEL, fg=FG_MAIN,
+                     font=("Microsoft YaHei", 11, "bold")).pack(pady=(14, 2))
+            tk.Label(win, text="请在已经打开的浏览器窗口里完成登录。\n\n"
+                               "登录好之后, 直接把那个浏览器窗口关掉就行 ——\n"
+                               "程序会自动保存登录态并接着做下一个, 不用回来点确定。",
+                     bg=BG_PANEL, fg=FG_MAIN, justify="left",
+                     font=("Microsoft YaHei", 10)).pack(padx=16, pady=6)
+            tk.Label(win, text=f"操作提示: {guide}", bg=BG_PANEL, fg=FG_MUTED,
+                     wraplength=400, justify="left",
+                     font=("Microsoft YaHei", 9)).pack(padx=16, pady=(0, 12))
+            self._login_hint = win
+        except Exception as e:
+            # 提示窗弹不出来不影响登录(浏览器窗口本身就是登录页), 但要说一声
+            self._append_log(f"[提示] 登录提示窗没弹出来: {e}")
+
+    def _close_login_hint(self):
+        win = self._login_hint
+        self._login_hint = None
+        if win is None:
+            return
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    def _wait_login_window_closed(self, browser):
+        """等用户自己关掉登录窗口; 期间 cookie 一变就顺手导出登录态。
+
+        为什么边等边存: persistent context 在 Chromium 退出时**不**保留 session cookie
+        (微信支付这类就是靠它), 而"窗口被关掉"这个信号到达时浏览器已经没了, 再调
+        storage_state 也来不及。所以每次检测到 cookie 有写入就先导出一次。
+
+        返回 (结果, 是否导出过登录态), 结果: closed / aborted / timeout。
+        """
+        last_sig = None
+        saved = False
+        deadline = time.time() + self.LOGIN_WAIT_TIMEOUT_S
+        while time.time() < deadline:
+            if self._aborted():
+                return "aborted", saved
+            if browser.window_closed():
+                return "closed", saved
+            sig = browser.login_signature()
+            if sig is not None:
+                # 第一次只记基线: 老 profile 本来就带 cookie, 不该一上来就"已保存"
+                if last_sig is not None and sig != last_sig and \
+                        browser.save_login_state(quiet=True):
+                    saved = True
+                    self._append_log("  检测到登录写入, 已保存登录态 —— "
+                                     "确认登好了就把浏览器窗口关掉")
+                last_sig = sig
+            time.sleep(self.LOGIN_POLL_S)
+        return "timeout", saved
 
     def _add_merchant(self, key, raw_name):
         """建商户 profile 目录并加一行勾选; 返回 (是否成功, 给用户看的一句话)。
@@ -1480,32 +1542,29 @@ class LiushuiApp:
                 plat.login(self.browser)
                 self._append_log(f"请在浏览器中完成 {plat.name}({merchant}) 登录")
                 self._append_log(f"操作提示: {plat.guide}")
-                # 弹窗由主线程弹出;后台线程阻塞等待用户点"确定"(期间浏览器保持打开)
-                self._login_confirm.clear()
+                self._append_log("  登录好之后直接关掉那个浏览器窗口即可, "
+                                 "程序会自动保存并继续下一个(不用回来点确定)")
+                browser = self.browser
                 self._ui(lambda n=plat.name, m=merchant, g=plat.guide:
-                         self._show_login_prompt(n, m, g))
-                if not self._login_confirm.wait(timeout=600):
-                    self._append_log(f"[提示] {plat.name}({merchant}) 等待登录超时,已跳过")
-                else:
-                    # 用户确认登录后,用平台自身的 check_login 轮询确认页面真正进入后台
-                    # (而非停留在扫码/中转页)。确认成功才关闭浏览器,保证登录态已写入持久化目录。
-                    self._append_log(f"正在确认 {plat.name}({merchant}) 登录状态...")
-                    confirmed = False
-                    try:
-                        for _ in range(8):
-                            if plat.check_login(self.browser):
-                                confirmed = True
-                                break
-                            self.browser.sleep(5)
-                    except Exception:
-                        pass
-                    if confirmed:
-                        self._append_log(f"  登录态确认有效,正在导出登录态...")
-                        # 主动导出 cookie + localStorage(含 session cookie),
-                        # 否则微信支付这类 session cookie 平台关闭浏览器后登录态会丢失
-                        self.browser.save_login_state()
+                         self._show_login_hint(n, m, g))
+                outcome, saved = self._wait_login_window_closed(browser)
+                self._ui(self._close_login_hint)
+                if outcome == "closed":
+                    if saved:
+                        self._append_log(f"  {plat.name}({merchant}) 窗口已关闭, 登录态已保存")
+                        self.set_platform_status(key, "ok")
                     else:
-                        self._append_log(f"  [警告] 未能确认登录成功(页面仍在登录/扫码页),请重新执行首次登录")
+                        # 没检测到任何 cookie 写入: 多半是窗口令人误关了, 如实说不好听但比假绿灯强
+                        self._append_log(
+                            f"  [警告] {plat.name}({merchant}) 关窗口期间没检测到登录写入,"
+                            "可能并未登录成功, 请用「检查登录状态」核实后重新登录")
+                        self.set_platform_status(key, "warn")
+                elif outcome == "aborted":
+                    self._append_log(f"[中止] {plat.name}({merchant}) 的登录等待已结束")
+                else:
+                    self._append_log(
+                        f"[提示] {plat.name}({merchant}) 等待关闭登录窗口超时"
+                        f"({self.LOGIN_WAIT_TIMEOUT_S // 60} 分钟), 继续下一个")
             except Exception as e:
                 self._append_log(f"打开 {plat.name}({merchant}) 失败: {e}")
                 self.set_platform_status(key, "error")

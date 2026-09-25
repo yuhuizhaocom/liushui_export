@@ -179,6 +179,29 @@ def test_unmatched_job_merchants_lists_what_would_never_run():
     assert unmatched_job_merchants(["youzan"], ["支付宝商户"], known) == ["支付宝商户"]
 
 
+def test_editing_cron_rebaselines_so_it_does_not_fire_now():
+    """改 cron 前是每分钟跑, last_run 停在昨天; 不挪起算点的话保存后立刻触发一次。"""
+    s = CronScheduler(app=object())
+    job = _job(cron="* * * * *", last_run="2026-09-03T09:00:00")
+    now = datetime(2026, 9, 4, 18, 0)
+    assert s.should_trigger(job, now) is True          # 改之前: 早已到期
+
+    changed = job.apply_edit("每日导出", "0 9 * * *", ["youzan"], ["旗舰店A"], now=now)
+    assert changed is True
+    assert job.last_run == now.isoformat()
+    assert s.should_trigger(job, now) is False         # 改之后: 等明早 9 点
+    assert s.should_trigger(job, _dt("2026-09-05 09:00")) is True
+
+
+def test_editing_without_cron_change_keeps_baseline():
+    job = _job(cron="0 9 * * *", last_run="2026-09-04T09:00:00")
+    changed = job.apply_edit("改名了", "0 9 * * *", ["youzan", "alipay"], ["旗舰店A"],
+                             now=datetime(2026, 9, 4, 18, 0))
+    assert changed is False
+    assert job.last_run == "2026-09-04T09:00:00"       # 只改名/平台不该被当成重新计时
+    assert job.name == "改名了" and job.platforms == ["youzan", "alipay"]
+
+
 class _App:
     def __init__(self, accepted):
         self.accepted = accepted

@@ -115,6 +115,20 @@ class CronJob:
         self.enabled = bool(enabled)
         self.last_run = last_run  # ISO 字符串或 None
 
+    def apply_edit(self, name, cron, platforms, merchants, now=None):
+        """界面"编辑任务"的唯一入口, 返回 cron 是否变了。
+
+        改 cron 时必须把起算点挪到本次编辑时刻: should_trigger 是拿 last_run 算
+        next_run 的, 老 last_run 配新 cron 往往早就"到期", 于是保存后 30 秒内会
+        立刻执行一次 —— 而用户改时间点的意图是"从下一个新时间点开始"。
+        """
+        cron_changed = self.cron != cron
+        self.name, self.cron = name, cron
+        self.platforms, self.merchants = list(platforms), list(merchants)
+        if cron_changed:
+            self.last_run = (now or datetime.now()).isoformat()
+        return cron_changed
+
     def to_dict(self):
         return {
             "id": self.job_id,
@@ -424,8 +438,7 @@ class JobEditDialog(tk.Toplevel):
             job = CronJob.new(name=name, cron=cron, platforms=plats, merchants=merchants)
             self.scheduler.store.jobs.append(job)
         else:
-            self.job.name, self.job.cron = name, cron
-            self.job.platforms, self.job.merchants = plats, merchants
+            self.job.apply_edit(name, cron, plats, merchants)
         self.scheduler.store.save()
         if self.on_saved:
             self.on_saved()

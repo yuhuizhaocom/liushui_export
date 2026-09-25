@@ -249,7 +249,7 @@ class BrowserManager:
         self._dl_queue = []
         self._dl_capture_on = True
         self._dl_capture_t0 = time.time()
-        self._carry_over_orphans()  # 把上次残留的已下载文件(如UUID)归位
+        self._carry_over_orphans()  # 上一轮残留的 UUID 文件收进 待确认/(不冒充本次)
         # 创建本次任务的临时下载目录(删除旧残留)
         tmp = self._task_tmp_dir()
         try:
@@ -269,21 +269,37 @@ class BrowserManager:
         return os.path.join(self._task_base_dir(), "临时")
 
     def _carry_over_orphans(self):
-        """把下载根目录下上次残留的已下载文件(如UUID无扩展名)移动到平台文件夹"""
+        """把下载根目录里没人认领的 UUID 残留文件移到 downloads/待确认/。
+
+        以前是直接 _finalize_download 到"当前任务"目录 —— 可 begin_wait_download
+        是在 set_export_context 已经切到下一个平台/商户之后调的, 于是上一轮残留会
+        被安上新商户的文件名、放进新商户的文件夹, 而且这条路径不经过任何内容校验。
+        对账单工具里"哪个商户的文件"是不能猜的, 归属不明就单独放, 并在日志里说清。
+        """
         try:
             root = os.path.abspath(DOWNLOAD_DIR)
             orphan_ok = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            pending_dir = os.path.join(root, self.ORPHAN_DIR_NAME)
+            moved = []
             for f in os.listdir(root):
                 fp = os.path.join(root, f)
                 if not os.path.isfile(fp):
                     continue
                 name, ext = os.path.splitext(f)
-                # 残留UUID文件(无扩展名或为已有内容)归入平台文件夹
-                if orphan_ok.match(name):
-                    final = self._finalize_download(fp)
-                    if final:
-                        self._log(f"已归位残留下载: {os.path.basename(final)}")
+                if not orphan_ok.match(name):
+                    continue          # 截图/命名文件等不在考虑范围
+                os.makedirs(pending_dir, exist_ok=True)
+                dst = os.path.join(pending_dir, f)
+                if os.path.exists(dst):
+                    dst = os.path.join(pending_dir, "%s_%s%s" % (
+                        name, datetime.now().strftime("%H%M%S"), ext))
+                shutil.move(fp, dst)
+                moved.append(os.path.basename(dst))
+            if moved:
+                self._log(f"[归位] {len(moved)} 个无法确认归属的下载文件已移到 "
+                          f"{self.ORPHAN_DIR_NAME}/ 目录, 请人工核对: "
+                          + ", ".join(moved[:5]), "warning")
         except Exception:
             pass
 
@@ -291,7 +307,7 @@ class BrowserManager:
         """结束捕获模式(一次等待结束,清空队列、收走根目录残留、清理临时目录)"""
         self._dl_queue = []
         self._dl_capture_on = False
-        self._carry_over_orphans()  # 收走根目录可能残留的原始下载文件(UUID)
+        self._carry_over_orphans()  # 收走根目录残留的原始下载文件(UUID) -> 待确认/
         self._cleanup_temp_dir()
 
     def _cleanup_temp_dir(self):
@@ -433,6 +449,9 @@ class BrowserManager:
         return None
 
     # ===== 下载文件完整性/内容校验(避免"下完了但实为空表") =====
+
+    # 归属不明的残留下载文件放这儿, 不冒充任何商户的账单
+    ORPHAN_DIR_NAME = "待确认"
 
     # ===== 下载文件类型识别(按文件头, 不看扩展名) =====
     # 兜底扫描会把 downloads/ 根目录里"最新出现的文件"当成本次下载认领, 而

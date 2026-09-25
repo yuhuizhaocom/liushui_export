@@ -70,3 +70,40 @@ def test_image_detection_is_by_content_not_extension(tmp_path):
 
 def test_missing_file_is_not_an_image(tmp_path):
     assert BrowserManager._is_image_file(str(tmp_path / "不存在.png")) is False
+
+
+UUID = "3f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+
+
+def test_orphan_does_not_land_in_the_next_merchants_folder(mgr):
+    """上一轮残留的 UUID 文件不能冒充下一个商户的账单。"""
+    b, root = mgr
+    stale = _touch(root, UUID, "订单号,金额\nOLD,1.00\n")
+    logs = []
+    b.log_callback = logs.append
+    b.begin_wait_download()                       # 此时上下文已经是"旗舰店A"
+    assert not os.path.exists(stale)
+    task_dir = b._task_base_dir()
+    assert not any(UUID in f for _d, _s, fs in os.walk(task_dir) for f in fs), \
+        "残留文件被归进了当前商户的目录"
+    pending = os.path.join(root, b.ORPHAN_DIR_NAME, UUID)
+    assert os.path.isfile(pending)                # 归属不明 -> 单独放, 等人工核对
+    assert any("待确认" in str(line) for line in logs)
+
+
+def test_orphan_keeps_its_own_name(mgr):
+    """归位路径不经过内容校验 —— 所以更不能把它改名成某个商户的账单名。"""
+    b, root = mgr
+    data = "\x00\x01\x02 乱码".encode("utf-8") * 50
+    _touch(root, UUID, data)
+    b._carry_over_orphans()
+    moved = os.path.join(root, b.ORPHAN_DIR_NAME, UUID)
+    assert open(moved, "rb").read() == data       # 原样保留, 连文件名都不动
+
+
+def test_named_files_and_screenshots_left_alone(mgr):
+    b, root = mgr
+    keep = _touch(root, "查询结果_20260924_181000.png", PNG)
+    other = _touch(root, "自己起的名字.csv", "a,b\n1,2\n")
+    b._carry_over_orphans()
+    assert os.path.isfile(keep) and os.path.isfile(other)

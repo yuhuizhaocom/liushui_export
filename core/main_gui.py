@@ -559,6 +559,22 @@ class LiushuiApp:
                  bg=BG_PANEL, fg="#95a5a6", font=("Microsoft YaHei", 8)
                  ).pack(side=tk.LEFT, padx=(6, 0))
 
+        # 导出前登录预检(把要人操作的事集中到开跑前, 见 _preflight_login_check)
+        pre_row = tk.Frame(middle, bg=BG_PANEL)
+        pre_row.pack(fill=tk.X, pady=(2, 0))
+        self.preflight_var = tk.BooleanVar(
+            value=bool(self.settings.get("preflight_login_check",
+                                         DEFAULT_SETTINGS.get("preflight_login_check", True))))
+        self.preflight_var.trace_add(
+            "write",
+            lambda *_: save_settings(
+                {"preflight_login_check": bool(self.preflight_var.get())}))
+        tk.Checkbutton(pre_row, variable=self.preflight_var, text="导出前检查登录",
+                       bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
+                       activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(pre_row, text="(失效的一次列出, 集中登录后再开导)", bg=BG_PANEL,
+                 fg="#95a5a6", font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
+
         # 单步调试开关(脚本调试时开启,导出流程每步暂停弹"继续/中止")
         debug_row = tk.Frame(middle, bg=BG_PANEL)
         debug_row.pack(fill=tk.X, pady=(2, 0))
@@ -1041,6 +1057,7 @@ class LiushuiApp:
         start_date = self.date_start.get().strip()
         end_date = self.date_end.get().strip()
         step_debug = bool(self.step_debug_var.get())
+        preflight = bool(self.preflight_var.get())
         date_str = f"{start_date} ~ {end_date}"
         labels = [f"{plat.name} · {m}" for _, plat, m in tasks]
         lines = "\n".join(labels[:12])
@@ -1053,7 +1070,8 @@ class LiushuiApp:
         if not ok:
             return
         log(f"开始导出: {len(labels)} 个商户 [{date_str}]", callback=self._append_log)
-        self._run_async(lambda: self._do_export(tasks, start_date, end_date, step_debug))
+        self._run_async(lambda: self._do_export(tasks, start_date, end_date,
+                                                step_debug, preflight))
 
     def _action_check_status(self):
         if not self._validate_dates(show_warning=False):
@@ -1642,6 +1660,12 @@ class LiushuiApp:
                   ).pack(side=tk.LEFT, padx=6)
 
     def _do_login(self, tasks):
+        """逐家走一遍登录流程, 返回与 tasks 对齐的核实结论列表。
+
+        结论取值: "ok"=已核实登录成功 / "bad"=核实过仍未登录 / "unknown"=没能核实 /
+        "skip"=这一轮没走到核实(用户没关窗口、被中止、登录页没打开)。
+        导出前的登录预检靠这个返回值决定"哪些家这次不导", 见 _preflight_login_check。
+        """
         # tasks 由主线程 _collect_tasks 备好, 这里只消费(工作线程不读界面)
         self._set_status("正在登录...")
         self._set_progress(maximum=len(tasks), value=0)
@@ -1682,12 +1706,122 @@ class LiushuiApp:
                 f"未完成 {results.count('skip')}"
                 "(登录态按 browser_data/平台/商户/ 目录保存)")
         self._set_status("登录完成")
+        return results
 
-    def _do_export(self, tasks, start_date, end_date, step_debug=False):
-        """tasks/日期/单步开关均由主线程取好再传进来, 本函数跑在工作线程上。"""
+    def _do_export(self, tasks, start_date, end_date, step_debug=False,
+                   preflight=True):
+        """tasks/日期/单步开关均由主线程取好再传进来, 本函数跑在工作线程上。
+
+        preflight=False 留给无人值守的调用方(定时任务): 预检要人决定"去登录还是跳过",
+        没人应答时弹窗会把整批吊在那里。
+        """
+        if preflight:
+            tasks = self._preflight_login_check(tasks)
+            if not tasks:
+                self._set_status("未导出(登录预检后没有可导出的商户)")
+                return
         self._execute_export_tasks(tasks, start_date, end_date, label="导出",
                                    step_debug=step_debug)
         self._record_job_done("导出", start_date, end_date)
+
+    def _probe_login(self, plat, merchant, force_headless=False):
+        """用这家商户自己的 profile 真跑一次 check_login, 返回 (结论, 出错信息)。
+
+        结论: True=已登录 / False=未登录 / None=没能核实(浏览器起不来、页面没渲染完、
+        平台脚本自己抛异常)。出错信息供调用方写日志。
+        本函数不向外抛: 一个附加检查把用户本该到手的账单挡掉, 是最坏的结果。
+        """
+        try:
+            self._ensure_browser(plat, merchant, force_headless=force_headless)
+            return bool(plat.check_login(self.browser)), ""
+        except Exception as e:
+            return None, str(e)
+
+    def _preflight_login_check(self, tasks):
+        """导出前统一查一遍登录, 把要人操作的事集中在开跑前处理完。
+
+        以前登录失效是"跑到那一家才发现": _run_single_export 的 inline 预检把这家折成
+        manual 跳过, 于是人工介入点摊在整批中间(第 3 家要登录、第 7 家要扫码), 用户
+        走开一会儿回来, 批任务已经在等第 N 个框。这里改成: 先逐家查一遍 → 一次弹窗列出
+        所有失效的 → 集中重登 → 登不上的从本批剔除, 剩下的才进导出循环
+        (需扫码的平台仍按 manual_intervention 排在队尾)。
+
+        返回本次应当继续导出的任务列表。
+        """
+        if not tasks:
+            return tasks
+        self._set_status("导出前检查登录状态...")
+        expired = []            # [(下标, 平台, 商户)]
+        for i, (_key, plat, merchant) in enumerate(tasks):
+            if self._aborted():
+                self._append_log("[中止] 登录预检中止, 本次不导出")
+                return []
+            # 后台核实: 预检连着探 N 家, 跟着"显示浏览器"设置会一个接一个闪窗口
+            verdict, err = self._probe_login(plat, merchant, force_headless=True)
+            if verdict is False:
+                expired.append((i, plat, merchant))
+                self._append_log(f"[预检] {plat.name}({merchant}) 登录已失效")
+            elif verdict is None:
+                # 判不出不等于没登录: 照常导出, 真失效由 inline 预检再兜一次
+                self._append_log(f"[预检] {plat.name}({merchant}) 没能核实登录状态, "
+                                 f"照常导出: {err[:80]}")
+        if not expired:
+            self._append_log(f"[预检] {len(tasks)} 家商户登录状态检查通过")
+            return tasks
+        self._append_log(f"[预检] 共 {len(expired)} 家登录已失效, "
+                         f"其余 {len(tasks) - len(expired)} 家有效")
+        if not self._ask_preflight_login(expired, len(tasks) - len(expired)):
+            self._append_log(f"[预检] 按您的选择本次跳过这 {len(expired)} 家"
+                             "(稍后可单独对它们做「首次登录」)")
+            return self._drop_by_index(tasks, {i for i, _, _ in expired})
+        # 集中重登: _do_login 自己会逐家开登录页、等关窗、核实, 失败最多问 3 轮
+        verdicts = self._do_login([tasks[i] for i, _, _ in expired]) or []
+        dropped = {i for (i, _p, _m), v in zip(expired, verdicts) if v == "bad"}
+        if dropped:
+            self._append_log(f"[预检] 重登后仍未登录 {len(dropped)} 家, 本次不导出这些"
+                             "(可稍后单独做「首次登录」)")
+        kept = self._drop_by_index(tasks, dropped)
+        if kept:
+            self._append_log(f"[预检] 登录处理完毕, 开始导出 {len(kept)} 家")
+        return kept
+
+    @staticmethod
+    def _drop_by_index(tasks, indexes):
+        """按下标集合剔除任务(同一平台多个商户时按对象比会误伤, 所以记下标)。"""
+        if not indexes:
+            return list(tasks)
+        return [t for i, t in enumerate(tasks) if i not in indexes]
+
+    def _ask_preflight_login(self, expired, ok_count):
+        """一次弹窗问完所有失效的商户: 现在集中重登 / 本次先跳过它们。
+
+        只弹一个框, 每家一个框正是这次要去掉的动作。沿用 `_ask_login_retry` 的
+        "主线程弹、后台线程等"写法; 一小时无人应答按"跳过"处理, 不把整批吊死。
+        """
+        answer = {"v": False}
+        done = threading.Event()
+        lines = [f"· {plat.name}({m})" for _, plat, m in expired[:12]]
+        if len(expired) > 12:
+            lines.append(f"…… 等共 {len(expired)} 家")
+        text = ("\n".join(lines)
+                + f"\n\n「重试」= 现在集中重新登录这 {len(expired)} 家"
+                  "(逐个打开登录页, 登录好把浏览器窗口关掉即可)\n"
+                  f"「取消」= 本次先跳过它们, 只导出已登录的 {ok_count} 家")
+
+        def _ask():
+            try:
+                answer["v"] = messagebox.askretrycancel(
+                    f"有 {len(expired)} 家登录已失效", text)
+            except Exception:
+                answer["v"] = False
+            finally:
+                done.set()
+
+        self._ui(_ask)
+        if not done.wait(timeout=3600):
+            self._append_log("[预检] 确认框一小时无人应答, 按「跳过这些、只导其余」处理")
+            return False
+        return bool(answer["v"])
 
     def _execute_export_tasks(self, tasks, start_date, end_date, label="导出",
                               step_debug=False):
@@ -1906,17 +2040,20 @@ class LiushuiApp:
                 break
             self._append_log(f"检查 {plat.name}({merchant})...")
             try:
-                # 每个商户独立 profile 检查
-                self._ensure_browser(plat, merchant)
-                logged_in = plat.check_login(self.browser)
-                if not logged_in:
+                # 每个商户独立 profile 检查(与导出前预检同一条探测路径)
+                verdict, err = self._probe_login(plat, merchant)
+                if verdict is False:
                     self._append_log(f"  {plat.name}({merchant}): 未登录")
+                    self.set_platform_status(key, "error")
+                elif verdict is None:
+                    self._append_log(f"  {plat.name}({merchant}): 检查失败 - {err}")
                     self.set_platform_status(key, "error")
                 else:
                     info = self.browser.get_page_info()
                     self._append_log(f"  {plat.name}({merchant}): 已登录 ({info.get('title', '')[:20]})")
                     self.set_platform_status(key, "ok")
             except Exception as e:
+                # 读页面信息出错也只算这一家没查成, 不能让整批检查停在半截
                 self._append_log(f"  {plat.name}({merchant}): 检查失败 - {e}")
                 self.set_platform_status(key, "error")
             self._set_progress(value=i + 1)

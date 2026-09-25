@@ -5,7 +5,6 @@
 """
 import os
 import re
-import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 import py_compile
@@ -82,60 +81,36 @@ class DebugProbe:
         })
 
     def _call(self, action, fn, args, kwargs):
-        t0 = time.time()
+        """转发给真实 BrowserManager, 记一步, 然后把异常原样抛出去。
+
+        吞掉异常会让同一段脚本在"脚本调试"里得到 manual、在生产里得到 failed,
+        调试结果反而骗人 —— 调试器必须和生产走同一条错误路径。
+        """
         try:
             result = fn(*args, **kwargs)
         except Exception as e:
             self._record(action, (args, kwargs), ok=False, error=str(e))
-            return None
+            raise
         self._record(action, (args, kwargs), ok=True)
         return result
 
-    # ---- 透传拦截: 平台脚本常用方法 ----
-    def navigate(self, url, retries=3):
-        return self._call("navigate", self.inner.navigate, (url,), {"retries": retries})
+    # ---- 通用透传 ----
+    # 以前这里逐个手写 navigate/click_text/... 十几个方法, 结果漏掉了
+    # wait_for、snapshot、wait_user、_log 等真实存在的方法: 平台脚本或
+    # PlatformBase.check_login 调用它们时, 只在"脚本调试"里 AttributeError,
+    # 生产环境跑得好好的 —— 让人误判脚本写坏了。逐个列还会随 BrowserManager
+    # 的签名变化漂移(如 navigate 的 skip_if_same 参数就被丢了)。
+    def __getattr__(self, name):
+        inner = self.__dict__.get("inner")
+        if inner is None:
+            raise AttributeError(name)
+        attr = getattr(inner, name)           # 真对象没有的名字, 这里同样 AttributeError
+        if not callable(attr):
+            return attr
 
-    def safe_click(self, selector, description="", retries=3):
-        return self._call("safe_click", self.inner.safe_click,
-                          (selector,), {"description": description, "retries": retries})
-
-    def click_text(self, text, exact=False, retries=3):
-        return self._call("click_text", self.inner.click_text,
-                          (text,), {"exact": exact, "retries": retries})
-
-    def click_selector(self, selector, retries=3):
-        return self._call("click_selector", self.inner.click_selector, (selector,), {"retries": retries})
-
-    def fill_placeholder(self, placeholder, value, retries=2):
-        return self._call("fill_placeholder", self.inner.fill_placeholder,
-                          (placeholder,), {"value": value, "retries": retries})
-
-    def fill_selector(self, selector, value, retries=2):
-        return self._call("fill_selector", self.inner.fill_selector,
-                          (selector,), {"value": value, "retries": retries})
-
-    def sleep(self, seconds):
-        return self._call("sleep", self.inner.sleep, (seconds,), {})
-
-    def is_visible_text(self, text, timeout=3):
-        return self._call("is_visible_text", self.inner.is_visible_text,
-                          (text,), {"timeout": timeout})
-
-    def close_popup(self, retries=2):
-        return self._call("close_popup", self.inner.close_popup, (), {"retries": retries})
-
-    def begin_wait_download(self):
-        return self._call("begin_wait_download", self.inner.begin_wait_download, (), {})
-
-    def wait_download(self, timeout=120):
-        return self._call("wait_download", self.inner.wait_download, (), {"timeout": timeout})
-
-    def screenshot(self, name="screenshot"):
-        return self._call("screenshot", self.inner.screenshot, (name,), {})
-
-    def get_page_info(self):
-        return self._call("get_page_info", self.inner.get_page_info, (), {})
-
+        def _proxy(*args, **kwargs):
+            return self._call(name, attr, args, kwargs)
+        return _proxy
 
 class PlatformWizard(tk.Toplevel):
     """新增平台表单向导: 填元信息生成骨架, 完成后回调刷新。"""

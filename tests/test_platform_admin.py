@@ -84,7 +84,7 @@ def test_debug_probe_records_steps():
     assert probe.steps[3]["action"] == "wait_download"
 
 
-def test_debug_probe_records_exception():
+def test_debug_probe_records_exception_and_propagates(monkeypatch):
     class BoomInner(FakeInner):
         def click_text(self, text, exact=False, retries=3):
             self.calls.append(("click_text", text))
@@ -92,8 +92,57 @@ def test_debug_probe_records_exception():
 
     inner = BoomInner()
     probe = DebugProbe(inner, steps=[])
-    probe.click_text("导出")
+    with pytest.raises(RuntimeError):        # 必须像生产一样抛出, 否则调试结果是假的
+        probe.click_text("导出")
     last = probe.steps[-1]
     assert last["action"] == "click_text"
     assert last["ok"] is False
     assert "boom" in last["error"]
+
+
+# 平台脚本与 PlatformBase 实际会调到的 browser 方法(逐个列在探针里早就漏过)
+PROBED_METHODS = ["wait_for", "snapshot", "snapshot_on_failure", "step_pause",
+                  "wait_user", "_log", "wait_download", "close_popup",
+                  "fill_placeholder", "get_page_info"]
+
+
+@pytest.mark.parametrize("name", PROBED_METHODS)
+def test_probe_proxies_every_method_the_scripts_actually_call(name):
+    calls = []
+
+    class Inner:
+        page = object()
+
+        def __getattr__(self, item):
+            def _any(*a, **k):
+                calls.append((item, a, k))
+                return "ok"
+            return _any
+
+    probe = DebugProbe(Inner(), steps=[])
+    getattr(probe, name)()
+    assert calls and calls[0][0] == name
+    assert probe.steps[-1]["action"] == name and probe.steps[-1]["ok"] is True
+
+
+def test_probe_forwards_arguments_verbatim():
+    """以前 navigate 只转发 (url, retries), 脚本传 skip_if_same 会 TypeError。"""
+    seen = {}
+
+    class Inner:
+        page = None
+
+        def navigate(self, url, retries=3, skip_if_same=True):
+            seen.update(url=url, retries=retries, skip_if_same=skip_if_same)
+            return True
+
+    DebugProbe(Inner(), steps=[]).navigate("u", skip_if_same=False)
+    assert seen == {"url": "u", "retries": 3, "skip_if_same": False}
+
+
+def test_probe_still_raises_attribute_error_for_unknown_names():
+    class Inner:
+        page = None
+
+    with pytest.raises(AttributeError):
+        DebugProbe(Inner(), steps=[]).no_such_method()

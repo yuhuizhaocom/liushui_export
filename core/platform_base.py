@@ -83,11 +83,44 @@ class PlatformBase:
             url = info.get("url", "").lower()
             return not self._is_login_url(url)
         browser.navigate(self.export_url)
-        browser.wait_for(timeout=3)  # 等未登录重定向落地(服务端302/前端路由跳转)
-        url = (browser.get_page_info().get("url", "") or "").lower()
-        if self._is_login_url(url):
-            return False
-        return True
+        return not self._is_login_url(self._wait_redirect_landed(browser))
+
+    # 等未登录重定向落地的采样参数。只按"采样次数"计、把 browser.sleep 当节拍器:
+    # 真机上是 0.2s × N 次, 测试里的假 browser 把 sleep 换成空函数就能立刻跑完。
+    LOGIN_POLL_STEP = 0.2      # 每次采样之间等多久
+    LOGIN_POLL_MAX = 15        # 采样上限, 约 3 秒 —— 与旧写法 wait_for(timeout=3) 同量级
+    LOGIN_POLL_STABLE = 8      # 地址连续 8 次(约 1.6s)没再变, 就认为已经落地
+
+    def _wait_redirect_landed(self, browser):
+        """等重定向稳定下来, 返回落地后的 URL(小写)。
+
+        以前这里写的是 `browser.wait_for(timeout=3)`: 不传条件时它必然走满 3 秒,
+        收尾还要打一条"等待超时"的 WARN。批量导出每家至少查两遍(开跑前预检 +
+        进那一家时的 inline 预检), 10 家商户就是 60 秒白等 + 20 行看着像出事的日志。
+
+        现在边等边看地址: 一落到登录路径立即返回(失效的那几家约 0.2 秒出结论),
+        地址连续 LOGIN_POLL_STABLE 次不再变化也算落地, 上限仍是 LOGIN_POLL_MAX 次采样。
+
+        行为差异只有一处、且是往宽的方向: 重定向若在地址已经静止 1.6 秒之后才发生,
+        旧写法能等到、这里等不到 → 会判成"已登录"照常往下导。判成"没登录"才是会
+        把账单挡掉的那个方向, 所以宁可放过: 真失效的页面导不出文件, 由下载校验和
+        manual 兜底。要更保守就把 LOGIN_POLL_STABLE 调大(上限 15 就是原来的 3 秒)。
+        """
+        last = None
+        stable = 0
+        for _ in range(self.LOGIN_POLL_MAX):
+            url = (browser.get_page_info().get("url", "") or "").lower()
+            if url and self._is_login_url(url):
+                return url                      # 已经落到登录路径, 不必再等
+            if url and url == last:
+                stable += 1
+                if stable >= self.LOGIN_POLL_STABLE:
+                    return url                  # 地址静止够久, 认为重定向已落地
+            else:
+                stable = 0
+            last = url
+            browser.sleep(self.LOGIN_POLL_STEP)
+        return last or ""
 
     @staticmethod
     def _is_login_url(url):

@@ -120,20 +120,38 @@ def test_ignored_names_are_reported_not_swallowed(tree):
 
 
 def test_clean_platform_does_not_hide_a_merchant_named_like_internals(tree):
-    """没被当过 profile 根的平台目录里, 名字名单不生效:
-    手工建的、还没登录的空商户目录即使撞名也照常列出来。"""
+    """没被当过 profile 根的平台目录里, 内部目录判据整个不生效:
+    用户手工放的目录(哪怕撞名、哪怕里面缺 Default/)都照旧算商户。"""
     plat = _mkdir(tree, "tmall")
-    _mkdir(plat, "Default")                 # 空的、名字正好是内部目录名
-    assert mg.discover_merchants(["tmall"]) == {"tmall": ["Default"]}
+    _mkdir(plat, "Default")                       # 空的、名字正好是内部目录名
+    half = _mkdir(plat, "Crashpad")               # 非空但没有 Default/ —— 像内部目录
+    _touch(os.path.join(half, "从别的电脑拷来的一半登录态"))
+    assert mg.discover_merchants(["tmall"]) == {"tmall": ["Crashpad", "Default"]}
+
+
+def test_polluted_platform_is_the_only_place_the_name_list_applies(tree):
+    """同一种目录在脏平台里会被剔(这才是名单的真正用途), 并且要说出口。"""
+    plat = _build_polluted_platform(tree)
+    _touch(os.path.join(plat, "Crashpad", "从别的电脑拷来的一半登录态"))
+    ignored = []
+    got = mg.discover_merchants(["youzan"], ignored=ignored)
+    assert "Crashpad" not in got.get("youzan", [])
+    assert "youzan/Crashpad" in ignored
 
 
 def test_a_merchant_that_really_is_called_default_stays(tree):
-    """已登录过的商户目录里有 `Default/` 这一层 —— 判据按内容而不是名字, 所以留着。"""
+    """在已经脏了的平台目录里, 判据仍按内容优先: 商户叫 "Default" 而它里面有自己的一层
+    `Default/`(登录过的 profile 根长这样), 就不该被当成浏览器的内部目录。"""
     plat = _mkdir(tree, "alipay")
+    _touch(os.path.join(plat, "Local State"))         # 这一层被当过 profile 根
+    junk = _mkdir(plat, "Crashpad")
+    _touch(os.path.join(junk, "marker"))
     shop = _mkdir(plat, "Default")
     _mkdir(shop, "Default")
     _touch(os.path.join(shop, "marker"))
-    assert mg.discover_merchants(["alipay"]) == {"alipay": ["Default"]}
+    ignored = []
+    assert mg.discover_merchants(["alipay"], ignored=ignored) == {"alipay": ["Default"]}
+    assert ignored == ["alipay/Crashpad"]
 
 
 def test_add_merchant_refuses_the_reserved_names(tree):

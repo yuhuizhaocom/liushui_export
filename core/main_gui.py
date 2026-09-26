@@ -68,13 +68,17 @@ def _is_profile_root(path):
 def _looks_like_chromium_internals(path, parent_is_profile_root=False):
     """这个目录是 Chromium 自己的内部目录吗(而不是某家商户的 profile)。
 
-    主判据看内容不看名字: 一家商户的 profile 根下面一定有 `Default/` 或我们写的
-    `login_state.json`, 而 `Crashpad`、`GrShaderCache` 这些内部目录里没有 —— 所以哪怕
-    真有商户起名叫 "Default", 也不会被误认。名字名单只补一个洞: `Safe Browsing` 这类
-    内部目录常是**空的**, 而"空"也正好是刚点「+」建好、还没登录的商户目录的样子。于是
-    名单只在**这一层本身被当成过 profile 根**时才生效(干净的平台目录里没有这种标志文件,
-    用户手工建的商户就绝不会被名单藏掉)。
+    **只在父目录被判定"当过 profile 根"时才认** —— 商户目录允许用户手工建、手工拷
+    (使用说明里就教过搬登录态), 平白无故不该怀疑他的目录; 而只有旧版本把空商户的 profile
+    落在 `browser_data/<平台key>/` 上, 才会在那一层混进浏览器的内部目录。
+
+    认的时候先内容后名字: 商户的 profile 根下面一定有 `Default/` 或我们写的
+    `login_state.json`, 内部目录没有 —— 所以哪怕真有商户起名叫 "Default" 也不会被误认;
+    名字名单只补一个洞, `Safe Browsing` 这类内部目录常是**空的**, 而"空"又正好是刚点
+    「+」建好还没登录的商户目录的样子, 在已经脏了的平台目录里只能按名单认。
     """
+    if not parent_is_profile_root:
+        return False
     try:
         from core.browser import BrowserManager       # 与 main_gui 一样保持惰性导入
         if os.path.isfile(os.path.join(path, BrowserManager.LOGIN_STATE_FILE)):
@@ -82,8 +86,7 @@ def _looks_like_chromium_internals(path, parent_is_profile_root=False):
         if os.path.isdir(os.path.join(path, "Default")):
             return False
         low = os.path.basename(path).casefold()
-        if parent_is_profile_root and (low in CHROMIUM_INTERNAL_DIRS
-                                       or low.startswith(CHROMIUM_INTERNAL_PREFIXES)):
+        if low in CHROMIUM_INTERNAL_DIRS or low.startswith(CHROMIUM_INTERNAL_PREFIXES):
             return True
         return bool(os.listdir(path))
     except OSError:
@@ -96,14 +99,16 @@ def discover_merchants(platform_keys, ignored=None):
 
     两类不算商户:
       - 程序保留名(`_平台调试`/`_未指定平台`, 见 `BrowserManager.set_browser_profile`);
-      - Chromium 的内部目录 —— 以前商户为空时 profile 直接落在 `browser_data/<key>/`,
-        于是这一层同时是"商户的父目录"和某个 profile 的根, 内部目录被当成商户列进左栏
-        还被自动勾上(实测本机 youzan 下 10 个"商户"里只有 1 个是真的,
-        `selection_state.json` 里那 9 项全是 true)。
+      - Chromium 的内部目录 —— 但**只在这个平台目录本身被当成过 profile 根时才认**
+        (顶层有 `Local State`/`Last Version`)。来历: 以前商户为空时 profile 直接落在
+        `browser_data/<key>/`, 于是这一层同时是"商户的父目录"和某个 profile 的根,
+        内部目录被当成商户列进左栏还被自动勾上(实测本机 youzan 下 10 个"商户"里只有
+        1 个是真的, `selection_state.json` 里那 9 项全是 true)。没被污染过的平台目录
+        一律按"子目录=商户"处理, 手工拷进来的半截登录态目录也不会被吞。
 
-    ⚠ 不按"下划线开头"整批过滤: 商户目录允许用户手工建(使用说明里就教过), 按前缀筛会把
-    人家的目录也藏掉。`ignored` 传一个 list 时被剔掉的名字按 "平台key/目录名" 塞进去 —
-    — 剔除可以, 静默剔除不行(目录突然不见了得能查为什么)。
+    ⚠ 不按"下划线开头"整批过滤: 商户目录也允许用户手工建, 按前缀筛会把人家的目录藏掉。
+    `ignored` 传一个 list 时被剔掉的名字按 "平台key/目录名" 塞进去 —— 剔除可以, 静默
+    剔除不行(目录突然不见了得能查为什么)。
     """
     from core.browser import BrowserManager
     reserved = {BrowserManager.RESERVED_MERCHANT_DIR, BrowserManager.RESERVED_PLATFORM_DIR}

@@ -211,18 +211,53 @@ def delete_merchant_profile(base_dir, plat_key, merchant):
     return False, f"删除失败(浏览器可能还占着这个目录): {last_err}"
 
 
-def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None):
+_RETRY_SLICE_S = 1.0      # 重试前的等待分多长一片看一眼「中止」
+
+
+def _sleep_or_aborted(seconds, aborted, slice_s=_RETRY_SLICE_S):
+    """分段睡 `seconds`, 每片醒来问一次 `aborted()`; 被打断返回 False(=不该再继续)。
+
+    没传 aborted 时就是一句 `time.sleep`, 与从前逐字一致。第 12 章第 14 条说"中止只在
+    边界生效、不许中途掐浏览器"—— 这里等的正是两次尝试之间的边界, 掐掉等待不违反它。
+    """
+    if aborted is None:
+        time.sleep(max(0, seconds))
+        return True
+    remaining = max(0, seconds)
+    while remaining > 0:
+        nap = min(slice_s, remaining)
+        time.sleep(nap)
+        remaining -= nap
+        if aborted():
+            return False
+    return True
+
+
+def run_with_retry(fn, retry_times=0, retry_interval_s=30, log=None, aborted=None):
     """通用重试: fn 返回非 "failed" 视为成功; 失败按 retry_times 重试, 间隔递增(×2)。
-    retry_times=0 表示失败一次即返回, 不重试。"""
+    retry_times=0 表示失败一次即返回, 不重试。
+
+    `aborted` 是无参可调用(界面传 `self._aborted`)。**以前这里完全不看中止**:
+    实测按下「中止」后这一家仍会把默认的 2 次重试跑满, 中间还要睡 30 + 60 = 90 秒,
+    界面上"正在中止…"就那么挂着几分钟, 剩下的商户要等这一整轮走完才 break。
+    两处都看: 决定重试之前看一次, 等待本身分段睡、每片再看一次。
+    """
     interval = max(0, int(retry_interval_s))
     result = fn()
     attempt = 0
     while result == "failed" and attempt < retry_times:
+        if aborted is not None and aborted():
+            if log:
+                log("  [中止] 已请求中止, 这一家不再重试")
+            return result
         attempt += 1
         wait = interval * (2 ** (attempt - 1))
         if log:
             log(f"  [重试] 第 {attempt}/{retry_times} 次重试({wait}s 后)")
-        time.sleep(wait)
+        if not _sleep_or_aborted(wait, aborted):
+            if log:
+                log("  [中止] 等待重试期间收到中止请求, 这一家不再重试")
+            return result
         result = fn()
     return result
 
@@ -2103,6 +2138,7 @@ class LiushuiApp:
                     retry_times=retry_times,
                     retry_interval_s=retry_interval_s,
                     log=self._append_log,
+                    aborted=self._aborted,      # 按了「中止」就别再重试、别再睡那 30/60 秒
                 )
             except Exception as e:
                 result = "failed"
@@ -2279,7 +2315,8 @@ class LiushuiApp:
                                                         step_debug, sub_merchant=s),
                 retry_times=retry_times,
                 retry_interval_s=retry_interval_s,
-                log=self._append_log)
+                log=self._append_log,
+                aborted=self._aborted)        # 子商户这一档同理: 中止就不再重试
             verdicts.append(verdict)
         if verdicts and all(v == "success" for v in verdicts):
             return "success"

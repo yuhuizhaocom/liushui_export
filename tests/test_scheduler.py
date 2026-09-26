@@ -179,6 +179,84 @@ def test_unmatched_job_merchants_lists_what_would_never_run():
     assert unmatched_job_merchants(["youzan"], ["支付宝商户"], known) == ["支付宝商户"]
 
 
+# ===== cron 缺失/非法: 不兜成每分钟, 但要说清为什么不跑 =====
+
+class _NoTriggerApp:
+    def __init__(self):
+        self.calls = []
+
+    def trigger_job(self, job):
+        self.calls.append(job.name)
+
+
+def _write_jobs(path, raw_jobs):
+    with open(str(path), "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "jobs": raw_jobs}, f)
+
+
+def test_missing_cron_is_not_becoming_every_minute(tmp_path):
+    """手改 scheduled_tasks.json 漏写 cron, 以前会兜成 '* * * * *' = 每分钟起一次浏览器。"""
+    path = str(tmp_path / "t.json")
+    _write_jobs(path, [{"id": "j9", "name": "缺 cron", "platforms": ["youzan"],
+                        "merchants": ["m1"], "enabled": True}])
+    job = TaskStore(path).load()[0]
+    assert job.cron == ""
+    s = CronScheduler(app=_NoTriggerApp(), store=TaskStore(path))
+    every_minute = _dt("2026-09-04 18:00")
+    assert s.should_trigger(job, every_minute) is False
+    s.check_all(every_minute)
+    assert s.app.calls == []
+
+
+def test_explicit_every_minute_cron_still_fires(tmp_path):
+    """用户显式写了每分钟, 那是他的选择, 不该被这次改动一起停掉。"""
+    path = str(tmp_path / "t.json")
+    _write_jobs(path, [{"id": "j8", "name": "每分钟", "cron": "* * * * *",
+                        "platforms": ["youzan"], "merchants": ["m1"], "enabled": True}])
+    s = CronScheduler(app=_NoTriggerApp(), store=TaskStore(path))
+    s.check_all(_dt("2026-09-04 18:00"))
+    assert s.app.calls == ["每分钟"]
+
+
+def test_scheduler_says_why_a_job_never_runs(tmp_path, monkeypatch):
+    """静默不跑和静默乱跑一样糟: 要说一句, 但 30 秒一次的轮询不能刷屏。"""
+    import core.logger as lg
+    import core.scheduler as sc
+    lines = []
+    monkeypatch.setattr(lg, "log", lambda msg, level="info": lines.append((level, msg)))
+    path = str(tmp_path / "t.json")
+    _write_jobs(path, [{"id": "j7", "name": "写错的", "cron": "70 * * * *",
+                        "platforms": ["youzan"], "merchants": ["m1"], "enabled": True}])
+    s = CronScheduler(app=_NoTriggerApp(), store=TaskStore(path))
+    now = _dt("2026-09-04 18:00")
+    s.check_all(now)
+    s.check_all(now)
+    s.check_all(now)
+    hits = [m for _l, m in lines if "不会被执行" in m]
+    assert len(hits) == 1, "同一个坏任务只说一次"
+    assert "写错的" in hits[0] and "cron" in hits[0]
+
+
+def test_cron_problem_covers_blank_and_invalid():
+    def _j(cron):
+        return CronJob(job_id="a", name="n", cron=cron, platforms=[], merchants=[])
+    assert _j("0 9 * * *").cron_problem() is None
+    assert "没有填" in _j("").cron_problem()
+    assert "无效" in _j("70 * * * *").cron_problem()
+
+
+def test_disabled_job_with_bad_cron_is_not_nagged(tmp_path, monkeypatch):
+    """停用的任务本来就不该跑, 不必为它的 cron 反复提醒。"""
+    import core.logger as lg
+    monkeypatch.setattr(lg, "log", lambda msg, level="info": None)
+    path = str(tmp_path / "t.json")
+    _write_jobs(path, [{"id": "j6", "name": "停用的", "platforms": ["youzan"],
+                        "merchants": ["m1"], "enabled": False}])
+    s = CronScheduler(app=_NoTriggerApp(), store=TaskStore(path))
+    s.check_all(_dt("2026-09-04 18:00"))
+    assert s._warned_jobs == set()
+
+
 def test_editing_cron_rebaselines_so_it_does_not_fire_now():
     """改 cron 前是每分钟跑, last_run 停在昨天; 不挪起算点的话保存后立刻触发一次。"""
     s = CronScheduler(app=object())

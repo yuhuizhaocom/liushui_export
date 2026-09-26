@@ -142,13 +142,30 @@ class CronJob:
 
     @classmethod
     def from_dict(cls, d):
+        """由 scheduled_tasks.json 的一条记录建任务。
+
+        cron 缺失/为空时**不再**兜成 "* * * * *": 那是"每分钟跑一次", 而每一次都要
+        起一个浏览器去点导出 —— 手改 json 少写一个键就把人坑成这样。现在把空值原样
+        留着, 由 should_trigger 判成"这个任务不跑", 调度器再补一条日志说清是哪个任务、
+        为什么没跑(静默不跑和静默乱跑一样糟)。显式写 "* * * * *" 的照旧生效。
+        """
         return cls(job_id=d.get("id") or uuid.uuid4().hex[:8],
                    name=d.get("name") or "",
-                   cron=d.get("cron") or "* * * * *",
+                   cron=(d.get("cron") or "").strip(),
                    platforms=d.get("platforms") or [],
                    merchants=d.get("merchants") or [],
                    enabled=d.get("enabled", True),
                    last_run=d.get("last_run"))
+
+    def cron_problem(self):
+        """cron 配置上的毛病(给用户看的一句话); 没问题返回 None。"""
+        if not self.cron:
+            return "没有填 cron"
+        try:
+            CronExpr(self.cron)
+        except ValueError as e:
+            return f"cron 表达式无效: {e}"
+        return None
 
     @classmethod
     def new(cls, name, cron, platforms, merchants, now=None):
@@ -208,6 +225,7 @@ class CronScheduler:
         self.poll_interval = max(10, int(poll_interval))
         self._stop = threading.Event()
         self._thread = None
+        self._warned_jobs = set()      # cron 有毛病的任务: 每个只说一次, 别刷屏
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -232,8 +250,27 @@ class CronScheduler:
         """轮询一轮: 触发所有到期任务。now 可注入便于测试。"""
         self.store.load()
         for job in self.store.jobs:
+            if job.enabled:
+                problem = job.cron_problem()
+                if problem:
+                    # 曾经这里会被 from_dict 兜成每分钟, 静默地把浏览器一遍遍拉起来
+                    self._warn_once(job, problem)
+                    continue
             if self.should_trigger(job, now):
                 self.trigger(job, now)
+
+    def _warn_once(self, job, problem):
+        """把"这个任务为什么不会跑"写进日志一次; 提示本身绝不许弄死调度线程。"""
+        tag = job.job_id or job.name or problem
+        if tag in self._warned_jobs:
+            return
+        self._warned_jobs.add(tag)
+        try:
+            from core.logger import log
+            log(f"定时任务「{job.name or tag}」不会被执行: {problem}"
+                "(请在「定时任务」里填对 cron 表达式, 或把它停用)", "warning")
+        except Exception:
+            pass
 
     def should_trigger(self, job, now):
         if not job.enabled:
@@ -303,7 +340,8 @@ class SchedulerDialog(tk.Toplevel):
             pairs = pair_job_targets(job.platforms, job.merchants, known)
             objs = f"{len(pairs)} 项" if pairs else "0 项(商户与平台不匹配)"
             self.tree.insert("", "end", iid=job.job_id,
-                             values=(job.name, job.cron, objs, "✓" if job.enabled else "✗"))
+                             values=(job.name, job.cron or "(未填 cron)", objs,
+                                     "✓" if job.enabled else "✗"))
 
     def _save(self):
         self.scheduler.store.save()

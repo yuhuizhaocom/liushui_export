@@ -219,7 +219,7 @@ liushui_export/
 | `_action_open_folder()` | `makedirs(exist_ok=True)` + `os.startfile` 打开 `downloads/`（Windows 专有，无 try）。 |
 | `_action_open_merchant(key, merchant)` → `_open_merchant_browser` | 商户行「打开」= 手工测试兼录制：`force_visible=True` 起浏览器 → **`enable_action_trace()`** 开始把点击/输入录成 `recordings/<平台>_<商户>_<时间>.jsonl` → 导航 `export_url` → 每 2 秒轮询页面标题。三条退出路径：点「中止」、超过 `MERCHANT_PROBE_TIMEOUT_S`(30 分钟)、页面被关掉。窗口开着期间 `running` 一直为真（导出被挡、定时任务被推迟），所以必须能中止且不能无限挂着。 |
 | `_request_abort()` | 「中止本次任务」按钮：置 `_abort` 事件并记日志。只在**商户边界**生效（`_preflight_login_check`/`_execute_export_tasks`/`_do_login`/`_do_check`/`_open_merchant_browser` 每轮开头查 `_aborted()`），不会中途掐浏览器留下半截下载；`running` 为假时静默忽略；按钮由 `_run_async` 启用、`_thread_wrapper` 结束时置灰。 |
-| `_action_help()` | 弹简化的使用说明。**其文案仍写"登录并点『确定』"**，与 `_show_login_hint` 的新流程矛盾（见 13 章）。 |
+| `_action_help()` | 弹简化的使用说明。文案与现流程一致：登录以**关掉浏览器窗口**为完成标志（不是点『确定』），并提了导出前的登录预检与「中止」。`tests/test_action_help_text.py` 钉着这几句，改回旧说法即红。 |
 | `_add_merchant(key, raw_name)` | 建 profile 目录 + 加一行勾选，返回 `(是否成功, 文案)`。先查重再动手：按 Windows 目录规矩比（忽略首尾空格、不分大小写），重名直接拒绝——以前重名会 `makedirs(exist_ok=True)` 照样建、界面照样塞一行，而 `merchant_vars[平台][名字]` 是字典，新 Var 顶掉旧的，于是两行同名共用一个勾选框（勾上面那行等于没勾）。也拒绝 `..`/`.`/`___` 这类"清洗后没内容"的名字（`sanitize_name` 只换 `<>:"/\`，`..` 原样通过，拼进路径就指到 `browser_data` 本身）。 |
 | `_prompt_add_merchant` / `_prompt_delete_merchant` | 添加：模态小窗，失败时**留着窗口让用户改名字**、`messagebox(parent=dlg)`。删除：任务进行中先拒绝；确认框写明要删的绝对路径；只删 `browser_data/<key>/<商户>` 这一层（`delete_merchant_profile` 按 normpath 复核深度）；**先删目录成功才动界面**；已导出账单与 `downloads/待确认/` 不动。 |
 | `_refresh_merchants()` | 左栏「刷新商户」：重新扫 `browser_data` 并走 `_rebuild_platform_list`（勾选按 `selection` 还原，不会被洗掉），日志写明新增了谁、外部删了谁，没变化也报总数。以前手工放进目录或从别的电脑拷来的 profile 要重启才看得见。 |
@@ -387,11 +387,11 @@ liushui_export/
 | `_find_new_candidate(root)`                          | 只在**下载根目录**找最新候选，四道过滤：跳过中间态后缀 → 跳过图片（注释："兜底扫描不能把它们认领成本次下载"）→ 只认 `_dl_capture_t0` 之后出现的（"避免误取上次残留"）→ 刚改过 2 秒内的视为还在写不选。`os.listdir` 异常吞掉返回 None。 |
 | `_is_stable(path)`                                   | 间隔 1 秒两次取 size 相等才算写完（每次调用固定耗时 1 秒）。 |
 | `_dir_snapshot(root)`                                | `os.walk` **递归**收集全部文件路径集合，供 `wait_download` 的路 2 差集用；与 `_find_new_candidate` 的"只看根目录"口径不同。 |
-| `_validate_download(path)`                           | **成品校验**，按顺序：空文件/读不出 size → 否；文件头是图片魔数 → 否；名字是 `.xlsx` 但头两字节不是 `PK` → 否；**先数数据行**（`_count_rows`）能读出 >0 行 → 直接通过；读不出行才用文案区分空表与错误页（`_match_error_keyword`）；<1KB 且无数据行 → 否；`rows == 0` → 否；数不出行时还要过 **`_seems_statement_format`** 这道格式门（扩展名属于 `.xlsx/.xls/.csv/.txt/.zip/.rar/.7z`，或**没有扩展名但文件头是 `PK`**）→ 才维持原有的宽松判定放行（老 `.xls` 走这一条）。513 行注释记录顺序不能反的原因：**以前整文件子串匹配错误文案优先，账单备注里一句"客户申请操作失败""请登录后台查看明细"就把真账单判无效并被 `_accept_download` 删掉**，用户看到的是"下载成功但文件没了"。 |
+| `_validate_download(path)`                           | **成品校验**，按顺序：空文件/读不出 size → 否；文件头是图片魔数 → 否；名字是 `.xlsx` 但头两字节不是 `PK` → 否；**文件头是一份 HTML 网页（`_looks_like_web_page`）→ 否**；**先数数据行**（`_count_rows`）能读出 >0 行 → 直接通过；读不出行才用文案区分空表与错误页（`_match_error_keyword`，**大小写不敏感**）；<1KB 且无数据行 → 否；`rows == 0` → 否；数不出行时还要过 **`_seems_statement_format`** 这道格式门（扩展名属于 `.xlsx/.xls/.csv/.txt/.zip/.rar/.7z`，或**没有扩展名但文件头是 `PK`**）→ 才维持原有的宽松判定放行（老 `.xls` 走这一条）。513 行注释记录顺序不能反的原因：**以前整文件子串匹配错误文案优先，账单备注里一句"客户申请操作失败""请登录后台查看明细"就把真账单判无效并被 `_accept_download` 删掉**，用户看到的是"下载成功但文件没了"。HTML 那道门必须排在数行**之前**：会话过期时有些后台不把登录页返回成 302，而是 200 + `Content-Disposition: xxx.csv`，而 HTML 标签本身就占行 —— 按逗号数得出 4 行的登录页以前会被"先数行"直接放行，交出去一份网页却记成 success（`tests/test_download_integrity.py::test_multiline_html_named_csv_is_rejected` 钉着）。门只看文件头（跳 BOM 与空白），所以 `<?xml` 开头、Excel 2003 存成 `.xls` 的 XML 表格不被一起打死。 |
 | `_count_rows(path)` / `_xlsx_row_count(path)`         | CSV 数行去表头；`.xlsx` 用 `zipfile` 数 `<row>` 标签（**不引入 openpyxl**，近似值、可能含空行、假定首行是表头）；其它扩展名或解析失败返回 `None` 表示"读不出"，不参与判空。 |
 | `_seems_statement_format(path)` + `_STATEMENT_SUFFIXES` | 数不出行时的格式门：`.xlsx/.xls/.csv/.txt/.zip/.rar/.7z` 算像对账单（zip 那几档是微信支付"账单打包完成"的真实产物），没扩展名但文件头是 `PK` 也放行。**这扇门是命名改造带出来的**：以前不认识的扩展名会被强行改成 `.xlsx`，"名字 `.xlsx` 而内容不是 PK"那条顺带把 PDF/ELF 之类挡在外面；扩展名改成原样保留后，这个拦截必须显式补回来，否则一份 PDF 也能当成品交出去（`tests/test_download_integrity.py` 钉住）。 |
 | `_read_text_content(path)` / `_match_error_keyword(text)` | 多编码宽容解码（`latin-1` 永不失败，故总能返回内容；二进制/xlsx 得到近似文本不影响关键字检查）；关键字匹配**区分大小写**——页面写 `<HTML>`/`<!DOCTYPE` 不会命中，此时只能靠"读不出数据行 + 体积阈值"兜住。 |
-| `_file_head(path, n)` / `_is_image_file(path)`        | 读前 n 字节比对 `_IMAGE_MAGICS`；文件不存在得到 `b""` → False。 |
+| `_file_head(path, n)` / `_is_image_file(path)` / `_looks_like_web_page(path)` | 读前 n 字节比对 `_IMAGE_MAGICS`；文件不存在得到 `b""` → False。`_looks_like_web_page` 跳掉 BOM/空白/空字节后比对 `_WEB_PAGE_HEADS`（`<!doctype`/`<html`/`<head`/`<body`/`<script`/`<style`/`<iframe`/`<meta`），**刻意不含 `<?xml`**（Excel 2003 的 XML 表格存 `.xls` 真有人当账单发）。 |
 | `_cleanup_temp_dir()`                                | 先置 `_dl_temp_dir=""` 再动手；空目录 `rmdir`（8 次 ×0.8s 防瞬时文件锁），非空 `rmtree(ignore_errors=True)`，注释："留待下次任务 begin 时清理"。 |
 
 > **两条捕获通道的差别**（改这块前必须清楚）：路 1 事件队列——`_on_download` 只在捕获开启时入队（关了会 warning 丢弃，但 Chromium 仍把文件写进 downloads 根目录，于是变成下一轮 `_carry_over_orphans` 处理的 UUID 残留）；路 2 目录轮询——用 `_dir_snapshot` 递归差集 + `_is_stable`，不做 t0 时间过滤也不显式排除图片（靠校验第 0 道拦）。每轮固定 `sleep(1.5)`；多个下载同时到达时只认第一个通过校验的，其余留在根目录、随后被同一次 `end_wait_download` 归进 `待确认/`。
@@ -447,7 +447,7 @@ liushui_export/
 | `manual_intervention`                   | 类属性 | 是否需要人工操作（扫码/手机确认）。True 时该平台在批量循环里被**稳定排序到队尾**，先自动跑完其它平台。全仓只有「视频号」声明了它。 |
 | `intervention_hint`                     | 类属性 | 人工操作说明，供日志与提示（`_execute_export_tasks` 去重后播报"已排到最后执行"）。 |
 | `login(browser)`                        | 方法  | 默认实现：`navigate(login_url)` 等待用户手动登录；可覆盖做特殊处理。唯一调用点在 `_login_one_round`。 |
-| `check_login(browser)`                   | 方法  | **登录态判据**：直接访问受保护的 `export_url` → `wait_for(timeout=3)` 等未登录重定向落地 → 用 `_is_login_url` 看当前 URL 是否落到独立登录路径。注释 62-67 说明为什么不用旧判法（"访问 login_url + URL/标题含 login/登录 就判未登录"会把"已登录但登录页标题仍带登录字样"误判成未登录）。**扫码页与后台同域的平台必须覆盖它**改用文案/元素判断（现只有微信支付覆盖，用 `is_visible_text("交易中心")` + 扫码文案表）。边界：`export_url` 自身含 `/login`、`login.` 时退化为旧判法；`login_url` 为空时 `navigate("")` 只会重试失败返回 False（不抛错），随后取到的还是旧 URL → **可能假阳性判已登录**。 |
+| `check_login(browser)`                   | 方法  | **登录态判据**：直接访问受保护的 `export_url` → `_wait_redirect_landed` 等未登录重定向落地 → 用 `_is_login_url` 看当前 URL 是否落到独立登录路径。等待从 2026-09-26 起改为**按次采样**（`LOGIN_POLL_STEP/MAX/STABLE` = 0.2s/15 次/连续 8 次相同即落地）：旧写法 `wait_for(timeout=3)` 不传条件必然走满 3 秒并在收尾打一条"等待超时"WARN，而每家商户至少查两遍（预检 + inline），10 家就是 60 秒白等 + 20 行假警告。唯一的语义收窄处（重定向晚于静止窗口才发生 → 判成已登录）由 `tests/test_check_login_wait.py` 钉住，方向是**宁可多跑一次空导也不拿"没登录"挡掉账单**。注释 62-67 说明为什么不用旧判法（"访问 login_url + URL/标题含 login/登录 就判未登录"会把"已登录但登录页标题仍带登录字样"误判成未登录）。**扫码页与后台同域的平台必须覆盖它**改用文案/元素判断（现只有微信支付覆盖，用 `is_visible_text("交易中心")` + 扫码文案表）。边界：`export_url` 自身含 `/login`、`login.` 时退化为旧判法；`login_url` 为空时 `navigate("")` 只会重试失败返回 False（不抛错），随后取到的还是旧 URL → **可能假阳性判已登录**。 |
 | `_is_login_url(url)`                     | 静态方法 | token 子串表：`/login`、`login.`、`login.cgi`、`passport`、`/signin`、`sign_in`、`sso`、`cas`、`auth.`（URL 先 lower）。⚠ `cas`/`sso` 这类短 token 可能命中普通业务路径（`/purchase_case`）而误判未登录。 |
 | `export(browser, start_date, end_date)` | 方法  | **核心接口**。返回 `"success"`（成功）/ `"manual"`（需手动）/ `"failed"`（失败）。默认实现：懒加载 `SmartExporter` 执行智能导出，并把 `log_callback=browser._log` 接上——否则 SmartExporter 的 `_log()` 是空操作，默认导出全程静默（11 个内置平台都自带 `export()`，走不到这里，但"平台管理新建、还没写脚本"的平台第一次导出就会）。 |
 | `open_export_page(browser)`            | 方法  | 骨架钩子①：`navigate(export_url)` + `sleep(PAGE_SETTLE_S)` + `close_popup()`（后者当前空转，调用点保留以便恢复）。 |
@@ -488,11 +488,11 @@ liushui_export/
 | `__init__(app, interval_min=30, enabled=True, make_browser=None)` | `interval_min = max(1, int(...))` 防 0/负数；`make_browser` 工厂可注入便于测试（默认 `_default_browser`：`headless=True` + `set_browser_profile(key, merchant)`，**惰性 import `BrowserManager`**，模块导入不拖入 Playwright）。 |
 | `start()` / `stop()` | 已活就跳过（重复调用安全）；`stop` 置事件 + `join(timeout=5)`，**无论线程存不存在都打"保活服务已停止"**。 |
 | `_run()` | `while not self._stop.wait(interval*60)`：`enabled` 与 `app.running` 的检查都在 wait **之后**——改间隔只影响下一轮等待，不会立刻唤醒；`run_once` 的异常被 `log(..., "error")` 吞掉，不会结束线程。 |
-| `run_once()` | 遍历 `app.iter_selected_merchants()`，逐个用独立 profile 打开 `app.login_urls[key]` 刷新会话（`navigate → sleep(3) → close_popup()`），再判 URL/标题。 |
+| `run_once()` | 遍历 `app.iter_selected_merchants()`，逐个用独立 profile 打开 `app.login_urls[key]` 刷新会话（`navigate → sleep(3) → close_popup()`），再**只看 URL** 判失效。 |
 | `_iter_merchants()` / `_mark()` | 鸭子类型取 `app.iter_selected_merchants` 与 `app.set_platform_status`，**没有就什么都不做**（不报错，所以改名会让巡检静默空转）。 |
 | `enabled` / `interval_min` | 界面「登录保活」勾选与间隔框改动即时应用到运行中的实例。 |
 
-> ⚠ **保活的判据与导出侧不一致**：`run_once` 用的是 `"login" in url or "登录" in title`——正是 `PlatformBase.check_login` 注释点名要抛弃的旧判法（"已登录但登录页标题仍带登录字样"会被误判失效）。所以"灯红了但导出正常"或反之是可能发生的，改动时要么统一要么明确各自用途。
+> 判据口径（2026-09-26 起）：`run_once` 只用 `"login" in url` 判失效；标题里带"登录"字样改为**只写一行日志、不置红**。以前是 `url or title` 两个都算，而那正是 `PlatformBase.check_login` 注释点名抛弃的旧判法，于是"灯红着、导出却一切正常"成了设计出来的结果——状态灯一旦不可信就没人看它了。仍存的口径差（有意保留）：保活是"打开登录页刷新会话"，导出侧是"打开导出页看会不会被踢"，两者的 URL 本来就不是同一个页面，所以保活漏报（灯绿但要重登）比误报可接受得多，真失效由导出前的预检兜住。
 
 > 并发约定：巡检轮询时若 `app.running == True`（正在导出/调试）跳过本轮，绝不与任务并发；浏览器实例工厂注入便于单元测试。
 
@@ -992,7 +992,7 @@ python -m playwright install chromium
 
 **下载、校验与交付**
 
-7. 必须先 `_finalize_download` 归档再校验，且校验**先数数据行、后看错误文案**：顺序反了会把备注里写着"操作失败/请登录"的真账单当错误页删掉；先删后归档会出现"日志说下载完成、磁盘上找不到文件"。
+7. 必须先 `_finalize_download` 归档再校验，且校验**先认文件头、再数数据行、后看错误文案**：顺序反了会把备注里写着"操作失败/请登录"的真账单当错误页删掉；先删后归档会出现"日志说下载完成、磁盘上找不到文件"。"数行"之前还要有一道**HTML 文件门头**——会话过期时后台常把登录页以 `200 + Content-Disposition: xxx.csv` 发下来，而 HTML 标签本身就占行，按逗号数得出行的登录页会被数行那道门直接放行（交出去一份网页却记 success）。
 8. 兜底扫描（路 2）与事件队列（路 1）口径不同：一个递归看整个 downloads、一个只看根目录且要求 mtime 在 `_dl_capture_t0` 之后。往 downloads 根目录写文件的方法只有 `screenshot()`，它正是"截图被认领成账单"事故的源头。
 9. 归属不明的 UUID 残留一律原名原字节进 `downloads/待确认/`，**不按当前上下文改名归到某个商户目录**——对账最怕拿错人的账单。`待确认/`、`browser_data/`、账单原件、`stats.jsonl` 在任何清理逻辑里都不得碰。
 10. 日期没全部设成功就必须停手，不许继续点查询/导出：骨架 `run_standard_flow`、京东/拼多多的手写检查、视频号 `_set_time`、微信支付 `_set_dates` 五处都遵守（后两处曾把返回值丢掉过）。另一端还是页面默认区间时，硬导会得到一份错区间的账单，而文件名看起来完全正常。
@@ -1038,13 +1038,20 @@ python -m playwright install chromium
 35. 子商户这一档的重试挂在**每个子商户自己身上**，整家汇总永远不返回 `failed`（全失败也报 `manual`）：外层 `run_with_retry` 若把整家重跑，成功的几家会再导一遍、往归档里堆 `历史/`，反而看不出哪家真没出来。统计按 `主商户/子商户` 记一条。取值口径必须与 `_execute_export_tasks` 一致，包括"间隔 0 就是 0"（写成 `int(x or 30)` 会把 0 变成睡满 30 秒）。
 36. 子商户名会直接成为 `downloads/平台/商户/` 下的一级目录名，所以在 `set_export_context` 就要过 `_safe_name`，清单清洗时还要挡掉 `.`/`..`/纯点下划线的名字——`sanitize_name` 不吃它们，留着就是目录逃逸。汇总目录那侧另有 `summary_name` 防同名静默覆盖（见 5.8）。
 
+**校验与登录判定的口径（2026-09-26 补）**
+
+37. **"是不是账单"只许看文件头，不许拿全文文案判生死**。HTML 那道门必须排在"数数据行"**之前**（登录页存成 `.csv` 时按逗号数得出行），而它只比对跳掉 BOM/空白后的开头若干字节；`_match_error_keyword` 只在"读不出数据行"时用，且两侧都小写。反过来把这两条合起来写成一个"全文找关键字"的判断，就会退回到"备注里一句'请登录'把真账单删掉"的老事故（第 7 条）。
+38. **登录判定的等待只许往宽、不许往严**：`check_login` 现在按 `LOGIN_POLL_STEP/MAX/STABLE` 采样看 URL，落地即返回。要调参数就调 `LOGIN_POLL_STABLE`（越大越接近旧的 3 秒死等），但**不许改回 `wait_for(timeout=3)` 这种不传条件的写法** —— 它必然耗满预算还会打一条假的"等待超时"WARN。判成"未登录"会把本该到手的账单挡掉（第 28 条同一条红线），判成"已登录"最多白跑一次，所以拿不准时取后者，`tests/test_check_login_wait.py::test_stability_window_is_a_documented_trade_off` 就是钉这个方向的。
+39. **状态灯宁可漏报也别误报**。保活巡检现在只看 URL 里有没有 `login`，页面标题带"登录"字样只写日志不置红 —— 灯一旦因为误报失去可信度，用户就不再信它了。同理 `deps.probe()` 自身出错折成 `unknown` 放行（第 28 条）。
+40. **cron 缺失/非法 = 这个任务不跑，并且要说一次**。`from_dict` 不许再给空 cron 兜 `* * * * *`（那是每分钟起一次浏览器）；`CronScheduler._warn_once` 按任务只提醒一次、整段包在 `try` 里，提示本身绝不能把调度线程带下去。用户显式写 `* * * * *` 是他的选择，照旧生效。
+
 ***
 
 ## 13. 已知不一致、未接线与待议
 
 > 这一节是把"读代码时容易当成 bug、其实要么是有意的、要么确实坏着"的地方摊开。**有意为之的别顺手清理，确实坏着的改动前先确认。**
 
-### 13.1 确实失效/会出错的地方（2026-09-25 已全部修掉，留此备查）
+### 13.1 确实失效/会出错的地方（2026-09-25、2026-09-26 两批已全部修掉，留此备查）
 
 | 位置 | 曾经的现象 | 修法与提交 |
 | --- | --- | --- |
@@ -1054,6 +1061,11 @@ python -m playwright install chromium
 | `core/browser.py` `_take_new_download` | 返回**已归档**路径，`_accept_download` 又归档一次 → `download_name_mode=original` 时多叠一层商户前缀；方法名也与实现不符 | 改名 `_wait_root_download`、只等写完不归档（归档统一在 `_accept_download` 做一次）；`4c27687` |
 | `core/platform_base.py` `export` | `SmartExporter(browser)` 没传 `log_callback` → 默认导出全程静默 | 传 `log_callback=browser._log`；`1b0c29c` |
 | `platforms/shipinhao`、`platforms/wechatpay` | `_set_time` / `_set_dates` 的 bool 返回值没人看 → 日期没设上照样点查询/导出，会得到页面默认区间的账单却按本次区间命名 | 两家都补「停手 + `[中止]` 日志 + `snapshot(日期未填入)` + 转 `manual`」；微信的回退分支改为如实返回两条 placeholder 的结果；`6f023bb` |
+| `core/browser.py` `_validate_download` | 会话过期时后台把登录页以 `200 + Content-Disposition: xxx.csv` 发下来，而"先数数据行"那道门按逗号数、HTML 标签本身就占行 → **数得出 4 行的登录页被当成品放行**，日志报 success、`stats.jsonl` 记成功，交出去的是一份网页（实测：5 行 HTML 存成 `.csv` → `_count_rows=4` → `_validate_download=True`） | 数行之前加 `_looks_like_web_page` 文件门头；文案匹配改大小写不敏感；`8b0f075` |
+| `core/platform_base.py` `check_login` | `browser.wait_for(timeout=3)` 不传条件 → 已登录/未登录两个分支都必然等满 3.00s（实测），收尾还固定打一条"等待超时"WARN；预检 + inline 预检每家两遍，10 家商户 60 秒白等 + 20 行假警告 | 改成 `LOGIN_POLL_STEP/MAX/STABLE` 采样、落地即返回，不再借道 `wait_for`；`e8a1241` |
+| `core/keepalive.py` `run_once` | `"login" in url or "登录" in title` —— 正是 `check_login` 注释点名抛弃的旧判法，后台已登录而页面名仍带"登录"字样时把状态灯判红，于是"灯红着、导出却一切正常" | 判失效只看 URL，标题命中只写一行"只当提示不判失效"；`18d9b2f` |
+| `core/scheduler.py` `CronJob.from_dict` | 缺 cron 的条目兜 `* * * * *` = **每分钟起一次浏览器导账单**，而界面新建/编辑都有校验、只有手改 `scheduled_tasks.json` 漏写这个键的人会把整台机器点着 | 空 cron 原样留着（`CronExpr` 解析不过 → 该任务不跑），调度线程按任务写一句"不会被执行"且只说一次；`ea5b7a1` |
+| `core/main_gui.py` `_action_help` | 弹窗仍教"在浏览器完成登录并点『确定』"，而第九轮起登完的标志是**关掉浏览器窗口** —— 用户照旧文案在没登完时点掉窗口，正是那次改造要治的病 | 文案跟回现流程并补上预检/「中止」，加 `tests/test_action_help_text.py` 钉住；`a62a7ed` |
 
 > 同批还修了序列快照 harness 的一处失真：`tests/test_platform_sequences.py` 的 `Recorder.page` 以前返回记录函数，平台脚本里 `browser.page.locator(...)` 取属性直接 AttributeError、被脚本自己的 try 吞掉，于是录出来的是"页面操作整段失败"那一支（微信支付停在 `assert_selector` 结果 `failed`、视频号停在 `_set_time`）。给 `page` 一个可链式哑对象后两家录到完整流程（16→18、11→29 次调用，结果 `failed`→`success`），两条快照按新口径重录。
 
@@ -1061,12 +1073,10 @@ python -m playwright install chromium
 
 ### 13.2 口径不一致（两处逻辑对同一件事给出不同答案）
 
-- **保活 vs 导出预检**：`keepalive.run_once` 用 `"login" in url or "登录" in title` 判失效，而 `PlatformBase.check_login` 明确抛弃了这种判法（会误判"已登录但标题带登录字样"）。所以"灯红了但导出正常"是可能的。
 - **`SmartExporter.export` 的日期策略**：`filled==1` 直接转 manual，但 `filled==0` 继续硬试；基类骨架是"任一框没填上就停手"。
 - **`snapshot()` 失败返回 None，`screenshot()` 失败仍返回路径**——两个相近名字语义相反。
-- **登录判定的固定开销**：`check_login` 里 `browser.wait_for(timeout=3)` 不传条件，等价于"死等 3 秒 + 一条 `等待超时` WARN"。逐家预检时这条会被放大 N 倍（也解释了"开跑前安静几秒"）。
-- **`_is_login_url` 的短 token**：`cas`/`sso` 是子串匹配，普通业务路径（`/purchase_case`）可能被误判为未登录。
-- **`_VALIDATE_ERROR_KEYWORDS` 大小写敏感**：页面写 `<HTML>`/`<!DOCTYPE` 时不会被判为错误页，只能靠"读不出数据行 + 体积阈值"兜住。
+- **`_is_login_url` 的短 token**：`cas`/`sso` 是子串匹配，普通业务路径（`/purchase_case`）可能被误判为未登录。2026-09-26 把 11 个平台的 `export_url`（含查询串）逐个核过一遍，**没有任何一家命中这些 token**，所以这条目前只是理论风险，别为它改判据；接新平台时如果它的落地地址里带这类词再回来看这里。
+- **保活与导出侧仍不是一回事**：`keepalive.run_once` 打开的是 `login_url`（顺带刷新会话），`check_login` 打开的是 `export_url`（看会不会被踢），两边 URL 本就不同。2026-09-26 统一的是**判据的严格程度**（保活不再因为页面标题带"登录"就置红），不是把两次导航合并——合并就要在保活里多起一次浏览器，不值。
 - **`record_stat`/汇总用显示名、profile 用 key**（见 12 章第 23 条）。
 
 ### 13.3 有意停用/预留，**别当死代码清掉**
@@ -1076,16 +1086,20 @@ python -m playwright install chromium
 - `_execute_export_tasks(label=...)`、`_ask_login_retry(attempt=...)`、`check_selectors(timeout=...)`、`_cleanup_stale_files(keep=...)`、`_normalize_download_name(merchant=...)` 这些形参当前未被使用，但调用方/测试按关键字传，删签名会连带炸。
 - `trigger_job` 走 `_execute_export_tasks` 而**不经过 `_do_export`**，所以定时导出既不做登录预检、也不做汇总复制/打开文件夹。不预检有注释背书；不做汇总只是顺带的结果，要不要补待议。
 - `_merchant_memory` 只在内存：重启后第一次"取消平台→勾回"仍会走整平台全选。旧行为有意保留，是否持久化待议。
-- `CronJob.from_dict` 对缺 cron 的条目兜 `"* * * * *"`（= 每分钟）；手改 json 的人会被坑，但改成"跳过该任务"也是一种取舍。
 - `_IMAGE_MAGICS` 里的 `b"IDNA"` 对不上任何常见图片格式（疑似笔误），只会造成"以 IDNA 开头的文件不被当账单"，无实际危害，未动。
 - `tests/test_launcher_vbs.py` 会在仓库根生成并删除 `_probe_launcher.vbs`（已 gitignore）。
 
 ### 13.4 文档/注释落后于实现
 
-- `browser.py` 里 `_finalize_download` docstring 还写"旧版归档到 `his/`"（实际是 `历史/`）；`begin_wait_download`/`_finalize_download`/`wait_download` 多处 docstring 只写"平台/日期"，漏了商户层。（`wait_download` 的 docstring 已照实改成"移动优先、save_as 是第二选择"）
-- `main_gui._action_help()` 的弹窗文案仍写"在浏览器完成登录并点『确定』"，与 `_show_login_hint` 的"关掉窗口即代表登完"新流程矛盾。
+- 2026-09-26 已把这几处对齐并加了测试：`_action_help()` 的"登录并点『确定』"改成"关掉浏览器窗口就代表登完"（并补上登录预检与「中止」的说明，`tests/test_action_help_text.py` 钉住文案）；`browser.py` 里 `_finalize_download` 的 `his/` 改成实际的 `历史/`，四处目录注释补上漏掉的商户/子商户层；"归档时扩展名已被改成 .xlsx"那句注释删掉（第十四轮起扩展名原样保留）；快手/小红书 docstring 标清"方式B 未实现，记着备用"；支付宝把写死的"仅支持 2025-08-24 及以后"改成"后台可查区间是滚动的，别把某个日期当固定下限"。
 - `使用说明.md` 第 4 节列出的"11 个平台均已内置"是对的；本文档以前写"仅实现有赞"的部分已在本版全面更正（见 1、2、3、8 章）。
-- `platforms/alipay` docstring 记着"仅支持 2025-08-24 及以后的流水"；`kuaishou`/`xiaohongshu` 的 docstring 各列了两种方式，**只实现了 A 方式**。
+
+### 13.5 本轮新发现，**还没动手**（要先跟用户确认）
+
+| 位置 | 现象 | 为什么算问题 |
+| --- | --- | --- |
+| `core/browser.py` `set_browser_profile` + `core/main_gui.py` `discover_merchants` | 商户为空时 profile 目录就是 `browser_data/<平台key>/` 本身，Chromium 直接往这一层写下自己的内部目录（`Default`、`Crashpad`、`GPUPersistentCache`、`GrShaderCache`、`Safe Browsing`、`ShaderCache`、`component_crx_cache`、`extensions_crx_cache`、`segmentation_platform`…），而 `discover_merchants` 的规则是"`browser_data/<key>/` 下每个子目录就是一个商户" → 这些内部目录被当成商户列进左栏，还会被自动勾上。本机实测：`discover_merchants(["youzan"])` 返回 10 项，其中只有 `test` 是真的；`selection_state.json` 里这 9 项全是 `true`。 | 一个平台里凭空多出 9 个"商户"：「检查登录状态」与批量导出会为它们各起一次浏览器（白等 + 红灯 + 进统计），商户数徽标与「对象」列的项数也一起骗人；「删」按钮还可能让人误删 Chromium 的内部目录。触发路径不止一处：`_ensure_browser(plat)`（脚本调试，`core/main_gui.py:1322`）不传商户，`BrowserManager` 的默认 `_profile_dir` 就是 `browser_data` 根。 |
+| `core/main_gui.py` `_show_login_hint` | 首次登录提示窗写的是「平台 · 商户」，没有「第 i/N 家」，也没有这个商户对应哪个登录账号；Chromium 窗口标题跟着网页走，任务栏里看不出在登谁。 | 一个平台勾了 3 个商户时，同一个提示窗会连着弹 3 次、内容只有商户名不同，用户很难确认自己现在登的是第几家、刚才关的是不是同一个账号 —— 结果常是"三家都登成同一个账号"，而三家用的是各自独立的 profile，另外两家其实是空的。 |
 
 ***
 

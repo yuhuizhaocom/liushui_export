@@ -2133,6 +2133,52 @@ class LiushuiApp:
         text = "\n".join(lines)
         self._ui(lambda: messagebox.showinfo(f"{len(items)} 个平台需要您手动导出", text))
 
+    USER_WAIT_TIMEOUT_S = 10 * 60    # 等人扫码/手工确认的上限, 到点按"没确认"处理
+
+    def _ask_user_confirmed(self, prompt, plat_name, merchant):
+        """请用户确认"我已完成那步手工操作"; 返回他**是否真的**点了确定。
+
+        三条返回 False 的路: 点取消 / 弹窗起不来 / 到点没人应答。
+        以前这里 `evt.wait(timeout=3600)` 把等待结果丢掉、回调一律不回话,
+        `browser.wait_user` 于是写死"用户已确认,继续" —— 微信上没扫码也会接着点
+        "下载数据"(空文件或旧文件记成 success), 而模态框压着主窗口, 用户连「中止」
+        都点不动, 白挂一小时。
+        线程契约照第 12 章第 12 条: 弹窗投递给主线程, 本线程用 answer + Event 等,
+        `finally: evt.set()` 保证不会没人应答地吊住。
+        """
+        evt = threading.Event()
+        answer = {"ok": False}
+
+        def _ask():
+            try:
+                # Chromium 窗口常常盖在主窗口上面, 提示看不见就等于没人应答
+                self.root.attributes("-topmost", True)
+                answer["ok"] = messagebox.askokcancel(
+                    "需要您操作确认",
+                    f"平台: {plat_name} / 商户: {merchant}\n\n{prompt}\n\n"
+                    "请先在手机上完成确认操作, 再点\"确定\"继续下载。\n"
+                    "点\"取消\"= 这一家先放弃(程序不会替你确认归属/扫码)。")
+            except Exception as e:
+                self._append_log(f"[待处理] 确认弹窗没弹出来, 这一家按未完成处理: {str(e)[:60]}")
+            finally:
+                try:
+                    self.root.attributes("-topmost", False)
+                except Exception:
+                    pass
+                evt.set()
+
+        self._ui(_ask)
+        deadline = time.time() + self.USER_WAIT_TIMEOUT_S
+        while time.time() < deadline:
+            if evt.wait(1.0):
+                return bool(answer["ok"])
+            if self._aborted():
+                self._append_log("[中止] 等待确认期间收到中止请求, 这一家按未完成处理")
+                return False
+        self._append_log(f"[待处理] {self.USER_WAIT_TIMEOUT_S // 60} 分钟内没等到确认, "
+                         "不再继续往下点 —— 这一家转人工")
+        return False
+
     def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
         """一个商户这一档的导出; 配了子商户时, 这里是"一次登录切着导 N 份"。
 
@@ -2249,19 +2295,10 @@ class LiushuiApp:
                                             sub_merchant)
             # 注入"等待用户手动操作"回调(如微信扫码确认),生产环境始终启用。
             # 后台线程调用 browser.wait_user() 时,切到 UI 线程弹窗提醒并阻塞等待用户完成。
-            def _user_wait_cb(prompt, n=plat.name, m=who):
-                evt = threading.Event()
-                def _ask():
-                    try:
-                        messagebox.showinfo(
-                            "需要您操作确认",
-                            f"平台: {n} / 商户: {m}\n\n{prompt}\n\n请按提示在浏览器中完成操作(如微信扫码),完成后点击\"确定\"继续。")
-                    except Exception:
-                        pass
-                    evt.set()
-                self._ui(_ask)
-                evt.wait(timeout=3600)
-            self.browser.set_user_wait_callback(_user_wait_cb)
+            # 回调**必须回话**(True=用户亲手点了确定), 否则 wait_user 会把"没人应答"
+            # 当成"已确认"继续往下点。见 _ask_user_confirmed。
+            self.browser.set_user_wait_callback(
+                lambda prompt, n=plat.name, m=who: self._ask_user_confirmed(prompt, n, m))
             # 单步调试模式: 注入回调,平台脚本调用 step_pause() 时弹"继续/中止"
             if step_debug:
                 def _step_cb(name, n=plat.name, m=who):

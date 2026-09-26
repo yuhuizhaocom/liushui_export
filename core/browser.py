@@ -1033,19 +1033,28 @@ class BrowserManager:
 
     def wait_user(self, prompt, timeout=600):
         """停留等待用户手动操作(如微信扫码确认资金流水)。
-        提醒用户 + 阻塞等待,直到用户完成确认才能继续后续下载。
-        有注入回调时: 由 GUI 弹窗提醒并阻塞; 无回调时: 打日志并按 timeout 停留兜底。
-        返回 True(继续导出)。"""
+
+        返回 True **只**表示用户亲手说了"我已完成"。以下一律 False: 用户点取消、
+        弹窗没弹起来、到点没人应答、回调自己出错。
+        以前这里回调一返回就无条件记"用户已确认,继续" —— 于是微信上没扫码也会接着点
+        "下载数据", 拿到空文件或上一轮的文件却记成 success。调用方拿到 False 必须停手
+        转人工, 不许替用户确认(与"归属没确认就不许点导出"同一条红线)。
+        """
         self.snapshot("等待用户确认")
         self._log(f"[待处理] {prompt}", "warning")
         if self._user_wait_callback:
             try:
-                self._user_wait_callback(prompt)
-                self._log("[待处理] 用户已确认,继续")
-                return True
+                confirmed = bool(self._user_wait_callback(prompt))
             except Exception as e:
-                self._log(f"[待处理] 用户确认回调异常: {str(e)[:60]}", "warning")
-        # 无回调兜底: 静默停留,给用户手动操作时间
+                self._log(f"[待处理] 确认回调异常, 按未完成处理: {str(e)[:60]}", "warning")
+                return False
+            if confirmed:
+                self._log("[待处理] 用户已确认,继续")
+            else:
+                self._log("[待处理] 没拿到用户的\"已完成\"确认(取消/超时/弹窗没弹出来), "
+                          "不继续往下点 —— 本次转人工", "warning")
+            return confirmed
+        # 无回调兜底(调试/录制那类没界面的场合): 没人可问, 只能静默停留给用户留时间
         deadline = time.time() + max(1, int(timeout))
         while time.time() < deadline:
             time.sleep(2)

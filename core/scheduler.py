@@ -129,6 +129,21 @@ class CronJob:
             self.last_run = (now or datetime.now()).isoformat()
         return cron_changed
 
+    def sync_from_disk(self, other):
+        """把盘上读到的内容搬进**这个对象**(TaskStore.load 用它保持对象身份)。
+
+        `job_id` 故意不动: 它是界面 iid 与外部持有引用的锚点。其余一律以盘上为准 ——
+        外部手改过 json、或另一处保存写回了新值, 内存里的这个对象都得跟着变,
+        不能因为"要保住引用"就把盘上的改动吞掉。
+        """
+        self.name = other.name
+        self.cron = other.cron
+        self.platforms = list(other.platforms)
+        self.merchants = list(other.merchants)
+        self.enabled = other.enabled
+        self.last_run = other.last_run
+        return self
+
     def to_dict(self):
         return {
             "id": self.job_id,
@@ -185,15 +200,33 @@ class TaskStore:
         self.jobs = []
 
     def load(self):
+        """从盘上读任务列表。
+
+        ⚠ 同一个 job_id 必须**复用内存里已有的那个对象**, 只把盘上的字段搬进去。
+        `check_all` 每 30 秒调一次它, 而「定时任务」对话框点「编辑」时抓住的就是当时
+        那个对象(改商户名、挑平台很容易超过 30 秒)。以前每轮都换成全新对象, 于是
+        对话框最后 `apply_edit` 改的是一个已经不在列表里的孤儿, `save()` 序列化的是
+        新对象 —— 改动静默丢失、界面显示回旧值、一声不响, 到点仍按老商户导出。
+        """
+        by_id = {}
+        for j in self.jobs:
+            by_id.setdefault(j.job_id, j)
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             jobs = []
+            seen = set()
             for item in data.get("jobs", []):
                 try:
-                    jobs.append(CronJob.from_dict(item))
+                    job = CronJob.from_dict(item)
                 except Exception:
                     continue  # 跳过损坏条目
+                if job.job_id in by_id and job.job_id not in seen:
+                    held = by_id[job.job_id]
+                    held.sync_from_disk(job)
+                    job = held
+                seen.add(job.job_id)
+                jobs.append(job)
             self.jobs = jobs
         except Exception:
             self.jobs = []
@@ -476,11 +509,23 @@ class JobEditDialog(tk.Toplevel):
         if warning and not messagebox.askyesno(
                 "定时任务设置可能有误", warning + "\n\n仍要保存吗?", parent=self):
             return
+        jobs = self.scheduler.store.jobs
         if self.job is None:
             job = CronJob.new(name=name, cron=cron, platforms=plats, merchants=merchants)
-            self.scheduler.store.jobs.append(job)
+            jobs.append(job)
         else:
-            self.job.apply_edit(name, cron, plats, merchants)
+            # 保存这一刻**重新按 id 回查**, 不用点"编辑"时抓住的那个引用:
+            # 调度线程每 30 秒 load() 一次, 期间这条任务可能已被删除、或被人手改过。
+            target = next((j for j in jobs if j.job_id == self.job.job_id), None)
+            if target is None:
+                messagebox.showwarning(
+                    "任务已变化",
+                    "这条任务在你编辑期间被删除或被外部改动过,\n"
+                    "本次修改没有保存(硬塞回去会把它复活)。\n"
+                    "请关掉本窗口, 重新打开「定时任务」再编辑一次。",
+                    parent=self)
+                return
+            target.apply_edit(name, cron, plats, merchants)
         self.scheduler.store.save()
         if self.on_saved:
             self.on_saved()

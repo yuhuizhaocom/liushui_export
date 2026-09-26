@@ -162,6 +162,10 @@ class CronJob:
         self.merchants = list(merchants)
         self.enabled = bool(enabled)
         self.last_run = last_run  # ISO 字符串或 None
+        # 写不进盘时的兜底起算点, 记在**任务对象自己身上**(见 TaskStore.mark_triggered)。
+        # 刻意不用 "名字|cron" 之类的共享记号: 界面不查任务重名, 两条同名同 cron 的任务
+        # 会互相挡 —— 实测其中一家当天永远不导, 且盘腾开之后那一轮也不补。
+        self.mem_last_run = None
 
     def apply_edit(self, name, cron, platforms, merchants, now=None):
         """界面"编辑任务"的唯一入口, 返回 cron 是否变了。
@@ -253,34 +257,28 @@ class TaskStore:
         self.jobs = []
         # 最近一次写盘失败的原因(None=上次写成功)。失败不再被静默吞掉, 见 save()。
         self.last_error = None
-        # 写不进盘时的兜底起算点: "名字|cron" -> ISO 时刻。
-        # 为什么需要它: trigger() 会把 last_run 写盘, 而盘写不进去(文件被云盘/Excel/
-        # 杀软占住)时 load() 下一轮又把**旧的那份**读回来 → 同一任务每 30 秒重跑一整批,
-        # 浏览器一遍遍起来, 用户只能杀进程。
-        self._mem_last_run = {}
-
-    @staticmethod
-    def _floor_key(job):
-        """兜底起算点的记号。刻意不含 job_id: 手改的 json 没写 id 时, from_dict 每轮
-        load 都会新生成一个随机 id(这个坑第 21 轮踩过一次)。"""
-        return "%s|%s" % (job.name, job.cron)
 
     def trigger_floor(self, job):
-        """内存里记的"这次已经跑过的时刻", 没有则 None。"""
-        return self._mem_last_run.get(self._floor_key(job))
+        """这条任务"已经跑过"的内存起算点(写在盘失败时的兜底), 没有则 None。
+
+        记号挂在**对象**上而不是 store 的字典里: `load()` 对同一 job_id 复用对象
+        (a0cc95c), 所以这个属性正好活得比一轮轮询久; 而按"名字|cron"记会让两条同名
+        同 cron 的任务互相挡(实测一家当天永不导、腾开盘那一轮也不补)。
+        代价: 手改 json 没写 id 的条目每轮都是新对象, 兜底会丢 → 退化成"可能重复触发"。
+        这个退化方向是安全的(多跑一次 vs 少跑一家)。
+        """
+        return getattr(job, "mem_last_run", None)
 
     def mark_triggered(self, job, now):
-        """把"这个任务在 now 跑过了"落盘; 落不下去时先在内存里记着。
+        """把"这个任务在 now 跑过了"落盘; 落不下去时对象身上已经有一份。
 
-        返回是否真的写进了盘。内存兜底只在**盘上也认为已过期**时才起作用
-        (should_trigger 取两者较新的一份), 所以某次写盘成功之后一切照旧。
+        返回是否真的写进了盘。内存那份只往"更晚"的方向参与
+        (`should_trigger` 取盘上与内存中较新的一份), 所以某次写盘成功之后一切照旧。
         """
         stamp = now.isoformat()
         job.last_run = stamp
-        ok = self.save()
-        if not ok:
-            self._mem_last_run[self._floor_key(job)] = stamp
-        return ok
+        job.mem_last_run = stamp
+        return self.save()
 
     def load(self):
         """从盘上读任务列表。
@@ -334,8 +332,6 @@ class TaskStore:
             self.last_error = "%s: %s" % (type(e).__name__, str(e)[:120])
             return False
         self.last_error = None
-        # 写进去了, 内存兜底就可以退场(留着会一直压着盘上更新的 last_run)
-        self._mem_last_run.clear()
         return True
 
 

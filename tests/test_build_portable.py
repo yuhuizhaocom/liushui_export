@@ -9,6 +9,7 @@ CI 只是把这两个函数当检查用, 所以它们本身要有测试 —— �
 import codecs
 import io
 import os
+import shutil
 import subprocess
 import sys
 
@@ -150,5 +151,57 @@ def test_whole_build_runs_under_cp1252(tmp_path):
     report = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
     assert r.returncode == 0, report
     assert "UnicodeEncodeError" not in report
-    assert "组装绿色包" in report and "白名单检查通过" in report
+    assert "组装全量版" in report and "白名单检查通过" in report
     assert os.path.isfile(os.path.join(str(tmp_path / "pkg"), "run-portable.vbs"))
+
+
+# --------------------------------------------------------------------------- 两个版本
+
+def test_core_flavor_refuses_the_full_build_arguments(out):
+    """CI 里两版只差三个参数, 抄错太容易 —— 出一个"名叫核心版、里面带解释器"的包最坏。"""
+    with pytest.raises(SystemExit) as e:
+        bp.build(out, site_dir=REPO, flavor="core")
+    assert "核心版" in str(e.value) and "--site-dir" in str(e.value)
+    with pytest.raises(SystemExit):
+        bp.build(out, python_dir=REPO, flavor="core")
+    with pytest.raises(SystemExit):
+        bp.build(out, browsers_dir=REPO, flavor="core")
+
+
+def test_core_flavor_ships_only_code_and_its_own_launchers(out):
+    bp.build(out, flavor="core", quiet=True)
+    top = sorted(os.listdir(out))
+    assert top == ["README-核心版.txt", "app", "run-core.bat", "run-core.vbs"], top
+    app = os.path.join(out, "app")
+    assert os.path.isfile(os.path.join(app, "core", "main_gui.py"))
+    assert os.path.isfile(os.path.join(app, "core", "deps.py")), "启动体检要跟着程序走"
+    for junk in ("site-packages", "runtime", "python"):
+        assert not os.path.exists(os.path.join(app, junk) if junk != "python"
+                                 else os.path.join(out, junk)), junk
+    assert bp.scan_forbidden(out) == []
+    assert bp.check_flavor(out, "core") == []
+
+
+def test_full_flavor_is_not_confused_with_core(out):
+    bp.build(out, quiet=True)
+    assert bp.check_flavor(out, "full") == []
+    # 拿全量版的成品去核"核心版"结构 → 必须报"包里混进了别的地方的入口"
+    problems = bp.check_flavor(out, "core")
+    assert any("run-portable" in p for p in problems), problems
+
+
+def test_check_flavor_catches_a_dirty_core_package(out):
+    """手工造两种翻车: 核心版里躺着依赖/内核, 或启动器拿错版本。"""
+    bp.build(out, flavor="core", quiet=True)
+    os.makedirs(os.path.join(out, "app", "site-packages", "playwright"))
+    os.makedirs(os.path.join(out, "app", "runtime", "ms-playwright", "chromium-1234"))
+    got = bp.check_flavor(out, "core")
+    assert any("site-packages" in p for p in got) and any("runtime" in p for p in got)
+    shutil.copy2(os.path.join(REPO, "packaging", "run-portable.vbs"),
+                 os.path.join(out, "run-portable.vbs"))
+    assert any("入口" in p for p in bp.check_flavor(out, "core"))
+
+
+def test_unknown_flavor_fails_loudly(out):
+    with pytest.raises(SystemExit):
+        bp.build(out, flavor="core2")

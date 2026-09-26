@@ -18,6 +18,10 @@
 /.liushui_workspace.json
 # 单实例守卫的锁文件(每次启动写、退出删; 开发时工作空间就是仓库根, 别让它冒进 git status)
 /.liushui_instance.lock
+# 原子写(config.write_text_atomic)的暂存文件 `名字.tmp-<pid>-<序号>`:
+# 正常路径写完就 replace 走, 只有"进程正好写在中间被硬杀"才会留下; 测试用例钉着这条规则
+# 必须与代码实际生成的名字对得上。
+*.tmp-*
 
 # 出包中间产物: CI 在 build/ 下组装(测试要从里面借 playwright), 本地试跑同理, 都不许进仓库
 /build/

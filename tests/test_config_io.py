@@ -137,6 +137,34 @@ def test_gui_helper_relays_a_failed_save_into_the_log_window(monkeypatch):
     assert kinds and "[设置] 没能保存 show_browser" in kinds[0][1], calls
 
 
+def test_atomic_write_leftover_name_is_gitignored(tmp_path, monkeypatch):
+    """进程正好写在中间被硬杀, 会在工作空间根留下 `名字.tmp-<pid>-<序号>`。
+
+    开发时工作空间就是仓库根, 这种文件没被忽略就会冒进 `git status`(实测以前不命中),
+    而它带着用户配置文件的**内容碎片**。这里不写死模式串, 而是抓出代码真正生成的那个
+    名字去比对 .gitignore —— 改了命名忘了改忽略规则, 这条就红。
+    """
+    import fnmatch
+    import core.config as cfg
+
+    left = []
+    p = str(tmp_path / "scheduled_tasks.json")
+    cfg.write_json_atomic(p, {"version": 1, "jobs": []})
+    monkeypatch.setattr(cfg.os, "replace",
+                        lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "占住")))
+    monkeypatch.setattr(cfg.os, "remove", lambda path: left.append(path))
+    with pytest.raises(PermissionError):
+        cfg.write_json_atomic(p, {"version": 1, "jobs": [{"name": "碎片"}]})
+    assert left, "失败那次应当去清理自己的暂存文件"
+
+    ignore = os.path.join(cfg.ROOT_DIR, ".gitignore")
+    rules = [ln.strip() for ln in open(ignore, encoding="utf-8").read().splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+    name = os.path.basename(left[0])
+    hit = any(fnmatch.fnmatch(name, r.lstrip("/")) or fnmatch.fnmatch(name, r) for r in rules)
+    assert hit, f"暂存文件 {name} 没被 .gitignore 覆盖"
+
+
 def test_task_store_save_uses_atomic_path(tmp_path, monkeypatch):
     """TaskStore.save 走同一个写入器, 且坏数据不会清空已有任务文件。"""
     from core.scheduler import CronJob, TaskStore

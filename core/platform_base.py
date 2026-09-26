@@ -41,6 +41,11 @@ class PlatformBase:
     manual_intervention = False  # 是否需要人工操作(如扫码/手动确认)。True 时导出排到最后,先自动跑完自动化平台
     intervention_hint = ""       # 人工操作说明(选填,便于日志/提示)
 
+    # 一个主账号下要切着导多个子商户的平台(银联这类)把它置 True: 导出流程会在**同一份
+    # 浏览器 profile、同一次登录**里按清单逐个切子商户跑 N 轮, 每轮的成品多一层目录。
+    # 默认 False —— 现有平台的行为与今天逐字相同, 不声明就完全不会被循环。
+    supports_sub_merchants = False
+
     # 关键元素选择器(可选,声明后可在导出前自检页面结构是否变更)。
     # 形如: {"date_start": ".el-range-input:nth-child(1)", "query_btn": "button.el-button--primary"}
     # 自检失败的元素会记日志/返回缺失清单,不必等下载失败才发现页面改版。
@@ -128,6 +133,30 @@ class PlatformBase:
         except Exception as e:
             browser.snapshot_on_failure(f"断言失败_{key}")
             raise RuntimeError(f"关键元素 [{key}] 未找到: {sel} ({str(e)[:60]})")
+
+    # ===== 子商户(仅 supports_sub_merchants=True 的平台会被调用) =====
+    # 调用顺序由导出流程保证: switch_sub_merchant → current_sub_merchant(比对归属)
+    # → export。这两个钩子的**返回值语义是安全相关的**, 别为了"看起来能用"而放宽。
+
+    def switch_sub_merchant(self, browser, sub_merchant):
+        """把页面切到指定子商户。返回 True 只表示"切换动作点完了"。
+
+        覆盖时的两条底线:
+          1. 切不过去(找不到入口、点了没反应)必须返回 False —— 流程会就此**停手**转人工,
+             绝不带着没确认过的归属去点导出;
+          2. 不要在这里点导出/下载, 导出是 `export()` 的事, 混在一起会让重试语义说不清。
+        """
+        browser._log(f"[子商户] {self.name}: 没有实现切换子商户的动作, 无法安全地留在同一"
+                     f"次登录里切到「{sub_merchant}」, 这一家转人工。", "warning")
+        return False
+
+    def current_sub_merchant(self, browser):
+        """从页面上读回"现在是谁"(商户号/商户名任意一种稳定标识)。
+
+        返回空串表示读不到 —— 流程不会因此停手, 但会记一条"归属未经校验"的提醒:
+        读回是这整套机制里唯一能防住"A 的账单记到 B 名下"的东西, 平台脚本能实现尽量实现。
+        """
+        return ""
 
     # ===== 通用导出骨架(平台脚本按需改用;不调用则完全不受影响) =====
     # 各平台脚本里"打开页面 → 填日期 → 点查询/导出 → 等下载"这段几乎逐字相同,

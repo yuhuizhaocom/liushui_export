@@ -552,6 +552,18 @@ class BrowserManager:
         造成"日志显示下载完成但磁盘上找不到文件"。且避免"日志写 success 实为空表"这类问题。"""
         if not final or not os.path.isfile(final):
             return None
+        try:
+            return self._accept_download_inner(final)
+        except Exception as e:
+            # 归档/校验里的任何文件系统意外都不该冒到 wait_download 之外: 以前它会
+            # 把 _dl_capture_on 卡在 True、本次成品留在 临时/ 里, 下一次
+            # begin_wait_download 的 rmtree 又把它删掉 —— 明明下成功却报 failed, 越重试
+            # 越丢。折成"这一份没认领成"才是这里该有的结果。
+            self._log(f"[归档] 处理下载文件出错({type(e).__name__}: {str(e)[:80]}), "
+                      "本次不认领这个文件", "warning")
+            return None
+
+    def _accept_download_inner(self, final):
         final = self._finalize_download(final)
         if not final or not os.path.isfile(final):
             return None
@@ -804,6 +816,37 @@ class BrowserManager:
         except Exception:
             return False
 
+    ARCHIVE_DIR_NAME = "历史"
+    KEEP_BOTH_MARK = "原件保留"
+
+    def _archive_previous(self, final_path, save_name):
+        """把顶层即将被覆盖的旧版复制进 `历史/`(带它自己的时间戳)。成功 True。
+
+        以前这一段整个包在 `except Exception: pass` 里, 而紧接着就**无条件**
+        `os.remove(final_path)` —— 归档失败(工作空间路径深 + 原始文件名长超 260 字符、
+        磁盘满、杀软拦)就等于把上一版账单凭空删掉, 日志一个字都没有, 用户还以为
+        `历史/` 里有备份。实测: 注入 copy2 抛错后全树搜不到旧内容。
+        失败要出声, 并且让调用方保住顶层那一份(见 `_finalize_download`)。
+        """
+        try:
+            his_dir = os.path.join(os.path.dirname(final_path), self.ARCHIVE_DIR_NAME)
+            os.makedirs(his_dir, exist_ok=True)
+            # 旧文件时间戳 → 归档名: 原名_YYYYMMDD_HHMMSS.扩展名
+            ts = datetime.fromtimestamp(os.path.getmtime(final_path)).strftime("%Y%m%d_%H%M%S")
+            old_name, old_ext = os.path.splitext(save_name)
+            shutil.copy2(final_path, os.path.join(his_dir, f"{old_name}_{ts}{old_ext}"))
+            return True
+        except Exception as e:
+            self._log(f"[归档] 上一版没能复制进 {self.ARCHIVE_DIR_NAME}/({str(e)[:60]}): "
+                      f"保留顶层原件, 本次成品另存名字, 两份都要能找回", "warning")
+            return False
+
+    def _keep_both_name(self, base_dir, save_name):
+        """顶层那个名字还被旧件占着时, 给本次成品换个子时分的名字 —— 两边都不丢。"""
+        stem, ext = os.path.splitext(save_name)
+        stamp = datetime.now().strftime("%H%M%S")
+        return os.path.join(base_dir, f"{stem}_{self.KEEP_BOTH_MARK}_{stamp}{ext}")
+
     def _finalize_download(self, path):
         """将已下载文件移动/重命名并归入 平台/商户[/子商户]/日期范围 文件夹
         顶层始终保留本次最新文件;若同区间已有同名文件,旧版先归档到 历史/ 子目录(加时间戳)
@@ -817,21 +860,16 @@ class BrowserManager:
         final_path = os.path.join(base_dir, save_name)
         # 顶层的"旧文件"记录: 若同名文件已存在且不是本次下载本体,先归档到 历史/
         if os.path.isfile(final_path) and os.path.abspath(path) != os.path.abspath(final_path):
-            try:
-                his_dir = os.path.join(base_dir, "历史")
-                os.makedirs(his_dir, exist_ok=True)
-                # 旧文件时间戳 → 归档名: 原名_YYYYMMDD_HHMMSS.扩展名
-                ts = datetime.fromtimestamp(os.path.getmtime(final_path)).strftime("%Y%m%d_%H%M%S")
-                old_name, old_ext = os.path.splitext(save_name)
-                his_path = os.path.join(his_dir, f"{old_name}_{ts}{old_ext}")
-                shutil.copy2(final_path, his_path)
-            except Exception:
-                pass
-            try:
-                os.remove(final_path)   # 移除顶层旧文件,为本次最新文件腾位
-            except Exception:
-                shutil.copy2(path, final_path)
-                return final_path
+            if self._archive_previous(final_path, save_name):
+                try:
+                    os.remove(final_path)   # 已在 历史/ 有一份, 顶层让给本次
+                except Exception as e:
+                    self._log(f"[归档] 顶层旧文件删不掉({str(e)[:50]}), 多半正被 Excel 之类"
+                              "打开着: 旧件保留, 本次成品另存一个名字", "warning")
+                    final_path = self._keep_both_name(base_dir, save_name)
+            else:
+                # 归档没成 = 顶层这一份是唯一的存在, 删它就是弄丢用户的账单
+                final_path = self._keep_both_name(base_dir, save_name)
         # 多线程/浏览器占用时重试移动
         for attempt in range(10):
             try:

@@ -71,6 +71,35 @@ def test_run_once_marks_ok_green():
     assert ("youzan", "ok") in app.marks
 
 
+def test_title_with_login_word_alone_does_not_turn_the_light_red(monkeypatch):
+    """登录着但页面标题里带"登录"字样(后台常见)以前会把灯判红, 于是出现
+    "灯红着、导出却一切正常" —— 状态灯一旦不可信就没人看了。判失效只看 URL。"""
+    import core.keepalive as ka
+    lines = []
+    monkeypatch.setattr(ka, "log", lambda msg, level="info": lines.append((level, msg)))
+
+    def factory(key, merchant):
+        return FakeBrowser("https://x/home", "登录 - 商家中心", log=list())
+    app = FakeApp(items=[("youzan", "A")], login_urls={"youzan": "https://x/login"})
+    KeepAliveService(app, make_browser=factory).run_once()
+    assert app.marks == [("youzan", "ok")], "标题字样不该置红"
+    assert any("只当提示" in m for _l, m in lines), "但要在日志里说一句为什么没判红"
+
+
+def test_url_still_decides_even_when_title_looks_logged_in(monkeypatch):
+    """反向也要成立: 标题正常但地址落在登录路径 → 仍然判失效。"""
+    import core.keepalive as ka
+    lines = []
+    monkeypatch.setattr(ka, "log", lambda msg, level="info": lines.append((level, msg)))
+
+    def factory(key, merchant):
+        return FakeBrowser("https://x/login", "商家中心", log=list())
+    app = FakeApp(items=[("youzan", "A")], login_urls={"youzan": "https://x/login"})
+    KeepAliveService(app, make_browser=factory).run_once()
+    assert app.marks == [("youzan", "error")]
+    assert any(l == "warning" for l, _m in lines)
+
+
 def test_gui_app_matches_keepalive_callback_names():
     """真 app 必须提供保活要用的公共方法名。
     FakeApp 只证明保活侧调用对了, 名字对不上时巡检结果会静默丢弃。"""

@@ -68,9 +68,18 @@ class KeepAliveService:
                 info = b.get_page_info()
                 cur_url = (info.get("url") or "").lower()
                 title = info.get("title") or ""
-                if "login" in cur_url or "登录" in title:
+                # 判失效只看 URL, 标题里带"登录"两个字不作数:
+                #   - 后台已经登录了, 页面/标签名常常仍写着"登录XX平台";
+                #   - check_login 早就抛弃了"看标题"这套判法(它自己的 docstring 写明),
+                #     两处口径不一就会留下"灯红着、导出却一切正常"这种没人信的状态灯。
+                # 状态灯宁可漏报也别误报 —— 真失效由导出前的预检兜住, 不靠这里吓人。
+                if "login" in cur_url:
                     self._mark(key, "error")
                     log(f"保活: {key}/{merchant} 登录已失效, 建议重新登录", "warning")
+                elif "登录" in title:
+                    self._mark(key, "ok")
+                    log(f'保活: {key}/{merchant} 会话有效'
+                        f'(页面标题带"登录"字样, 只当提示不判失效)')
                 else:
                     self._mark(key, "ok")
                     log(f"保活: {key}/{merchant} 会话有效")

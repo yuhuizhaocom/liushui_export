@@ -11,7 +11,9 @@ import pytest
 
 import core.browser as bm
 import core.config as cfg
+import core.config as workspace_cfg
 import core.crashguard as crashguard
+import core.logger as logger_module
 
 
 # ===== 派生路径 =====
@@ -180,3 +182,38 @@ def test_crash_dir_without_pointer_still_works(fake_pkg, monkeypatch):
     monkeypatch.setattr(crashguard, "POINTER_FILE", str(fake_pkg / "workspace.json"))
     monkeypatch.setattr(crashguard, "CRASH_DIR", str(fake_pkg / "logs"))
     assert crashguard._crash_dirs()[0] == os.path.join(str(fake_pkg), "logs")
+
+
+# ===== 界面侧: 首启选择与工作空间说明 =====
+
+import core.main_gui as mg
+from core.main_gui import LiushuiApp
+
+
+def test_first_run_choice(tmp_path):
+    sug = str(tmp_path / "Documents/流水导出工作空间")
+    assert mg.decide_workspace(True, "", sug) == ("use", os.path.abspath(sug))
+    mine = str(tmp_path / "D")
+    assert mg.decide_workspace(False, mine, sug) == ("use", os.path.abspath(mine))
+    # 「否」之后又关掉选择框 → 取消, 不拿一个没确认的路径开工
+    assert mg.decide_workspace(False, "", sug) == ("cancel", "")
+
+
+def test_ensure_workspace_leaves_existing_install_alone(monkeypatch):
+    """已经用过的拷贝(PENDING_PICK=False)绝不打扰: 首启对话框只该出现在全新的一份包里。"""
+    monkeypatch.setattr(workspace_cfg, "PENDING_PICK", False)
+    assert mg.ensure_workspace(object()) is True      # root 根本没被碰
+
+
+def test_report_paths_says_workspace_and_notes():
+    class _App:
+        _report_paths = LiushuiApp._report_paths
+        def __init__(self):
+            self.logs = []
+        def _append_log(self, line):
+            self.logs.append(line)
+    app = _App()
+    app._report_paths()
+    assert any("工作空间" in line for line in app.logs)
+    for note in (workspace_cfg.RESOLVE_NOTES + logger_module.LOGGER_NOTES):
+        assert any(note in line for line in app.logs)

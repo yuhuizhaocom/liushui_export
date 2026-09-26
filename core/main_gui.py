@@ -23,12 +23,14 @@ import time
 import tkinter as tk
 from collections import namedtuple
 from datetime import datetime, timedelta
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          SELECTION_FILE, load_settings, save_settings,
                          write_json_atomic)
-from core.loader import discover_platforms, reload_platforms
+from core import config as workspace        # 工作空间: 解析结果/更换入口都从这里走
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
+from core import logger as logger_module    # LOGGER_NOTES: 日志目录退到临时目录时的说明
+from core.loader import discover_platforms, reload_platforms
 from core.outputs import copy_to_summary_dir, sanitize_name
 from core.cleanup import describe as describe_cleanup, run_cleanup
 from core.keepalive import KeepAliveService
@@ -224,6 +226,7 @@ class LiushuiApp:
         self._build_left_panel()
         self._build_middle_panel()
         self._refresh_summary()   # 初始化概览条
+        self._report_paths()      # 工作空间在哪 / 解析与日志目录有没有兜底, 一次说清
         self.root.after(_UI_PUMP_MS, self._pump_ui)   # 须在控件建好后启动
 
         # 登录保活服务: 后台线程周期刷新各商户登录态
@@ -611,6 +614,7 @@ class LiushuiApp:
             ("定时任务", self._open_scheduler_dialog, "#2c3e50", 3, 0),
             ("录制→脚本", self._open_recording_dialog, "#8e44ad", 3, 1),
             ("稳定性看板", self._open_stats_dialog, "#16a085", 4, 0),
+            ("工作空间", self._action_workspace, "#34495e", 4, 1),
         ]
         for t, cmd, col, r, c in others:
             tk.Button(bar, text=t, command=cmd, bg=col, fg="white",
@@ -1088,6 +1092,72 @@ class LiushuiApp:
         path = os.path.abspath(DOWNLOAD_DIR)
         os.makedirs(path, exist_ok=True)
         os.startfile(path)
+
+    def _report_paths(self):
+        """启动时把"东西存哪儿"和两处兜底一次说清。
+
+        工作空间与程序目录分开后, 最常见的疑问变成"我的账单去哪了"; 而书签指向的盘没了、
+        日志目录退到临时目录这两件事若不在界面上说一声, 用户只会以为程序坏了。
+        """
+        self._append_log(workspace.describe_data_root())
+        if os.path.abspath(workspace.DATA_ROOT) != os.path.abspath(workspace.ROOT_DIR):
+            self._append_log(f"程序目录(只读即可): {workspace.ROOT_DIR}")
+        for note in list(workspace.RESOLVE_NOTES) + list(logger_module.LOGGER_NOTES):
+            self._append_log(f"[提示] {note}")
+
+    def _open_workspace_dir(self):
+        try:
+            os.makedirs(workspace.DATA_ROOT, exist_ok=True)
+            os.startfile(workspace.DATA_ROOT)
+        except Exception as e:
+            messagebox.showwarning("打不开", f"打开工作空间文件夹失败: {e}")
+
+    def _change_workspace(self):
+        """换工作空间 = 换以后所有产出写去哪; 因为各模块取的是常量快照, 只能重开一次。"""
+        path = filedialog.askdirectory(title="选择产出工作空间(账单/登录数据放这里)",
+                                       initialdir=workspace.DATA_ROOT)
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if path == os.path.abspath(workspace.DATA_ROOT):
+            messagebox.showinfo("不用换", "选的就是当前正在用的工作空间。")
+            return
+        if not messagebox.askyesno(
+                "确认更换工作空间",
+                f"以后导出会写到:\n\n{path}\n\n"
+                "程序会重启一次。原来工作空间里已经导出的账单不会搬走。"):
+            return
+        ok, msg = workspace.apply_data_root(path)
+        if not ok:
+            messagebox.showwarning("这个目录不能用", f"{msg}\n\n换一个位置再试"
+                                                     "(只读盘、被别的程序占着的目录不行)。")
+            return
+        relaunch_for_workspace(msg)
+
+    def _action_workspace(self):
+        """「工作空间」按钮: 看当前路径 / 打开它 / 换到别的文件夹。"""
+        win = tk.Toplevel(self.root)
+        win.title("工作空间")
+        win.geometry("540x200")
+        win.configure(bg=BG_PANEL)
+        win.transient(self.root)
+        win.grab_set()
+        tk.Label(win, text="账单、各商户登录数据、日志都存放在这里", bg=BG_PANEL,
+                 fg=FG_MAIN, font=("Microsoft YaHei", 11, "bold")).pack(pady=(16, 4))
+        tk.Label(win, text=workspace.DATA_ROOT, bg=BG_PANEL, fg="#2d6cdf",
+                 font=("Microsoft YaHei", 10), wraplength=500, justify="left"
+                 ).pack(pady=(2, 6))
+        if os.path.abspath(workspace.DATA_ROOT) == os.path.abspath(workspace.ROOT_DIR):
+            tk.Label(win, text="(与程序同一个目录 = 就地模式; 想分开就换到别处)", bg=BG_PANEL,
+                     fg=FG_MUTED, font=("Microsoft YaHei", 9)).pack()
+        row = tk.Frame(win, bg=BG_PANEL)
+        row.pack(pady=14)
+        tk.Button(row, text="打开这个文件夹", command=lambda: (self._open_workspace_dir(), win.destroy()),
+                  font=("Microsoft YaHei", 10), relief=tk.FLAT, width=14).pack(side=tk.LEFT, padx=6)
+        tk.Button(row, text="换到别的文件夹…", command=lambda: (win.destroy(), self._change_workspace()),
+                  font=("Microsoft YaHei", 10), relief=tk.FLAT, width=16).pack(side=tk.LEFT, padx=6)
+        tk.Button(row, text="关闭", command=win.destroy,
+                  font=("Microsoft YaHei", 10), relief=tk.FLAT, width=8).pack(side=tk.LEFT, padx=6)
 
     def _action_open_merchant(self, key, merchant):
         """打开指定商户的浏览器窗口(已恢复登录态),供手工测试页面元素,操作完手工关闭即可。"""
@@ -2125,11 +2195,76 @@ def report_crash(summary, detail=""):
     return logged
 
 
+def decide_workspace(use_suggested, picked, suggested):
+    """把用户在首启对话框里的选择折成结论: ("use", 路径) 或 ("cancel", "")。
+
+    「否」之后又没选目录(关掉选择框)按取消处理 —— 半路放弃比用一个没确认的路径好。
+    """
+    if use_suggested:
+        return "use", os.path.abspath(suggested)
+    return ("use", os.path.abspath(picked)) if picked else ("cancel", "")
+
+
+def relaunch_for_workspace(path):
+    """换好工作空间后重开一次进程。
+
+    为什么必须重开而不是就地改: 各模块是 `from .config import DOWNLOAD_DIR` 这种**取值
+    拷贝**, 界面也已经按旧路径扫过商户列表 —— 中途换路径不会传导下去。程序目录只读写不
+    下书签时, 改用环境变量把路径递给下一个进程(否则重启后又回到"待用户选")。
+    """
+    env = dict(os.environ)
+    if not workspace.write_pointer(path):
+        env[workspace.WORKSPACE_ENV] = os.path.abspath(path)
+    try:
+        os.execve(sys.executable, [sys.executable] + list(sys.argv), env)
+    except Exception as e:                      # execve 成功就不返回了
+        messagebox.showerror("需要重开一次",
+                             f"自动重启没成功: {str(e)[:120]}\n\n"
+                             "请关掉工具, 再双击一次启动。")
+    return False
+
+
+def ensure_workspace(root):
+    """全新的一份包(绿色版第一次启动)问一次"账单和登录数据存哪儿"。
+
+    必须在建界面之前跑完: `LiushuiApp.__init__` 会按当前路径扫商户、建日志与浏览器目录。
+    返回 False 表示用户没选定, 不要继续启动(比把账单写进一个没确认的目录再崩掉好)。
+    """
+    if not workspace.PENDING_PICK:
+        return True
+    root.withdraw()
+    suggested = workspace.default_workspace_suggestion()
+    use_default = messagebox.askyesno(
+        "第一步: 选一个存放账单和登录数据的文件夹",
+        "导出的账单、各商户的登录状态、运行日志会统一放在一个「工作空间」目录里。\n\n"
+        f"建议位置:\n{suggested}\n\n"
+        "「是」= 就用这个位置\n「否」= 我自己选一个文件夹")
+    picked = "" if use_default else filedialog.askdirectory(
+        title="选择工作空间文件夹(账单、登录数据放这里)")
+    action, path = decide_workspace(use_default, picked, suggested)
+    if action == "cancel":
+        return False
+    ok, msg = workspace.apply_data_root(path)
+    if not ok:
+        messagebox.showwarning("这个目录不能用", f"{msg}\n\n"
+                                                 "换一个位置再试(不能是只读盘或没有权限的目录)。")
+        return False
+    log(f"工作空间已设为: {msg}")
+    relaunch_for_workspace(msg)
+    return False
+
+
 def main():
     try:
         if not check_dependencies():
             return
         root = tk.Tk()
+        if not ensure_workspace(root):
+            try:
+                root.destroy()
+            except Exception:
+                pass
+            return
         app = LiushuiApp(root)
 
         def _on_close(app, root):

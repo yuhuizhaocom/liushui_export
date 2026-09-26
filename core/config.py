@@ -22,6 +22,9 @@ PROGRAM_DIR = ROOT_DIR          # 同义, 免得读代码时和"工作空间"混
 # ===== 工作空间的几条线索 =====
 WORKSPACE_MARKER = ".liushui_workspace.json"                  # 放工作空间里: 证明这目录是本工具的
 WORKSPACE_POINTER = os.path.join(ROOT_DIR, "workspace.json")  # 放程序目录里: 记住工作空间在哪
+# 程序目录只读时(绿色版放 U 盘/CD/受限目录)书签没处写, 退到用户目录这一份。
+# 这是全仓唯一一处 `expanduser`: 有它才能"包只读、指针另放", 没有它每次启动都要重问一遍。
+POINTER_FALLBACK = os.path.join(os.path.expanduser("~"), ".liushui_export", "workspace.json")
 WORKSPACE_ENV = "LIUSHUI_DATA_DIR"                            # 环境变量指定
 WORKSPACE_ARG = "--data-dir"                                  # 命令行指定: --data-dir=D:\流水数据
 
@@ -67,22 +70,43 @@ def write_marker(root):
         return False
 
 
+def _pointer_files():
+    """书签的候选位置: 程序目录优先, 其次用户目录(程序目录只读时用)。"""
+    return [WORKSPACE_POINTER, POINTER_FALLBACK]
+
+
 def read_pointer():
-    """读程序目录里的书签, 拿上次记下的工作空间; 没有/坏了返回空串。"""
-    try:
-        with open(WORKSPACE_POINTER, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return str(data.get("data_root") or "").strip() if isinstance(data, dict) else ""
-    except Exception:
-        return ""
+    """读书签, 拿上次记下的工作空间; 都没有/坏了返回空串。"""
+    for path in _pointer_files():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            root = str(data.get("data_root") or "").strip() if isinstance(data, dict) else ""
+            if root:
+                return root
+        except Exception:
+            continue
+    return ""
 
 
 def write_pointer(root):
-    try:
-        write_json_atomic(WORKSPACE_POINTER, {"data_root": os.path.abspath(root)})
-        return True
-    except Exception:
-        return False
+    """写书签; 程序目录写不了就写用户目录那份。两处都写不了返回 False。"""
+    for path in _pointer_files():
+        try:
+            write_json_atomic(path, {"data_root": os.path.abspath(root)})
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def default_workspace_suggestion():
+    """给用户当默认值的建议位置: 文档/流水导出工作空间(拿不到文档目录就用用户主目录)。"""
+    home = os.path.expanduser("~")
+    for base in (os.path.join(home, "Documents"), home):
+        if os.path.isdir(base):
+            return os.path.join(base, "流水导出工作空间")
+    return os.path.abspath("流水导出工作空间")
 
 
 def _cli_data_root(argv=None):

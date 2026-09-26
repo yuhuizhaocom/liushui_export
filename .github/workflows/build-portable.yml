@@ -18,7 +18,8 @@ permissions:
 env:
   PYTHON_VERSION: "3.14"        # 与开发机一致; runner 上若没有该版本, 改这里(见 requirements.txt 的 playwright 版本也要跟着核)
   PLAYWRIGHT_VERSION: "1.62.0"  # 与 requirements.txt 保持同步
-  PKG: build/pkg
+  FULL: build/full              # 全量版: 自带解释器 + 依赖 + Chromium, 双击即用
+  CORE: build/core              # 核心版: 只有程序, 用本机 Python, 缺的依赖启动后引导安装
   PKG_NAME: liushui-export-portable-win64
   # runner 是英文区域, stdout 接的是管道 → Python 按 cp1252 建流, 中文一 print 就
   # UnicodeEncodeError(第一次构建就死在 build_portable 的第一行日志上)。脚本自己会兜
@@ -44,40 +45,49 @@ jobs:
           } else { "  (这台机器没有 py 启动器 —— test_launcher_vbs 的相应分支会跳过)" }
           "python: $((Get-Command python).Source)"
 
-      - name: 组装程序目录(白名单复制 core/platforms/tools + 启动器)
-        run: python tools/build_portable.py --out $env:PKG
+      - name: 核版本(代码 / requirements.txt / 工作流 三处必须是同一个 playwright)
+        shell: pwsh
+        run: |
+          python -c "import io,re,sys;from core import deps;req=re.search(r'playwright==([0-9.]+)',io.open('requirements.txt',encoding='utf-8').read()).group(1);ci='$env:PLAYWRIGHT_VERSION';code=deps.REQUIRED_PLAYWRIGHT_VERSION;print('code=',code,' requirements=',req,' ci=',ci);sys.exit(0 if code==req==ci else 1)"
+          if ($LASTEXITCODE -ne 0) { throw "三处版本不一致: 发出去的包会是一个从没实测过的组合(内核目录名带版本, 混版本直接起不来)" }
 
-      - name: 装运行依赖进包
+      - name: 组装两个版本的程序目录(白名单复制 + 各自的启动器与说明)
+        run: |
+          python tools/build_portable.py --out $env:FULL --verify
+          python tools/build_portable.py --out $env:CORE --flavor core --verify
+
+      - name: 装运行依赖进全量包
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --target "$env:PKG\app\site-packages" playwright==${{ env.PLAYWRIGHT_VERSION }}
+          python -m pip install --no-cache-dir --target "$env:FULL\app\site-packages" playwright==${{ env.PLAYWRIGHT_VERSION }}
 
-      - name: 装 Chromium 进包(必须由同版本 playwright 生成)
+      - name: 装 Chromium 进全量包(必须由同版本 playwright 生成)
         shell: pwsh
         env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\build\pkg\app\runtime\ms-playwright
-          PYTHONPATH: ${{ github.workspace }}\build\pkg\app\site-packages
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\build\full\app\runtime\ms-playwright
+          PYTHONPATH: ${{ github.workspace }}\build\full\app\site-packages
         run: python -m playwright install chromium
 
-      - name: 拷解释器进包(含 tkinter 所需的 tcl/tk)
+      - name: 拷解释器进全量包(含 tkinter 所需的 tcl/tk)
         shell: pwsh
         run: |
           $src = $env:pythonLocation
           if (-not (Test-Path "$src\Lib\tkinter")) { throw "解释器目录里没有 tkinter: $src" }
-          Copy-Item -Path $src -Destination "$env:PKG\python" -Recurse -Force
-          & "$env:PKG\python\python.exe" -c "import tkinter, sys; print('bundled python', sys.version.split()[0], 'tkinter', tkinter.TkVersion)"
+          Copy-Item -Path $src -Destination "$env:FULL\python" -Recurse -Force
+          & "$env:FULL\python\python.exe" -c "import tkinter, sys; print('bundled python', sys.version.split()[0], 'tkinter', tkinter.TkVersion)"
 
-      - name: 冒烟测试 —— 用包内解释器, 从包内 site-packages 起一次真浏览器
+      - name: 冒烟测试 —— 用全量包内的解释器, 从包内 site-packages 起一次真浏览器
         shell: pwsh
         run: |
-          $env:PYTHONPATH = "$PWD\$env:PKG\app\site-packages;$PWD\$env:PKG\app"
+          $env:PYTHONPATH = "$PWD\$env:FULL\app\site-packages;$PWD\$env:FULL\app"
           $env:LIUSHUI_DATA_DIR = "$PWD\build\smoke-workspace"
-          Push-Location "$env:PKG\app"
+          Push-Location "$env:FULL\app"
           & "..\python\python.exe" -c @"
-          from core import config
-          from core.browser import BrowserManager, resolve_browsers_path
-          print('workspace:', config.DATA_ROOT)
-          print('browsers :', resolve_browsers_path(env={}))
+          from core import config, deps
+          from core.browser import BrowserManager
+          d = deps.probe()
+          print('deps   :', d.verdict, d.version, d.kernel_dir)
+          assert d.verdict == deps.OK, '包内自检没过, 后面不必再跑'
           b = BrowserManager(headless=True)
           b.start()
           b.navigate('about:blank')
@@ -87,38 +97,61 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "包内冒烟测试失败" }
           Pop-Location
 
+      - name: 核心版冒烟 —— 只跑不依赖 playwright 的那部分(路径与体检)
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$PWD\$env:CORE\app"
+          $env:LIUSHUI_DATA_DIR = "$PWD\build\core-workspace"
+          Push-Location "$env:CORE\app"
+          python -c "from core import config, deps; d = deps.probe(); print('core 版在这台机器上的体检:', d.verdict, d.kernel_dir); assert d.verdict in (deps.NO_PACKAGE, deps.NO_KERNEL, deps.UNKNOWN), d.verdict; print('启动器会引导装的东西:', [deps.show(a) for _t, a in deps.fix_commands(d)])"
+          if ($LASTEXITCODE -ne 0) { throw "核心版自检失败: 体检没能认出'这台机器上没有随包依赖'" }
+          Pop-Location
+
       - name: 离线测试仓库代码(不含 GUI 的部分)
         run: |
           python -m pip install --no-cache-dir pytest
           # 依赖不再下一遍: tests/conftest.py 会把**包内** site-packages 挂进 sys.path
           # (那份本来就要随包发出去, 为跑测试再装一份纯属浪费)。先断言它在, 否则报出来的
           # 是"没有 playwright"这种莫名其妙错(第一次 CI 就是这么红的)。
-          if (-not (Test-Path "$env:PKG\app\site-packages\playwright")) {
-            throw "包内依赖不在: $env:PKG\app\site-packages —— conftest 挂不到东西"
+          if (-not (Test-Path "$env:FULL\app\site-packages\playwright")) {
+            throw "包内依赖不在: $env:FULL\app\site-packages —— conftest 挂不到东西"
           }
           python -m pytest tests -q
 
-      - name: 压缩成品
+      - name: 压缩两个成品
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path "$env:PKG\*" -DestinationPath "dist\$env:PKG_NAME.zip" -Force
-          Get-Item "dist\$env:PKG_NAME.zip" | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+          Compress-Archive -Path "$env:FULL\*" -DestinationPath "dist\$env:PKG_NAME-full.zip" -Force
+          Compress-Archive -Path "$env:CORE\*" -DestinationPath "dist\$env:PKG_NAME-core.zip" -Force
+          Get-ChildItem dist\*.zip | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
 
       - name: 上传 artifact(每次运行都可下载)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PKG_NAME }}
-          path: dist/${{ env.PKG_NAME }}.zip
+          path: |
+            dist/${{ env.PKG_NAME }}-full.zip
+            dist/${{ env.PKG_NAME }}-core.zip
           if-no-files-found: error
 
       - name: 打 tag 时发布 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ env.PKG_NAME }}.zip
+          files: |
+            dist/${{ env.PKG_NAME }}-full.zip
+            dist/${{ env.PKG_NAME }}-core.zip
           body: |
-            绿色版(Windows x64, 免安装)。解压后双击 `run-portable.vbs`;
-            第一次会让你选一个存放账单与登录数据的工作空间目录。
-            双击没反应时改用 `run-portable.bat`, 报错会留在窗口里。
+            两个包, 程序部分完全一样, 区别只在带不带依赖:
+
+            - **`-full`(全量版)** —— 自带 Python + playwright + Chromium, 解压后双击
+              `run-portable.vbs`, 不需要装任何东西、不需要联网下依赖。**发给业务用户就给这个。**
+              第一次启动会让你选一个存放账单与登录数据的工作空间目录。
+              双击没反应时改用 `run-portable.bat`, 报错会留在窗口里。
+            - **`-core`(核心版)** —— 只有程序, 几 MB。这台电脑要有 Python 3.10+, 第一次启动
+              会检查缺什么并引导安装 playwright 与浏览器内核(需要联网, 约 1-3 分钟)。
+              双击 `run-core.vbs`; 排错用 `run-core.bat`, 它会先打印用的是哪个 Python。
+              内网装不上时看包里的 `README-核心版.txt`(可以只拷内核目录 + 设
+              `PLAYWRIGHT_BROWSERS_PATH`, 或者直接改用全量版)。
             ${{ github.event.inputs.note }}

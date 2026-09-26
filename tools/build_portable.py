@@ -204,10 +204,14 @@ def check_flavor(out, flavor):
 
 
 def verify(out):
-    """用成品目录里的解释器(没有就用当前 python)验一遍路径解析。
+    """验一遍成品的路径解析: 工作空间被尊重、派生路径跟着走、包里没有用户配置。
 
     ⚠ 必须把 LIUSHUI_DATA_DIR 指到临时目录再跑: 只 import 一次 `core.logger` 就会在工作
     空间里建出 logs/, 直接按成品默认路径跑会把垃圾写进包里(而且再靠它判"是否新包"就废了)。
+
+    ⚠ 这里**只 import core.config**, 不碰 core.browser: 后者顶层就 import playwright, 那样
+    自检就得等依赖装好才能跑, 核心版更是永远跑不了(它根本没有依赖)。依赖能不能 import、
+    内核起不起得来, 是工作流"冒烟测试"那一步的事 —— 它用包内的解释器起一次真 Chromium。
     """
     py = os.path.join(out, "python", "python.exe")
     py = py if os.path.isfile(py) else sys.executable
@@ -222,14 +226,14 @@ def verify(out):
         "import os, sys;"
         "sys.argv = [sys.argv[0]];"
         "from core import config;"
-        "from core.browser import resolve_browsers_path;"
+        "assert 'playwright' not in sys.modules, '自检不许依赖 playwright(核心版没有它)';"
         "assert os.path.normpath(config.DATA_ROOT) == os.path.normpath(r'%s'), config.DATA_ROOT;"
         "assert config.PENDING_PICK is False, '环境变量指定过了就不该再问用户';"
         "assert os.path.normpath(config.DOWNLOAD_DIR) == os.path.normpath(r'%s'), config.DOWNLOAD_DIR;"
         "assert not any(os.path.exists(os.path.join(config.ROOT_DIR, m)) for m in config.LEGACY_MARKERS), "
         "'成品里不该有 settings.json 等用户配置';"
         "print('DATA_ROOT', config.DATA_ROOT);"
-        "print('BROWSERS', resolve_browsers_path(env={}) or '(未随包, 用系统默认位置)');"
+        "print('BROWSERS', config.resolve_browsers_path(env={}) or '(未随包, 用系统默认位置)');"
     ) % (scratch, os.path.join(scratch, "downloads"))
     r = subprocess.run([py, "-c", code], cwd=out, env=env, capture_output=True,
                        text=True, encoding="utf-8", errors="replace")

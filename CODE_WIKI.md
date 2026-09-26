@@ -138,7 +138,7 @@ liushui_export/
 │   └── build_portable.py    # 170 行 · 绿色包白名单组装 + 成品扫描/自检
 ├── packaging/               # 绿色包的启动器与随包说明（run-portable.vbs / .bat / README）
 ├── .github/workflows/build-portable.yml   # Actions 出包：自带 Python + playwright + Chromium
-├── tests/                   # 37 个文件约 5670 行，402 项 pytest（离线，不碰真浏览器）
+├── tests/                   # 38 个文件约 5900 行，410 项 pytest（离线，不碰真浏览器）
 ├── downloads/               # 运行时创建：账单归档 + 汇总副本 + 待确认/
 ├── browser_data/            # 运行时创建：<平台key>/<商户名>/ 每商户一个 profile
 ├── recordings/              # 「打开」手工测试窗口的点击录制 jsonl（已 gitignore）
@@ -955,7 +955,7 @@ python -m playwright install chromium
 | `packaging/` + `.github/workflows/build-portable.yml` | — | 绿色版启动器（纯 ASCII vbs / 可看错的 bat）与出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台共 987 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 37 个文件约 5670 行 | pytest 测试（402 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单 |
+| `tests/` | 38 个文件约 5900 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（410 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序） |
 | `start.bat` / `启动工具.vbs` | 40 / 158 行 | 启动脚本（vbs 五档找 Python + 首跑装依赖；**必须保持纯 ASCII**，见 13 章） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
@@ -1080,6 +1080,8 @@ python -m playwright install chromium
 - 成品里出现 `browser_data`/`login_state.json`/`downloads`/三个 json/`workspace.json` → `scan_forbidden` 直接失败中止（这些是各人工作空间里的东西，也是明文的后台会话凭证）。
 - `--verify` 用成品内的解释器跑一遍：断言 `LIUSHUI_DATA_DIR` 被尊重、派生路径跟着走、成品里没有用户配置，并打印 `resolve_browsers_path()` 选中的内核目录。⚠ 它把数据目录指到自己的临时目录，否则"只是验一下"就会在成品里留下 `logs/`。
 - 布局与启动器：`packaging/run-portable.vbs`（双击，纯 ASCII、只用包内 `python\pythonw.exe`）、`packaging/run-portable.bat`（同一件事但保留控制台，排错用）、`packaging/README-绿色版.txt`（给业务用户的说明）。
+- **CI 的测试步骤不另装依赖**：playwright 只按 `--target` 装进包里，runner 全局没有它，而 9 个测试模块 import `core.browser`（它顶层就 `from playwright.sync_api import ...`）就需要它 → 第一次 CI 就是红在 collection。`tests/conftest.py` 把仓库根插到 `sys.path` 最前（以前只有"在仓库根 `python -m pytest`"这一种起法能 import core），包内依赖按 `build/*/app/site-packages` **追加到最后**：本机有真依赖就用本机的，不会被包内那份或本地跑过打包留下的半成品抢走；只挂 site-packages，绝不挂 `build/.../app`（那会让测试跑进打进包的代码副本里）。⚠ 改 `PKG` 目录结构要连带看 conftest；工作流里也补了一行"包内没有 playwright 就直接 throw"，别再留一个莫名其妙缺模块的错。
+- **`test_launcher_vbs` 在 CI 机上会跳过其中一条**：runner 的 Python 在 `hostedtoolcache` 里，既不在 `.vbs` 的写死路径、也没注册 py 启动器，"五个档全落空"是脚本的正常行为，不该拿来点红打包构建；另加一步打印 `py --list-paths`，把这台机器到底有什么解释器留在日志里。CI 机没有 `.venv`、也没有用户数据 → 已用"`git archive` 出来的干净树 + 没装 playwright 的干净解释器 + 只有包内一份假依赖"实测：409 passed, 1 skipped。
 - **runner 的 stdout 是 cp1252 管道**：Actions 的 windows runner 是英文区域，Python 按 cp1252 建 `sys.stdout`，第一次构建就死在 `print("组装绿色包 → …")` 上——`UnicodeEncodeError` 的 traceback，而不是打包结论。`build_portable.harden_streams()` 只在**当前编码写不出中文探针**时把流换成 UTF-8（探针 `PROBE = "组装→校验"`，连箭头一起测，只测汉字会放过 `→`）；简中控制台（cp936）写得出来 → 原样不动，免得花屏。流被框架换成没有 `reconfigure` 的对象时退到 `emit()` 的 `\uXXXX` 转义——**宁可丑，不能丢行**；`fail()` 在抛 `SystemExit` 前先调 `harden_streams()`，因为中文的报错信息自己触发编码错误是最坑的失败方式。工作流另设 `PYTHONIOENCODING=utf-8`（pytest 的失败报告也是中文的），但**故意不设 `PYTHONUTF8`**：那会连 `open()` 的默认编码一起改，让 CI 与开发机不一致。业务侧不受影响——`logger.log()` 的 `print` 本来就包在 try 里。
 
 `.github/workflows/build-portable.yml`（`workflow_dispatch` 或打 `v*` tag）：`setup-python` 3.14 → `build_portable` 组装 → `pip install --target app/site-packages playwright==1.62.0` → `PLAYWRIGHT_BROWSERS_PATH` 指包内后 `playwright install chromium`（**内核必须由同版本 playwright 生成**）→ 拷整个解释器目录（先断言 `Lib/tkinter` 在，界面全靠它）→ **包内解释器冒烟**：从包内 `site-packages` import playwright、按包内内核目录起一次真 Chromium 并开一页 → 跑仓库离线测试 → `Compress-Archive` → artifact（tag 时同时发 Release）。体积量级：Chromium 428M（`chromium_headless_shell` 另有 272M，随包只带 `chromium-*` 时需实测 headless 是否仍可用）+ playwright 108M + 解释器与代码 ~100M。

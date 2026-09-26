@@ -30,6 +30,7 @@ from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          SELECTION_FILE, load_settings, save_settings,
                          write_json_atomic)
 from core import config as workspace        # 工作空间: 解析结果/更换入口都从这里走
+from core import submerchants               # 子商户清单与归属比对(银联这类一次登录导多份)
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
 from core import logger as logger_module    # LOGGER_NOTES: 日志目录退到临时目录时的说明
 from core.loader import discover_platforms, reload_platforms
@@ -1972,12 +1973,109 @@ class LiushuiApp:
         self._ui(lambda: messagebox.showinfo(f"{len(items)} 个平台需要您手动导出", text))
 
     def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
-        """单个商户导出(给 run_with_retry 调用): 返回 "success"/"manual"/"failed"。
+        """一个商户这一档的导出; 配了子商户时, 这里是"一次登录切着导 N 份"。
+
+        只有 `supports_sub_merchants=True` 且真的录了清单的商户才会进循环 —— 其余平台
+        走的还是原来那一条路, 一个字都不变。
+        """
+        if getattr(plat, "supports_sub_merchants", False):
+            subs, note = submerchants.get(plat.key, merchant)
+            if note:
+                self._append_log("[提醒] " + note)
+            if subs:
+                return self._run_sub_merchants(plat, merchant, subs, start_date, end_date,
+                                               step_debug)
+        return self._export_one_merchant(plat, merchant, start_date, end_date, step_debug)
+
+    def _run_sub_merchants(self, plat, merchant, subs, start_date, end_date, step_debug):
+        """同一份 profile、同一次登录里按清单逐个切子商户导出, 结论按"最差的算"。
+
+        重试放在**每个子商户自己身上**(`run_with_retry`), 整家重跑没有意义: 成功的几家
+        会再导一遍, 归档里多堆一层 `历史/`, 反而更难看清。因此这一档的汇总结论永远不是
+        "failed" —— 全失败也报 "manual", 免得外层再把整家捞一次。
+        """
+        st = load_settings()
+        # 取值口径与 _execute_export_tasks 完全一致(包括"0 就是 0"): 以前这里写成
+        # `int(x or 30)`, 于是把间隔设成 0 的机器每次重试反而要睡 30 秒。
+        retry_times = int(st.get("retry_times", DEFAULT_SETTINGS.get("retry_times", 2)))
+        retry_interval_s = int(st.get("retry_interval_s",
+                                      DEFAULT_SETTINGS.get("retry_interval_s", 30)))
+        verdicts = []
+        for i, sub in enumerate(subs, 1):
+            if self._aborted():
+                self._append_log(f"[中止] {plat.name}({merchant}) 还剩 {len(subs) - i + 1} 个"
+                                 f"子商户未导出")
+                verdicts.append("manual")
+                break
+            self._append_log(f">>> 子商户 {i}/{len(subs)}: {sub}")
+            if not self._switch_sub_merchant(plat, merchant, sub):
+                # 切换没确认就停整家: 后面几家同样不可信, 而且已经证明这条路径会错
+                verdicts.append("manual")
+                break
+            verdict = run_with_retry(
+                lambda s=sub: self._export_one_merchant(plat, merchant, start_date, end_date,
+                                                        step_debug, sub_merchant=s),
+                retry_times=retry_times,
+                retry_interval_s=retry_interval_s,
+                log=self._append_log)
+            verdicts.append(verdict)
+        if verdicts and all(v == "success" for v in verdicts):
+            return "success"
+        return "manual"
+
+    def _switch_sub_merchant(self, plat, merchant, sub):
+        """切到某个子商户, 并确认页面上"现在是谁"。返回 False = 这一家就此停手转人工。
+
+        这是整套机制里唯一防住"A 的账单记到 B 名下"的地方, 所以三种情况分得很清:
+          1. 切换动作失败 → 停;
+          2. 读回的当前商户和要导的对不上 → 停(顺带截图, 日志里写清页面是谁、要的是谁);
+          3. 平台没实现读回 / 读回为空 → **不停**, 但必须留一句"归属未经校验" —— 读不到
+             不等于读对了, 也不能因为没实现读回就彻底没法用。
+        """
+        browser = self.browser
+        try:
+            if not plat.switch_sub_merchant(browser, sub):
+                self._append_log(f"[中止] {plat.name}({merchant}): 没能切到子商户「{sub}」, "
+                                 f"已停止本次导出 —— 带着没确认过的归属继续点导出, 最坏就是把"
+                                 f"别的商户的账单记到「{sub}」名下。", "warning")
+                return False
+            try:
+                on_page = plat.current_sub_merchant(browser) or ""
+            except Exception as e:
+                self._append_log(f"[提醒] {plat.name}({merchant}): 读回当前子商户出错"
+                                 f"({str(e)[:60]}), 「{sub}」这一轮归属未经校验", "warning")
+                return True
+            if not on_page:
+                self._append_log(f"[提醒] {plat.name}({merchant}): 该平台没有实现「读回当前"
+                                 f"子商户」, 「{sub}」这一轮的归属未经校验", "warning")
+                return True
+            if not submerchants.matches(sub, on_page):
+                self._append_log(f"[中止] {plat.name}({merchant}): 页面上当前子商户是"
+                                 f"「{on_page}」, 不是要导的「{sub}」, 已停止导出(避免把账单"
+                                 f"记错商户)。若反复出现, 需要核对切换与读回的选择器。",
+                                 "warning")
+                try:
+                    browser.snapshot(f"子商户不匹配_{sub}")
+                except Exception:
+                    pass
+                return False
+            self._append_log(f"[子商户] 已切到「{sub}」(页面显示「{on_page}」)")
+            return True
+        except Exception as e:
+            self._append_log(f"[中止] {plat.name}({merchant}): 切换子商户「{sub}」时出错"
+                             f"({str(e)[:80]}), 这一家转人工", "warning")
+            return False
+
+    def _export_one_merchant(self, plat, merchant, start_date, end_date, step_debug=False,
+                             sub_merchant=""):
+        """跑一次导出(浏览器就绪、上下文已设好): 返回 "success"/"manual"/"failed"。
 
         本函数不允许向外抛异常: run_with_retry 只对返回值 "failed" 重试, 抛出会被
         调用方的 except 折成"一次失败", 既不计入 stats 也跳过全部重试 —— 而"浏览器
         起不来"恰是最值得重试的那种失败。
         """
+        who = f"{merchant}/{sub_merchant}" if sub_merchant else merchant
+        tag = f"({sub_merchant})" if sub_merchant else ""
         date_str = f"{start_date} 至 {end_date}"
         self._append_log(f"日期范围: {date_str}")
         result = "failed"
@@ -1986,10 +2084,11 @@ class LiushuiApp:
         try:
             # 每个商户使用独立浏览器 profile(登录态隔离);下载目录含商户层
             self._ensure_browser(plat, merchant)
-            self.browser.set_export_context(plat.name, start_date, end_date, merchant)
+            self.browser.set_export_context(plat.name, start_date, end_date, merchant,
+                                            sub_merchant)
             # 注入"等待用户手动操作"回调(如微信扫码确认),生产环境始终启用。
             # 后台线程调用 browser.wait_user() 时,切到 UI 线程弹窗提醒并阻塞等待用户完成。
-            def _user_wait_cb(prompt, n=plat.name, m=merchant):
+            def _user_wait_cb(prompt, n=plat.name, m=who):
                 evt = threading.Event()
                 def _ask():
                     try:
@@ -2004,7 +2103,7 @@ class LiushuiApp:
             self.browser.set_user_wait_callback(_user_wait_cb)
             # 单步调试模式: 注入回调,平台脚本调用 step_pause() 时弹"继续/中止"
             if step_debug:
-                def _step_cb(name, n=plat.name, m=merchant):
+                def _step_cb(name, n=plat.name, m=who):
                     # 通过主线程弹窗,后台线程阻塞等待用户选择
                     evt = threading.Event()
                     choice = {"v": True}
@@ -2033,7 +2132,7 @@ class LiushuiApp:
                 self._append_log(f"[预检] {plat.name} 登录状态检查异常,继续尝试导出: {str(e)[:80]}")
             if not login_ok:
                 self._append_log(
-                    f"[预检] {plat.name}({merchant}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
+                    f"[预检] {plat.name}({who}) 登录已失效,请重新完成首次登录(扫码/账号)后再导出")
                 result = "manual"
                 err_msg = "登录已失效(导出前预检)"
             else:
@@ -2051,16 +2150,17 @@ class LiushuiApp:
                     self.browser.set_user_wait_callback(None)
                 except Exception:
                     pass
-        # 落稳定性统计(每次导出一条 JSON,供看板汇总)
+        # 落稳定性统计(每次导出一条 JSON,供看板汇总)。子商户那一档记成 "主/子",
+        # 一家一次 —— 看板上要能看出是"哪个子商户没成功", 而不是整家糊在一起。
         duration = time.time() - t0
-        record_stat(plat.name, merchant, start_date, end_date, result,
+        record_stat(plat.name, who, start_date, end_date, result,
                     duration_s=duration, error=err_msg)
         if result == "success":
-            self._append_log(f"[完成] {plat.name} 流水导出成功({duration:.1f}s)")
+            self._append_log(f"[完成] {plat.name} 流水导出成功({duration:.1f}s)" + tag)
         elif result == "manual":
-            self._append_log(f"[提示] {plat.name} 需要手动完成导出")
+            self._append_log(f"[提示] {plat.name} 需要手动完成导出" + tag)
         else:
-            self._append_log(f"[失败] {plat.name} 导出失败")
+            self._append_log(f"[失败] {plat.name} 导出失败" + tag)
         return result
 
     def _self_check_selectors(self, plat):

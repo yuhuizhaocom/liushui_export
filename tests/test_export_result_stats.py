@@ -70,8 +70,10 @@ def _run(monkeypatch, plat, step_debug=False):
     recs = []
     monkeypatch.setattr(mg, "record_stat", lambda *a, **k: recs.append((a, k)))
     app = _FakeApp()
-    result = LiushuiApp._run_single_export(app, plat, "旗舰店A", "2026-09-01",
-                                           "2026-09-02", step_debug=step_debug)
+    # 这里测的是"一次导出"那一段; `_run_single_export` 现在只是它的分发器
+    # (配了子商户才循环), 分发本身另有 tests/test_sub_merchant_flow.py 覆盖。
+    result = LiushuiApp._export_one_merchant(app, plat, "旗舰店A", "2026-09-01",
+                                             "2026-09-02", step_debug=step_debug)
     return result, recs, app
 
 
@@ -145,8 +147,8 @@ def test_browser_startup_failure_returns_failed_and_records(monkeypatch):
     app = _NoBrowser()
     app.browser = None                       # 浏览器根本没起来, 收尾不得再碰它
     plat = _FakePlat()
-    result = LiushuiApp._run_single_export(app, plat, "旗舰店A",
-                                           "2026-09-01", "2026-09-02")
+    result = LiushuiApp._export_one_merchant(app, plat, "旗舰店A",
+                                             "2026-09-01", "2026-09-02")
     assert result == "failed"
     assert plat.export_called == 0
     assert recs[0][0][4] == "failed"
@@ -169,8 +171,8 @@ def test_startup_failure_goes_through_retry(monkeypatch):
     monkeypatch.setattr(mg, "record_stat", lambda *a, **k: None)
     app, plat = _Flaky(), _FakePlat()
     result = mg.run_with_retry(
-        lambda: LiushuiApp._run_single_export(app, plat, "旗舰店A",
-                                              "2026-09-01", "2026-09-02"),
+        lambda: LiushuiApp._export_one_merchant(app, plat, "旗舰店A",
+                                                "2026-09-01", "2026-09-02"),
         retry_times=2, retry_interval_s=0, log=lambda m: None)
     assert result == "success"
     assert app.attempts == 3

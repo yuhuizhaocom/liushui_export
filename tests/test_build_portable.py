@@ -65,11 +65,27 @@ def test_scan_catches_user_data_and_credentials(out, tmp_path):
         f.write("{}")
     with open(os.path.join(app, "settings.json"), "w", encoding="utf-8") as f:
         f.write("{}")
+    with open(os.path.join(app, "sub_merchants.json"), "w", encoding="utf-8") as f:
+        f.write("{}")
     hits = bp.scan_forbidden(out)
     joined = " ".join(hits)
     assert "login_state.json" in joined and "browser_data" in joined and "settings.json" in joined
+    assert "sub_merchants.json" in joined, "子商户清单是业务档案, 一样不许随包发出去"
     # 只报告不动文件: 删谁、留谁是打包脚本外面决定的
     assert os.path.isfile(os.path.join(app, "settings.json"))
+
+
+def test_every_workspace_config_file_is_forbidden():
+    """工作空间里那几个"用户配置"文件名必须逐个出现在 FORBIDDEN 里。
+
+    以后再加一份 json 而忘了加进 FORBIDDEN, 就会有一份"带着上一家配置发出去"的包 ——
+    这条测试把这件事变成当场就红, 而不是靠人记得。
+    """
+    import core.config as cfg
+    for attr in ("SETTINGS_FILE", "SCHEDULED_TASKS_FILE", "SELECTION_FILE",
+                 "SUB_MERCHANTS_FILE"):
+        name = os.path.basename(getattr(cfg, attr))
+        assert name in bp.FORBIDDEN, "%s 没进 FORBIDDEN" % name
 
 
 def test_clean_package_passes_the_scan(out):

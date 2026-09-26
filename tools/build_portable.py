@@ -108,6 +108,7 @@ PRUNE_NAMES = {"__pycache__", ".pytest_cache", ".venv", ".git", ".idea", "dist",
 # 成品里出现这些就是打包事故(用户数据/凭证外泄或互相覆盖)
 FORBIDDEN = ("browser_data", "login_state.json", "downloads", "recordings",
              "settings.json", "selection_state.json", "scheduled_tasks.json",
+             "sub_merchants.json",
              "workspace.json", ".liushui_workspace.json", "stats.jsonl")
 
 

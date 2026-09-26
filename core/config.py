@@ -161,6 +161,7 @@ def _derive(root):
         "SETTINGS_FILE": os.path.join(root, "settings.json"),
         "SCHEDULED_TASKS_FILE": os.path.join(root, "scheduled_tasks.json"),
         "SELECTION_FILE": os.path.join(root, "selection_state.json"),
+        "SUB_MERCHANTS_FILE": os.path.join(root, "sub_merchants.json"),
     }
 
 
@@ -240,6 +241,7 @@ RECORDINGS_DIR = os.path.join(DATA_ROOT, "recordings")            # 「打开」
 SETTINGS_FILE = os.path.join(DATA_ROOT, "settings.json")          # 用户设置
 SCHEDULED_TASKS_FILE = os.path.join(DATA_ROOT, "scheduled_tasks.json")   # 定时任务
 SELECTION_FILE = os.path.join(DATA_ROOT, "selection_state.json")  # 平台/商户勾选状态
+SUB_MERCHANTS_FILE = os.path.join(DATA_ROOT, "sub_merchants.json")  # 主账号下的子商户清单(见 core/submerchants.py)
 
 DEFAULT_SETTINGS = {
     "show_browser": True,        # 是否显示浏览器窗口(取消勾选=后台运行)

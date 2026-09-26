@@ -288,7 +288,7 @@ liushui_export/
 
 | 函数 | 说明 |
 | --- | --- |
-| `discover_merchants(platform_keys)` | 扫 `browser_data/<key>/` 子目录（跳过 `.` 开头），返回 `{key: [商户名]}`；整段吞异常 → 目录不存在就是空。**只有非空列表才入结果**，所以"没商户的平台"在 `self.merchants` 里没有键。 |
+| `discover_merchants(platform_keys, ignored=None)` | 扫 `browser_data/<key>/` 子目录，返回 `{key: [商户名]}`；整段吞异常 → 目录不存在就是空。**只有非空列表才入结果**，所以"没商户的平台"在 `self.merchants` 里没有键。⚠ 两类不算商户：程序保留名（`_平台调试`/`_未指定平台`）、Chromium 的内部目录（以前商户为空时 profile 落在平台目录本身，内部目录就被当成商户列进左栏并自动勾选，见 13.1）。内部目录**按内容认**（商户 profile 根里必有 `Default/` 或 `login_state.json`），名字名单只为兜住 `Safe Browsing` 这种空的内部目录。**整套判据的先决条件是「这个平台目录本身当过 profile 根」**（顶层有 `Local State`/`Last Version`）：商户目录允许用户手工拷进来搬登录态，干净的平台目录一律回到「每个子目录=一家商户」，免得拷了一半、或版本不同没有 `Default/` 的目录被静默吞掉；`ignored` 传 list 时被剔掉的名字会塞进去供调用方写日志——**剔除可以，静默剔除不行**。 |
 | `find_duplicate_merchant(name, existing)` | 按 Windows 目录规矩（strip + casefold）判同一家，命中返回**已存在的那个旧名字**；注释理由："`Shop` 与 `shop` 建出来是同一个 profile 目录"。 |
 | `merchant_changes(before, after)` | 两次扫目录的 `(新增, 消失)`，顺序变化不算改动。 |
 | `merchant_profile_dir(base, key, merchant)` | 借用 `BrowserManager._safe_name` 同一套算法算 normpath，使建档/删除/运行期三处不会漂移（测试钉住一致性）。 |
@@ -322,7 +322,7 @@ liushui_export/
 | --- | --- |
 | `headless` / `log_callback` | 由 GUI 按 `show_browser` 设置传入；日志出口注入点（保活传 None，此时只落文件+控制台） |
 | `playwright` / `context` / `page` | 三层活句柄，`start()` 赋值；失败路径清空，`close()` **不置 None** |
-| `_profile_dir` | 当前浏览器数据目录；**忘记调 `set_browser_profile` 时所有平台共用一份登录态** |
+| `_profile_dir` | 当前浏览器数据目录。没调 `set_browser_profile` 时是 `browser_data/_未指定平台`（**不再是 `browser_data` 根**，见 12 章第 41 条）；`set_browser_profile(key, "")`（脚本调试那条路）是 `browser_data/<key>/_平台调试` —— 都不许落在「商户目录的父目录」这一层 |
 | `_export_platform` / `_export_merchant` / `_export_start` / `_export_end` / `_export_task_id` / `_export_sub_merchant` | 本次导出上下文；`task_id = 起_止`（缺一则为空 → 归档退化少一层）。`_export_sub_merchant` **只进文件名**（多一档 `商户_子商户`），不参与目录分层 |
 | `_dl_queue` / `_dl_capture_on` / `_dl_capture_t0` / `_dl_temp_dir` | 下载捕获状态机：事件队列、开关、捕获起点（兜底扫根目录判"新文件"的唯一依据）、本次临时目录 |
 | `_step_debug` / `_step_callback` / `_user_wait_callback` | 单步调试与"等用户操作"的回调注入点 |
@@ -1043,6 +1043,7 @@ python -m playwright install chromium
 37. **"是不是账单"只许看文件头，不许拿全文文案判生死**。HTML 那道门必须排在"数数据行"**之前**（登录页存成 `.csv` 时按逗号数得出行），而它只比对跳掉 BOM/空白后的开头若干字节；`_match_error_keyword` 只在"读不出数据行"时用，且两侧都小写。反过来把这两条合起来写成一个"全文找关键字"的判断，就会退回到"备注里一句'请登录'把真账单删掉"的老事故（第 7 条）。
 38. **登录判定的等待只许往宽、不许往严**：`check_login` 现在按 `LOGIN_POLL_STEP/MAX/STABLE` 采样看 URL，落地即返回。要调参数就调 `LOGIN_POLL_STABLE`（越大越接近旧的 3 秒死等），但**不许改回 `wait_for(timeout=3)` 这种不传条件的写法** —— 它必然耗满预算还会打一条假的"等待超时"WARN。判成"未登录"会把本该到手的账单挡掉（第 28 条同一条红线），判成"已登录"最多白跑一次，所以拿不准时取后者，`tests/test_check_login_wait.py::test_stability_window_is_a_documented_trade_off` 就是钉这个方向的。
 39. **状态灯宁可漏报也别误报**。保活巡检现在只看 URL 里有没有 `login`，页面标题带"登录"字样只写日志不置红 —— 灯一旦因为误报失去可信度，用户就不再信它了。同理 `deps.probe()` 自身出错折成 `unknown` 放行（第 28 条）。
+41. **`browser_data/<平台key>/` 这一层只放商户目录**。往这一层启动一个 Chromium（= 商户为空时的旧行为）就等于让浏览器把 `Default`/`Crashpad`/`Safe Browsing` 写进「商户名单」—— 它们会被列成商户、被自动勾上、每次批量任务各起一次浏览器。三条一起才成立：① 没有商户时用保留目录 `_平台调试`/`_未指定平台`，默认 `_profile_dir` 也不是 `browser_data` 根；② 商户发现剔内部目录**必须先确认这个平台目录自己当过 profile 根**（顶层有 `Local State`/`Last Version`），否则用户手工拷进来搬登录态的目录会被静默吞掉——那比"多出几个假商户"更糟；③ 剔了谁要写日志说出口，两个保留名不许拿来建商户。
 40. **cron 缺失/非法 = 这个任务不跑，并且要说一次**。`from_dict` 不许再给空 cron 兜 `* * * * *`（那是每分钟起一次浏览器）；`CronScheduler._warn_once` 按任务只提醒一次、整段包在 `try` 里，提示本身绝不能把调度线程带下去。用户显式写 `* * * * *` 是他的选择，照旧生效。⚠ 这个"只说一次"**不许按 `job_id` 记**：json 里没写 `id` 的条目，`from_dict` 每次 load 都新生成一个随机 id，而 `check_all` 每轮都 load —— 按 id 记等于每 30 秒刷一遍同一句（现在按「名字 + cron + 毛病」记）。
 
 ***
@@ -1065,6 +1066,7 @@ python -m playwright install chromium
 | `core/platform_base.py` `check_login` | `browser.wait_for(timeout=3)` 不传条件 → 已登录/未登录两个分支都必然等满 3.00s（实测），收尾还固定打一条"等待超时"WARN；预检 + inline 预检每家两遍，10 家商户 60 秒白等 + 20 行假警告 | 改成 `LOGIN_POLL_STEP/MAX/STABLE` 采样、落地即返回，不再借道 `wait_for`；`e8a1241` |
 | `core/keepalive.py` `run_once` | `"login" in url or "登录" in title` —— 正是 `check_login` 注释点名抛弃的旧判法，后台已登录而页面名仍带"登录"字样时把状态灯判红，于是"灯红着、导出却一切正常" | 判失效只看 URL，标题命中只写一行"只当提示不判失效"；`18d9b2f` |
 | `core/scheduler.py` `CronJob.from_dict` | 缺 cron 的条目兜 `* * * * *` = **每分钟起一次浏览器导账单**，而界面新建/编辑都有校验、只有手改 `scheduled_tasks.json` 漏写这个键的人会把整台机器点着 | 空 cron 原样留着（`CronExpr` 解析不过 → 该任务不跑），调度线程按任务写一句"不会被执行"且只说一次；`ea5b7a1`。第一次提交的记号用 `job_id`，而 `from_dict` 对没写 id 的条目**每轮 load 都新生成一个随机 id** → 变成每 30 秒刷屏，改按"名字+cron+毛病"记；`5529689` |
+| `core/browser.py` `set_browser_profile` + `core/main_gui.py` `discover_merchants` | 商户为空时 profile 目录就是 `browser_data/<平台key>/` 本身（脚本调试那条路 `_ensure_browser(plat)` 不传商户），Chromium 直接往这一层写下 `Default`、`Crashpad`、`Safe Browsing` 等内部目录，而商户发现的规矩是「这一层每个子目录=一家商户」→ 内部目录被列成商户并自动勾选。本机实测 `discover_merchants(["youzan"])` 返回 10 项、只有 `test` 是真的，`selection_state.json` 里那 9 项全是 `true`：「检查登录状态」与批量导出会为它们各起一次浏览器，商户数徽标与定时任务「对象」项数一起骗人 | 空商户时垫一层保留目录 `_平台调试`（连平台都没有时是 `browser_data/_未指定平台`），有商户时路径逐字不变、存量登录态不搬家；商户发现按「先内容后名字」认内部目录，且**只在这个平台目录本身当过 profile 根时**才启用；启动与「刷新商户」各写一行「已忽略 N 个浏览器自己的目录」；两个保留名不许拿来建商户；磁盘上的旧残留一律不动。`d798c46` + `55e99f3` |
 | `core/main_gui.py` `_action_help` | 弹窗仍教"在浏览器完成登录并点『确定』"，而第九轮起登完的标志是**关掉浏览器窗口** —— 用户照旧文案在没登完时点掉窗口，正是那次改造要治的病 | 文案跟回现流程并补上预检/「中止」，加 `tests/test_action_help_text.py` 钉住；`a62a7ed` |
 
 > 同批还修了序列快照 harness 的一处失真：`tests/test_platform_sequences.py` 的 `Recorder.page` 以前返回记录函数，平台脚本里 `browser.page.locator(...)` 取属性直接 AttributeError、被脚本自己的 try 吞掉，于是录出来的是"页面操作整段失败"那一支（微信支付停在 `assert_selector` 结果 `failed`、视频号停在 `_set_time`）。给 `page` 一个可链式哑对象后两家录到完整流程（16→18、11→29 次调用，结果 `failed`→`success`），两条快照按新口径重录。
@@ -1094,11 +1096,10 @@ python -m playwright install chromium
 - 2026-09-26 已把这几处对齐并加了测试：`_action_help()` 的"登录并点『确定』"改成"关掉浏览器窗口就代表登完"（并补上登录预检与「中止」的说明，`tests/test_action_help_text.py` 钉住文案）；`browser.py` 里 `_finalize_download` 的 `his/` 改成实际的 `历史/`，四处目录注释补上漏掉的商户/子商户层；"归档时扩展名已被改成 .xlsx"那句注释删掉（第十四轮起扩展名原样保留）；快手/小红书 docstring 标清"方式B 未实现，记着备用"；支付宝把写死的"仅支持 2025-08-24 及以后"改成"后台可查区间是滚动的，别把某个日期当固定下限"。
 - `使用说明.md` 第 4 节列出的"11 个平台均已内置"是对的；本文档以前写"仅实现有赞"的部分已在本版全面更正（见 1、2、3、8 章）。
 
-### 13.5 本轮新发现，**还没动手**（要先跟用户确认）
+### 13.5 已查到、**还没动手**（等用户点头）
 
 | 位置 | 现象 | 为什么算问题 |
 | --- | --- | --- |
-| `core/browser.py` `set_browser_profile` + `core/main_gui.py` `discover_merchants` | 商户为空时 profile 目录就是 `browser_data/<平台key>/` 本身，Chromium 直接往这一层写下自己的内部目录（`Default`、`Crashpad`、`GPUPersistentCache`、`GrShaderCache`、`Safe Browsing`、`ShaderCache`、`component_crx_cache`、`extensions_crx_cache`、`segmentation_platform`…），而 `discover_merchants` 的规则是"`browser_data/<key>/` 下每个子目录就是一个商户" → 这些内部目录被当成商户列进左栏，还会被自动勾上。本机实测：`discover_merchants(["youzan"])` 返回 10 项，其中只有 `test` 是真的；`selection_state.json` 里这 9 项全是 `true`。 | 一个平台里凭空多出 9 个"商户"：「检查登录状态」与批量导出会为它们各起一次浏览器（白等 + 红灯 + 进统计），商户数徽标与「对象」列的项数也一起骗人；「删」按钮还可能让人误删 Chromium 的内部目录。触发路径不止一处：`_ensure_browser(plat)`（脚本调试，`core/main_gui.py:1322`）不传商户，`BrowserManager` 的默认 `_profile_dir` 就是 `browser_data` 根。 |
 | `core/main_gui.py` `_show_login_hint` | 首次登录提示窗写的是「平台 · 商户」，没有「第 i/N 家」，也没有这个商户对应哪个登录账号；Chromium 窗口标题跟着网页走，任务栏里看不出在登谁。 | 一个平台勾了 3 个商户时，同一个提示窗会连着弹 3 次、内容只有商户名不同，用户很难确认自己现在登的是第几家、刚才关的是不是同一个账号 —— 结果常是"三家都登成同一个账号"，而三家用的是各自独立的 profile，另外两家其实是空的。 |
 
 ***

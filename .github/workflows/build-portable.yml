@@ -20,6 +20,11 @@ env:
   PLAYWRIGHT_VERSION: "1.62.0"  # 与 requirements.txt 保持同步
   PKG: build/pkg
   PKG_NAME: liushui-export-portable-win64
+  # runner 是英文区域, stdout 接的是管道 → Python 按 cp1252 建流, 中文一 print 就
+  # UnicodeEncodeError(第一次构建就死在 build_portable 的第一行日志上)。脚本自己会兜
+  # (harden_streams), 这里再兜一层: pytest 失败报告的断言文案也是中文的。
+  # 只设 PYTHONIOENCODING 不设 PYTHONUTF8 —— 后者连 open() 的默认编码一起改, 会和开发机不一致。
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   build:

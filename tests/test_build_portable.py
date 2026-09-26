@@ -2,14 +2,23 @@
 
 CI 只是把这两个函数当检查用, 所以它们本身要有测试 —— 万一以后有人往 APP_ITEMS 里加了
 `docs`/仓库根整目录, 泄漏的就是本机所有商户的登录凭证。
+
+另一组测试盯的是输出编码: Actions 的 runner 是英文区域(cp1252), 中文日志一度把整个构建
+打死在 `print("组装绿色包 → …")` 上, 报的是 UnicodeEncodeError 而不是打包失败。
 """
+import codecs
+import io
 import os
+import subprocess
 import sys
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 import build_portable as bp     # noqa: E402
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(REPO, "tools", "build_portable.py")
 
 
 @pytest.fixture()
@@ -64,3 +73,82 @@ def test_scan_catches_user_data_and_credentials(out, tmp_path):
 def test_clean_package_passes_the_scan(out):
     bp.build(out)
     assert bp.scan_forbidden(out) == []
+
+
+# --------------------------------------------------------------------------- 输出编码
+
+class _NoReconfigure:
+    """只吃得下 ASCII、又没有 reconfigure 的流 —— 模拟 stdout 被框架换掉的情形。"""
+
+    encoding = "cp1252"
+
+    def __init__(self):
+        self.chunks = []
+
+    def write(self, text):
+        self.chunks.append(codecs.encode(text, self.encoding))   # 中文在这里抛
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def value(self):
+        return b"".join(self.chunks).decode(self.encoding, "replace")
+
+
+def _stream(enc):
+    return io.TextIOWrapper(io.BytesIO(), encoding=enc, errors="strict")
+
+
+def test_encoding_probe_only_accepts_codepages_with_chinese():
+    assert bp.encoding_ok("utf-8") and bp.encoding_ok("UTF8") and bp.encoding_ok("cp936")
+    assert not bp.encoding_ok("cp1252")          # Actions runner 就是这一个
+    assert not bp.encoding_ok("ascii")
+    assert not bp.encoding_ok("") and not bp.encoding_ok(None)
+    assert not bp.encoding_ok("no-such-codec")   # 未知编码名不能当成"能写"
+
+
+def test_harden_switches_only_the_stream_that_cannot_write(monkeypatch):
+    bad = _stream("cp1252")                        # Actions runner 的那一档
+    monkeypatch.setattr(sys, "stdout", bad)
+    assert bp.harden_streams() == ["stdout"]
+    bp.emit("组装绿色包 → 校验")                    # 修复前这一句就是构建失败的原因
+    bad.flush()
+    bad.buffer.seek(0)
+    assert "组装绿色包" in bad.buffer.read().decode("utf-8")   # 换完才写得进管道
+
+    good = _stream("utf-8")                        # 写得出来的就不动
+    monkeypatch.setattr(sys, "stdout", good)
+    assert bp.harden_streams() == [] and good.encoding == "utf-8"
+
+
+def test_harden_leaves_console_encoding_alone(monkeypatch):
+    """简体中文控制台(cp936)本来打得开中文, 强转 UTF-8 会花屏 —— 不许动。"""
+    zh = _stream("cp936")
+    monkeypatch.setattr(sys, "stdout", zh)
+    assert bp.harden_streams() == []
+    bp.emit("组装绿色包 → 校验")
+    zh.flush()
+    zh.buffer.seek(0)
+    assert "组装" in zh.buffer.read().decode("cp936")
+
+
+def test_emit_falls_back_instead_of_losing_the_line(monkeypatch):
+    """换不动流的时候宁可输出 \\uXXXX 转义, 也不能把这一行整个丢掉。"""
+    odd = _NoReconfigure()
+    monkeypatch.setattr(sys, "stdout", odd)
+    assert bp.harden_streams() == []              # 没有 reconfigure, 兜不住
+    bp.emit("成品含用户数据/登录凭证, 中止")        # 不许抛
+    assert "\\u6210\\u54c1" in odd.value()          # 转义出去, 行还在
+
+
+def test_whole_build_runs_under_cp1252(tmp_path):
+    """真跑一遍 CI 第一步: 英文区域 + 管道, 修复前退出码是 1(traceback 而不是打包结论)。"""
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+    r = subprocess.run([sys.executable, SCRIPT, "--out", str(tmp_path / "pkg")],
+                       cwd=REPO, env=env, capture_output=True)
+    report = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
+    assert r.returncode == 0, report
+    assert "UnicodeEncodeError" not in report
+    assert "组装绿色包" in report and "白名单检查通过" in report
+    assert os.path.isfile(os.path.join(str(tmp_path / "pkg"), "run-portable.vbs"))

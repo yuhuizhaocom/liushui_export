@@ -25,7 +25,7 @@
             browser.click_text("查询")
             browser.sleep(2)
             browser.click_text("导出")
-            path = browser.wait_download(timeout=120)
+            path = browser.wait_download()          # 不写 timeout 就用默认(120 秒)
             return "success" if path else "manual"
 """
 
@@ -203,7 +203,10 @@ class PlatformBase:
     # 差异只有中间点哪些按钮、下载等多久。收在这里后平台只需覆盖有差异的钩子,
     # 收尾的 begin_wait_download/wait_download 配对与超时也不会再各写一份。
     PAGE_SETTLE_S = 3          # 打开页面后的等待秒数
-    DOWNLOAD_TIMEOUT_S = 60    # 等待下载完成的秒数
+    DOWNLOAD_TIMEOUT_S = 60    # 骨架等下载完成的秒数。**刻意比默认的 120 短**
+                               # (BrowserManager.DEFAULT_DOWNLOAD_WAIT_S): 骨架服务的
+                               # 是那类"点了就给文件"的后台。60 够不够没有真实后台量过,
+                               # 挂在 CODE_WIKI 13.5; 调就调这一个数, 别去改默认值。
     DOWNLOAD_LABEL = "下载"     # 收尾要点的按钮文字(有的平台就是"导出"/"下载全部")
     DOWNLOAD_SETTLE_S = 3      # 点完那个按钮后给它的落地时间
     DATE_VALUE_SLICE = 10      # 填进日期框的字符串长度(天猫"月汇总"只要 2026-09)

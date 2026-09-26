@@ -147,9 +147,11 @@ class SmartExporter:
         except Exception:
             pass
 
-    def export(self, start_date, end_date, timeout=120):
-        """
-        执行智能导出流程
+    def export(self, start_date, end_date, timeout=None):
+        """执行智能导出流程。
+
+        `timeout=None` = 用浏览器那一侧的默认等待(`BrowserManager.DEFAULT_DOWNLOAD_WAIT_S`,
+        全仓只有那一处定义)。
         返回: "success"(自动完成) / "manual"(需手动) / "failed"(失败)
         """
         self._setup_dialog_handler()
@@ -204,7 +206,7 @@ class SmartExporter:
         self.browser.screenshot(f"manual_{int(time.time())}")
         return "manual"
 
-    def quick_export(self, start_date, end_date, timeout=120):
+    def quick_export(self, start_date, end_date, timeout=None):
         """
         快速导出: 只尝试点击导出按钮(用于已设置好默认日期的页面)
         """

@@ -445,13 +445,20 @@ class BrowserManager:
             self._log(f"保存下载失败: {str(e)[:80]}", "warning")
         return None
 
-    def wait_download(self, timeout=120):
-        """等待下载完成,返回最终文件路径(失败返回None)
+    # 等平台把文件写完的默认等待秒数 —— **全仓只有这一处定义它**。
+    # 骨架平台另有更短的 `PlatformBase.DOWNLOAD_TIMEOUT_S`, 那是刻意的差异(见 13.5);
+    # 除此以外不许再出现写死的 120(有一条测试扫源码钉着)。
+    DEFAULT_DOWNLOAD_WAIT_S = 120
+
+    def wait_download(self, timeout=None):
+        """等待下载完成,返回最终文件路径(失败返回None)。不传 timeout 用默认 120 秒。
         1) 优先消费浏览器下载事件队列: 把 Chromium 已落盘的文件**移动**到本次任务的
            临时目录(save_as 只是它拿不到 path 时的第二选择), 再交给 _accept_download 归档
         2) 兜底: 监控 downloads 根目录,检测新出现的稳定文件(兼容未触发download事件的场景)
         两条路都只归档一次(在 _accept_download 里)。
         """
+        if timeout is None:
+            timeout = self.DEFAULT_DOWNLOAD_WAIT_S
         root = os.path.abspath(DOWNLOAD_DIR)
         # 开启捕获模式(如果还没开,从此刻起记录新触发的事件)
         if not self._dl_capture_on:

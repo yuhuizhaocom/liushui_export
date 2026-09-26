@@ -28,9 +28,12 @@ POINTER_FALLBACK = os.path.join(os.path.expanduser("~"), ".liushui_export", "wor
 WORKSPACE_ENV = "LIUSHUI_DATA_DIR"                            # 环境变量指定
 WORKSPACE_ARG = "--data-dir"                                  # 命令行指定: --data-dir=D:\流水数据
 
-# 就地模式的痕迹: 只要有一个在, 就说明这份拷贝用过了, 别再拦着用户选目录
-LEGACY_MARKERS = ("settings.json", "selection_state.json", "scheduled_tasks.json",
-                  "downloads", "browser_data", "logs")
+# 就地模式的痕迹: 有这些说明这份拷贝真被用过了(存过设置/勾过商户/建过定时任务),
+# 别再拦着用户选目录。⚠ 不能拿 downloads/browser_data/logs 当痕迹 —— 日志目录是 import
+# logger 时建的、downloads 与 browser_data 是 BrowserManager 构造时建的, 只要跑过一次
+# (哪怕只是自检)就会出现, 拿它们当痕迹会让"全新的一份包"永远不问用户, 于是账单和登录
+# 态悄悄写回只读的程序目录里。
+LEGACY_MARKERS = ("settings.json", "selection_state.json", "scheduled_tasks.json")
 
 # 解析中咽下的话(指针指向的目录没了/不可写...), 由界面在启动日志里交代
 RESOLVE_NOTES = []

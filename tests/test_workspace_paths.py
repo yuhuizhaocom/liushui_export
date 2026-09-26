@@ -58,12 +58,19 @@ def test_fresh_package_asks_the_user(fake_pkg):
 
 
 def test_a_package_already_in_use_is_left_alone(fake_pkg):
-    """就地模式的痕迹: 老拷贝里有 settings.json/账单目录就别再拦人。"""
+    """只有"用户真动过"的痕迹才算用过: 存过设置/勾过商户/建过定时任务。"""
     (fake_pkg / "settings.json").write_text("{}", encoding="utf-8")
     assert cfg.resolve_data_root() == (str(fake_pkg), False)
-    (fake_pkg / "settings.json").unlink()
-    (fake_pkg / "downloads").mkdir()
-    assert cfg.resolve_data_root() == (str(fake_pkg), False)
+
+
+def test_startup_artifacts_do_not_silent_the_first_run(fake_pkg, monkeypatch):
+    """回归: logs/ 是 import logger 时建的, downloads/browser_data 是 BrowserManager
+    构造时建的 —— 拿它们当"用过"的痕迹, 自检跑一次之后打包就永远不会再问用户选工作空间,
+    于是账单和登录态被悄悄写回只读的程序目录。
+    """
+    for junk in ("logs", "downloads", "browser_data", "recordings"):
+        (fake_pkg / junk).mkdir(exist_ok=True)
+    assert cfg.resolve_data_root() == (str(fake_pkg), True)
 
 
 def test_command_line_wins_over_everything(fake_pkg, tmp_path, monkeypatch):

@@ -522,28 +522,45 @@ class BrowserManager:
         从 历史/ 搬回顶层认领: 文件是真的、数据行是够的、日志写"下载完成并校验通过"、
         stats 记 success, 只有"它不是这一轮的东西"没人知道。重导恰恰是最容易拿到登录页
         的场合, 所以这条不是理论风险(离线实测复现过)。
-        两道过滤各打一半: 内部目录按名字挡(确定性最高), `_dl_capture_t0` 按时刻挡
-        (copy2 保留旧 mtime, 所以 历史/ 那份的时间戳本来就早于本轮开始)。
+        两道过滤各打一半, 但**主次不能颠倒**: 内部目录那道按名字挡, 确定性最高, 是主线;
+        `_dl_capture_t0` 只是第二道(历史/ 那份是 copy2 出来的, 时间戳本来就是上一版的,
+        通常远早于本轮)。t0 比较必须带 `_DL_MTIME_SLACK_S` 的富余量: Windows 上文件
+        mtime 由粗粒度系统时钟盖的, 实测"先取 time.time() 再写文件"有 212/400 次拿到
+        **比 t0 更早**的 mtime —— 不留富余量就会时不时把**本轮刚下的真账单**过滤掉,
+        那是比"认错旧件"更糟的方向(附加检查不许拦住业务)。
         """
         try:
             fresh = self._dir_snapshot(root) - set(known)
         except Exception:
             return []
         out = []
-        for fp in sorted(fresh, key=os.path.getmtime, reverse=True):
+        for fp in sorted(fresh, key=self._mtime_of, reverse=True):
             name = os.path.basename(fp)
             if name.endswith(PARTIAL_DOWNLOAD_SUFFIXES):
                 continue
             if self._is_internal_download_path(root, fp):
                 self._log(f"[兜底] 跳过本轮自己写进去的文件: {name}", "debug")
                 continue
-            try:
-                if os.path.getmtime(fp) < self._dl_capture_t0:
-                    continue
-            except OSError:
+            # 时刻这道过滤带富余量, 且**读不到时间就当它是候选**(宁可多认领一次再靠
+            # 校验挡, 也不许把本轮刚下的真账单过滤掉)
+            mtime = self._mtime_of(fp)
+            if mtime and self._dl_capture_t0 and mtime < self._dl_capture_t0 - self._DL_MTIME_SLACK_S:
                 continue
             out.append(fp)
         return out
+
+    # 文件 mtime 与本轮开始时刻比较时留的富余量(秒)。Windows 的 mtime 由粗粒度系统
+    # 时钟盖, 实测"先 time.time() 再写文件"有半数以上拿到更早的 mtime; 本仓 `_find_new_candidate`
+    # 也早有"刚改过 2 秒内的视为还在写"这一档, 数量级一致。
+    _DL_MTIME_SLACK_S = 2.0
+
+    @staticmethod
+    def _mtime_of(path):
+        """取 mtime; 取不到(文件刚消失/被占用)返回 0 —— 排序时垫底, 过滤时按"不挡"处理。"""
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
 
     def _accept_download(self, final):
         """把下载文件归档到正式位置后再做完整性校验。

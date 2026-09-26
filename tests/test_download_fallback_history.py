@@ -85,6 +85,37 @@ def test_genuine_new_download_is_still_claimed(mgr):
     assert open(got, encoding="utf-8").read() == NEW, "认领到的必须是本轮这份"
 
 
+@pytest.mark.parametrize("lag,expected", [
+    (0.5, True),      # Windows 实测: 先取 time.time() 再写文件, mtime 常常**更早**(212/400 次)
+    (2.5, False),     # 本轮开始之前就有了的文件(比如上一版), 不该当候选
+])
+def test_mtime_filter_has_slack_so_a_real_download_is_never_dropped(mgr, lag, expected):
+    """时刻那道过滤必须带富余量, 方向是"宁可放行交给校验", 不能反过来挡掉业务。
+
+    这条用例是踩出来的: 没有富余量时 `_new_download_candidates` 会**间歇性**看不见
+    本轮刚落地的那份文件(mtime 比 t0 早几毫秒就被判成"上一轮残留"), 表现为兜底失灵。
+    """
+    b, root = mgr
+    b.begin_wait_download()
+    known = b._dir_snapshot(root)
+    fp = _write(root, "statement.csv", NEW)
+    stale = b._dl_capture_t0 - lag
+    os.utime(fp, (stale, stale))
+    names = [os.path.basename(p) for p in b._new_download_candidates(root, known)]
+    assert ("statement.csv" in names) is expected, names
+
+
+def test_unreadable_mtime_does_not_hide_the_candidate(mgr, monkeypatch):
+    """读不到时间(文件正被写/被占用)时按"不挡"处理, 交给后面的校验决定。"""
+    b, root = mgr
+    b.begin_wait_download()
+    known = b._dir_snapshot(root)
+    _write(root, "statement.csv", NEW)
+    monkeypatch.setattr(BrowserManager, "_mtime_of", staticmethod(lambda p: 0.0))
+    assert [os.path.basename(p) for p in b._new_download_candidates(root, known)] == \
+        ["statement.csv"]
+
+
 @pytest.mark.parametrize("rel,expected", [
     (os.path.join("有赞", "旗舰店A", "2026-09-01_2026-09-02", "历史", "a.csv"), True),
     (os.path.join("有赞", "旗舰店A", "2026-09-01_2026-09-02", "临时", "a.csv"), True),

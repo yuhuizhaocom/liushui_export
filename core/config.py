@@ -11,9 +11,11 @@
 平台信息已迁移到 platforms/ 目录下的各平台脚本中, 不在这里维护。
 """
 
+import itertools
 import json
 import os
 import sys
+import time
 
 # 程序根目录(此文件位于 core/ 子目录,上溯一级)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -270,17 +272,46 @@ def load_settings():
     return settings
 
 
+_TMP_SEQ = itertools.count(1)
+# Windows 上 os.replace 撞"另一个程序正在使用此文件"多半是**瞬时**的(杀软/索引/云盘
+# 正打开目标看一眼)。实测 8 线程同写一个 json: 光换唯一名还剩 5/8 失败, 加上有界重试
+# 才做到"每次写都真的成功"。一直占着不放(云盘同步锁)那就照旧失败, 由调用方说出口。
+_REPLACE_TRIES = 8
+_REPLACE_BACKOFF_S = 0.04
+
+
+def _replace_with_retry(src, dst):
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:
+            if attempt == _REPLACE_TRIES - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_S * (attempt + 1))
+
+
 def write_text_atomic(path, text):
-    """先写同目录临时文件再 os.replace, 不留半截文件(文本/源码同理)。"""
+    """先写同目录临时文件再 os.replace, 不留半截文件(文本/源码同理)。
+
+    临时名必须**每次都不一样**。以前固定用 `path + ".tmp"`, 而 `scheduled_tasks.json`
+    是调度线程(触发后写 last_run)和主线程(保存任务编辑)都会写的文件: 两个写者共用一个
+    暂存名时, 后开的 `open("w")` 会把前者正在写的那份截断, 前者的 `os.replace` 则撞上
+    Windows 的"另一个程序正在使用此文件"。实测 8 个线程同写一个 json: 48 次写里 38 次
+    抛错, 而这些错在上层一律是 `except: pass` → 用户看到的是"改动没生效、一声不响"。
+    唯一名让每个写者各用各的暂存文件。
+    (代价: 进程正好写在中间被硬杀, 会留下一个 `*.tmp-<pid>-<n>` 的孤儿文件。它不在任何
+    读取路径上, 也不进打包白名单, 所以不去为它加启动扫描——清理那侧只管日志与汇总副本。)
+    """
     folder = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(folder, exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = "%s.tmp-%d-%d" % (path, os.getpid(), next(_TMP_SEQ))
     try:
         with open(tmp, "w", encoding="utf-8", newline="") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except Exception:
         try:                      # 失败的这次不算数, 别留垃圾文件
             os.remove(tmp)

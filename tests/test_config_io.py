@@ -100,6 +100,49 @@ def test_task_store_save_uses_atomic_path(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise IOError("磁盘满了")
     monkeypatch.setattr("core.config.os.replace", boom)
-    store.save([])                                   # save 内部吞异常
-    assert len(TaskStore(path).load()) == 1          # 老任务还在
-    assert not os.path.exists(path + ".tmp")
+    assert store.save([]) is False                 # 失败要问得出来, 但不许抛给业务
+    assert "磁盘满了" in store.last_error
+    assert len(TaskStore(path).load()) == 1        # 老任务还在
+    assert not [f for f in os.listdir(tmp_path) if ".tmp" in f], "失败那次不许留垃圾"
+
+
+def test_temp_name_is_unique_per_write(tmp_path, monkeypatch):
+    """固定名 `path.tmp` 在两个写者手里会互相截断、互相占用(实测 48 次写 38 次抛错)。"""
+    import core.config as cfg
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cfg.os, "replace", spy)
+    p = str(tmp_path / "settings.json")
+    for i in range(5):
+        write_json_atomic(p, {"jobs": [{"n": i}]})
+    assert len(set(seen)) == 5, seen
+
+
+def test_concurrent_writers_all_land(tmp_path):
+    """多线程同写一个 json: 每次写都得真的成功(旧实现靠 except: pass 把失败咽掉)。"""
+    import threading
+    p = str(tmp_path / "scheduled_tasks.json")
+    write_json_atomic(p, {"version": 1, "jobs": []})
+    failures = []
+
+    def writer(i):
+        try:
+            write_json_atomic(p, {"version": 1,
+                                  "jobs": [{"name": "t%d" % i, "pad": "x" * 200000}]})
+        except Exception as e:                     # 业务侧的 save 会咽掉, 这里要露出来
+            failures.append(repr(e))
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not failures, failures
+    data = _read(p)
+    assert len(data["jobs"]) == 1 and data["jobs"][0]["name"].startswith("t")
+    assert not [f for f in os.listdir(tmp_path) if ".tmp" in f], "写完不该留暂存文件"

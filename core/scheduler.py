@@ -102,6 +102,15 @@ def unmatched_job_merchants(job_platforms, job_merchants, merchants_by_key):
     return [m for m in job_merchants if m not in known_any]
 
 
+def save_failure_text(store):
+    """任务文件写不进盘时给用户看的一句话(界面两处弹窗共用, 别说两套)。"""
+    return ("定时任务没能写入磁盘:\n%s\n\n路径: %s\n"
+            "常见原因是它正被云盘同步或其它程序占用。"
+            "这些改动暂时只在内存里, 重启会丢。"
+            % (getattr(store, "last_error", None) or "未知错误",
+               getattr(store, "path", "scheduled_tasks.json")))
+
+
 class CronJob:
     """定时导出任务。"""
 
@@ -198,6 +207,36 @@ class TaskStore:
     def __init__(self, path=None):
         self.path = path or _default_tasks_path()
         self.jobs = []
+        # 最近一次写盘失败的原因(None=上次写成功)。失败不再被静默吞掉, 见 save()。
+        self.last_error = None
+        # 写不进盘时的兜底起算点: "名字|cron" -> ISO 时刻。
+        # 为什么需要它: trigger() 会把 last_run 写盘, 而盘写不进去(文件被云盘/Excel/
+        # 杀软占住)时 load() 下一轮又把**旧的那份**读回来 → 同一任务每 30 秒重跑一整批,
+        # 浏览器一遍遍起来, 用户只能杀进程。
+        self._mem_last_run = {}
+
+    @staticmethod
+    def _floor_key(job):
+        """兜底起算点的记号。刻意不含 job_id: 手改的 json 没写 id 时, from_dict 每轮
+        load 都会新生成一个随机 id(这个坑第 21 轮踩过一次)。"""
+        return "%s|%s" % (job.name, job.cron)
+
+    def trigger_floor(self, job):
+        """内存里记的"这次已经跑过的时刻", 没有则 None。"""
+        return self._mem_last_run.get(self._floor_key(job))
+
+    def mark_triggered(self, job, now):
+        """把"这个任务在 now 跑过了"落盘; 落不下去时先在内存里记着。
+
+        返回是否真的写进了盘。内存兜底只在**盘上也认为已过期**时才起作用
+        (should_trigger 取两者较新的一份), 所以某次写盘成功之后一切照旧。
+        """
+        stamp = now.isoformat()
+        job.last_run = stamp
+        ok = self.save()
+        if not ok:
+            self._mem_last_run[self._floor_key(job)] = stamp
+        return ok
 
     def load(self):
         """从盘上读任务列表。
@@ -233,14 +272,27 @@ class TaskStore:
         return self.jobs
 
     def save(self, jobs=None):
+        """整体重写 scheduled_tasks.json, 返回是否真的写进去了。
+
+        旧实现是 `except Exception: pass`。写失败在这里不是"无所谓"的小事:
+        ① 界面点了保存、盘上没变, 用户以为改成了; ② 触发后写不进去的 last_run 会被
+        下一轮 load 用旧值盖回去, 于是同一任务每 30 秒重跑一整批。
+        失败照样不许把调度线程带下去(组件失败不得传染业务), 但原因要留在 `last_error`
+        上, 由 CronScheduler 说一次。
+        """
         if jobs is not None:
             self.jobs = jobs
         try:
             from .config import write_json_atomic
             write_json_atomic(self.path, {"version": 1,
                                           "jobs": [j.to_dict() for j in self.jobs]})
-        except Exception:
-            pass
+        except Exception as e:
+            self.last_error = "%s: %s" % (type(e).__name__, str(e)[:120])
+            return False
+        self.last_error = None
+        # 写进去了, 内存兜底就可以退场(留着会一直压着盘上更新的 last_run)
+        self._mem_last_run.clear()
+        return True
 
 
 def _default_tasks_path():
@@ -323,6 +375,16 @@ class CronScheduler:
                 last = datetime.fromisoformat(job.last_run)
             except ValueError:
                 last = None
+        # 盘写不进去的场合: 内存里那份兜底起算点也要参与, 取两者较新的一份。
+        # 少这一步, 下一轮 load() 就用盘上的旧值把 last_run 盖回去 → 整批重跑。
+        floor = self.store.trigger_floor(job) if hasattr(self.store, "trigger_floor") else None
+        if floor:
+            try:
+                fdt = datetime.fromisoformat(floor)
+            except ValueError:
+                fdt = None
+            if fdt and (last is None or fdt > last):
+                last = fdt
         if last is None:
             return True  # 从未运行过,视为到期
         nxt = expr.next_run(last)
@@ -334,13 +396,36 @@ class CronScheduler:
         app 正忙时(手动导出还在跑) trigger_job 会返回 False, 以前仍然无条件写
         last_run —— 这一次定时导出就彻底丢了, 要等下一个点位。不记则下个轮询
         周期自动再试一次。老 app 没返回值时按"已开始"处理, 行为不变。
+
+        起算点交给 `store.mark_triggered`: 它写盘失败时会在内存里兜住, 免得下一轮
+        load() 拿旧 last_run 判成"又到期了" → 每 30 秒重跑一整批(见 TaskStore.save)。
         """
         started = self.app.trigger_job(job)
         if started is False:
             return False
-        job.last_run = now.isoformat()
-        self.store.save()
+        if not self.store.mark_triggered(job, now):
+            # 写盘失败: 起算点已在内存里兜住(不会再每 30 秒重跑一整批), 但必须说一次
+            self._warn_store_failure()
         return True
+
+    def _warn_store_failure(self):
+        """"任务文件写不进去"要说一次 —— 静默吞掉的话, 用户改了任务却以为没生效。
+
+        记号带错误原因: 换一种毛病(比如从"被占用"变成"磁盘满")值得再提醒一次;
+        同一种毛病每 30 秒刷一遍就是刷屏(第 21 轮 _warn_once 那个坑的同一形状)。
+        """
+        err = getattr(self.store, "last_error", None) or "unknown"
+        tag = "store-write-failed|" + err
+        if tag in self._warned_jobs:
+            return
+        self._warned_jobs.add(tag)
+        try:
+            from core.logger import log
+            log(f"定时任务文件写不进去({err}), 本次起算点先记在内存里 —— "
+                f"请检查 {getattr(self.store, 'path', 'scheduled_tasks.json')} "
+                "是否被云盘同步或其它程序占用, 否则重启后这些改动会丢", "warning")
+        except Exception:
+            pass
 
 
 class SchedulerDialog(tk.Toplevel):
@@ -382,7 +467,9 @@ class SchedulerDialog(tk.Toplevel):
                                      "✓" if job.enabled else "✗"))
 
     def _save(self):
-        self.scheduler.store.save()
+        if not self.scheduler.store.save():
+            messagebox.showwarning("定时任务没保存成功",
+                                   save_failure_text(self.scheduler.store))
         self.rebuild_cb()
 
     def _add(self):
@@ -526,7 +613,11 @@ class JobEditDialog(tk.Toplevel):
                     parent=self)
                 return
             target.apply_edit(name, cron, plats, merchants)
-        self.scheduler.store.save()
+        if not self.scheduler.store.save():
+            # 写盘没成就不关窗: 把"没落盘"说成"已保存"是最坑的一种成功
+            messagebox.showwarning("定时任务没保存成功",
+                                   save_failure_text(self.scheduler.store), parent=self)
+            return
         if self.on_saved:
             self.on_saved()
         self.destroy()

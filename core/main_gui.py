@@ -2144,50 +2144,95 @@ class LiushuiApp:
         self._ui(lambda: messagebox.showinfo(f"{len(items)} 个平台需要您手动导出", text))
 
     USER_WAIT_TIMEOUT_S = 10 * 60    # 等人扫码/手工确认的上限, 到点按"没确认"处理
+    _CONFIRM_POLL_S = 1.0            # 等待期间多久看一眼「中止」
 
     def _ask_user_confirmed(self, prompt, plat_name, merchant):
-        """请用户确认"我已完成那步手工操作"; 返回他**是否真的**点了确定。
+        """请用户确认"我已完成那步手工操作"; 返回他**是否真的**点了「我已完成」。
 
-        三条返回 False 的路: 点取消 / 弹窗起不来 / 到点没人应答。
-        以前这里 `evt.wait(timeout=3600)` 把等待结果丢掉、回调一律不回话,
-        `browser.wait_user` 于是写死"用户已确认,继续" —— 微信上没扫码也会接着点
-        "下载数据"(空文件或旧文件记成 success), 而模态框压着主窗口, 用户连「中止」
-        都点不动, 白挂一小时。
-        线程契约照第 12 章第 12 条: 弹窗投递给主线程, 本线程用 answer + Event 等,
-        `finally: evt.set()` 保证不会没人应答地吊住。
+        三条 False 的路: 点「这一家先放弃」/ 窗没建起来 / 到点没人应答。
+
+        为什么是自建 Toplevel 而不是 `messagebox`: 两条都是实测出来的坑 ——
+        ① 模态框压住主窗口, 「中止」按不动, 等待形同不可打断;
+        ② 超时那一路 worker 先返回, `_ask` 还卡在模态框里, `finally` 根本没跑,
+           于是主窗口的 topmost 永不收回(前一轮量到 `attributes` 序列只有 `[True]`)、
+           那张没人应答的框一直留在屏上, 下一家再叠一张。
+        现在 topmost 设在**这张窗自己身上**, 窗随关随没, 不会把主窗口带成永久置顶。
+        线程契约照第 12 章第 12 条: 建窗与关窗都投递给主线程, 本线程用 answer + Event 等。
         """
         evt = threading.Event()
         answer = {"ok": False}
 
         def _ask():
             try:
-                # Chromium 窗口常常盖在主窗口上面, 提示看不见就等于没人应答
-                self.root.attributes("-topmost", True)
-                answer["ok"] = messagebox.askokcancel(
-                    "需要您操作确认",
-                    f"平台: {plat_name} / 商户: {merchant}\n\n{prompt}\n\n"
-                    "请先在手机上完成确认操作, 再点\"确定\"继续下载。\n"
-                    "点\"取消\"= 这一家先放弃(程序不会替你确认归属/扫码)。")
+                # 上一张理论上不该还在, 在就先收掉 —— **不带本次的 evt**, 否则这次等待
+                # 会当场被 set 成"没答复"(第一次实测就把这条踩出来了)。
+                self._close_confirm_window()
+                win = tk.Toplevel(self.root)
+                self._confirm_win = win
+                win.title("需要您操作确认")
+                win.attributes("-topmost", True)   # Chromium 常常盖在主窗口上面
+                win.resizable(False, False)
+                tk.Label(win, text=f"{plat_name} · {merchant}", bg=BG_PANEL,
+                         fg=FG_MAIN, font=("Microsoft YaHei", 11, "bold")
+                         ).pack(padx=16, pady=(14, 4))
+                tk.Label(win, text=prompt, bg=BG_PANEL, fg=FG_MAIN, justify="left",
+                         wraplength=420, font=("Microsoft YaHei", 10)
+                         ).pack(padx=16, pady=6)
+                tk.Label(win, text="请先完成上面的操作, 再点「我已完成」;\n"
+                                   "点「这一家先放弃」= 本次不导这一家 —— 程序不会替你确认。",
+                         bg=BG_PANEL, fg=FG_MUTED, justify="left", wraplength=420,
+                         font=("Microsoft YaHei", 9)).pack(padx=16, pady=(0, 10))
+                row = tk.Frame(win, bg=BG_PANEL)
+                row.pack(pady=(0, 12))
+                buttons = getattr(self, "_confirm_buttons", None)   # 测试从这里取按钮
+                for label, verdict in (("我已完成, 继续下载", True), ("这一家先放弃", False)):
+                    btn = tk.Button(row, text=label, font=("Microsoft YaHei", 9),
+                                    command=lambda v=verdict: self._answer_confirm(evt, answer, v))
+                    btn.pack(side=tk.LEFT, padx=6)
+                    if buttons is not None:
+                        buttons.append(btn)
+                win.protocol("WM_DELETE_WINDOW",
+                             lambda: self._answer_confirm(evt, answer, False))
+                win.lift()
             except Exception as e:
-                self._append_log(f"[待处理] 确认弹窗没弹出来, 这一家按未完成处理: {str(e)[:60]}")
-            finally:
-                try:
-                    self.root.attributes("-topmost", False)
-                except Exception:
-                    pass
+                self._append_log(f"[待处理] 确认窗没弹出来, 这一家按未完成处理: {str(e)[:60]}")
                 evt.set()
 
         self._ui(_ask)
         deadline = time.time() + self.USER_WAIT_TIMEOUT_S
+        timed_out = True
         while time.time() < deadline:
-            if evt.wait(1.0):
+            if evt.wait(self._CONFIRM_POLL_S):
                 return bool(answer["ok"])
             if self._aborted():
                 self._append_log("[中止] 等待确认期间收到中止请求, 这一家按未完成处理")
-                return False
-        self._append_log(f"[待处理] {self.USER_WAIT_TIMEOUT_S // 60} 分钟内没等到确认, "
-                         "不再继续往下点 —— 这一家转人工")
+                timed_out = False
+                break
+        if timed_out:
+            self._append_log(f"[待处理] {max(1, self.USER_WAIT_TIMEOUT_S // 60)} 分钟内"
+                             "没等到确认, 不再继续往下点 —— 这一家转人工")
+        # 关窗同样投递给主线程, 而且**等它真关掉了**再返回: 否则超时/中止之后那张窗
+        # 会一直留在屏上(用户以为还能点, 而 worker 已经走开了)。
+        self._ui(lambda: self._close_confirm_window(evt))
+        evt.wait(5)
         return False
+
+    def _answer_confirm(self, evt, answer, verdict):
+        """按钮/关窗回调: 记下答复, 再把这张窗收掉(主线程里就地执行)。"""
+        answer["ok"] = bool(verdict)
+        self._close_confirm_window(evt)
+
+    def _close_confirm_window(self, evt=None):
+        """收掉当前那张确认窗; 只有明确传入本次的 evt 时才回话(见 `_ask` 里那次清场)。"""
+        win = getattr(self, "_confirm_win", None)
+        self._confirm_win = None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        if evt is not None:
+            evt.set()
 
     def _run_single_export(self, plat, merchant, start_date, end_date, step_debug=False):
         """一个商户这一档的导出; 配了子商户时, 这里是"一次登录切着导 N 份"。

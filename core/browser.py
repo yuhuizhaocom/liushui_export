@@ -40,7 +40,10 @@ class BrowserManager:
         self.playwright = None
         self.context = None
         self.page = None
-        self._profile_dir = os.path.abspath(BROWSER_DATA_DIR)  # 默认使用全局数据目录
+        # 默认值不是 browser_data 本身 —— 那一层只放"平台目录", 拿它当 profile 会把
+        # Chromium 的内部目录写成"商户"(见 set_browser_profile 上方那段)。
+        self._profile_dir = os.path.join(os.path.abspath(BROWSER_DATA_DIR),
+                                         self.RESERVED_PLATFORM_DIR)
         self._export_platform = ""
         self._export_start = ""
         self._export_end = ""
@@ -64,17 +67,28 @@ class BrowserManager:
         from .outputs import sanitize_name
         return sanitize_name(name, fallback="default")
 
+    # 商户为空 / 平台也为空时的落点。**不许**退到 browser_data/<平台key>/ 或 browser_data/
+    # 本身: 那一层是"商户目录的父目录", Chromium 一进去就把它自己的内部目录
+    # (Default、Crashpad、GPUPersistentCache、Safe Browsing…) 写在这一层, 而
+    # `main_gui.discover_merchants` 的规矩是"每个子目录 = 一家建档商户" —— 于是这些
+    # 内部目录被列成商户、还会被自动勾上, 每次导出/检查登录都多跑 N 家空商户。
+    # 下划线开头是保留名: 商户发现永不认它们(见 discover_merchants)。
+    RESERVED_MERCHANT_DIR = "_平台调试"
+    RESERVED_PLATFORM_DIR = "_未指定平台"
+
     def set_browser_profile(self, platform_key="", merchant=""):
         """按 平台key/商户 设置独立浏览器数据目录(登录态隔离)
         - platform_key: 平台标识(如 youzan)
-        - merchant: 商户自定义名称(如"旗舰店A"); 空则用平台级目录
+        - merchant: 商户自定义名称(如"旗舰店A"); 空则用该平台的保留目录(不是平台目录本身)
         """
         base = os.path.abspath(BROWSER_DATA_DIR)
         parts = []
         if platform_key:
             parts.append(self._safe_name(platform_key))
-        if merchant:
-            parts.append(self._safe_name(merchant))
+            # 没商户也要再往下垫一层, 免得跟"商户目录的父目录"混成同一层
+            parts.append(self._safe_name(merchant) if merchant else self.RESERVED_MERCHANT_DIR)
+        else:
+            parts.append(self.RESERVED_PLATFORM_DIR)
         self._profile_dir = os.path.join(base, *parts) if parts else base
         try:
             os.makedirs(self._profile_dir, exist_ok=True)

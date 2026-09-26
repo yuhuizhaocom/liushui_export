@@ -44,21 +44,92 @@ from core.dialogs import show_log_history, show_stats_dashboard
 from core.scheduler import pair_job_targets
 
 
-def discover_merchants(platform_keys):
+# Chromium 在 profile 根目录里写的顶层条目名(小写比对, 前缀命中也算)。
+CHROMIUM_INTERNAL_DIRS = frozenset({
+    "default", "crashpad", "crashdumps", "browsermetrics", "gpupersistentcache",
+    "grshadercache", "shadercache", "safe browsing", "component_crx_cache",
+    "extensions_crx_cache", "segmentation_platform", "optimization_guide",
+    "optimizationhints", "subresource filter", "crowd deny", "certificate revocation",
+    "file type policies", "hybrid certification", "meipreload", "origin trials",
+    "pki metadata", "ssl error assistant", "trust token key commitments", "zxcvbn data",
+    "autofill states", "amount extraction heuristic regexes", "captcha providers",
+    "first party sets preloaded", "navigation throttling", "wdm driver assembly",
+    "deferred chat images", "nasdfailures",
+})
+CHROMIUM_INTERNAL_PREFIXES = ("translation_model_", "translation_models_")
+# profile 根一定有这几个文件之一 —— 用来认出"这个平台目录被当成过 profile 根"(旧版本的脏)
+PROFILE_ROOT_MARKERS = ("Local State", "Last Version")
+
+
+def _is_profile_root(path):
+    return any(os.path.isfile(os.path.join(path, m)) for m in PROFILE_ROOT_MARKERS)
+
+
+def _looks_like_chromium_internals(path, parent_is_profile_root=False):
+    """这个目录是 Chromium 自己的内部目录吗(而不是某家商户的 profile)。
+
+    主判据看内容不看名字: 一家商户的 profile 根下面一定有 `Default/` 或我们写的
+    `login_state.json`, 而 `Crashpad`、`GrShaderCache` 这些内部目录里没有 —— 所以哪怕
+    真有商户起名叫 "Default", 也不会被误认。名字名单只补一个洞: `Safe Browsing` 这类
+    内部目录常是**空的**, 而"空"也正好是刚点「+」建好、还没登录的商户目录的样子。于是
+    名单只在**这一层本身被当成过 profile 根**时才生效(干净的平台目录里没有这种标志文件,
+    用户手工建的商户就绝不会被名单藏掉)。
+    """
+    try:
+        from core.browser import BrowserManager       # 与 main_gui 一样保持惰性导入
+        if os.path.isfile(os.path.join(path, BrowserManager.LOGIN_STATE_FILE)):
+            return False
+        if os.path.isdir(os.path.join(path, "Default")):
+            return False
+        low = os.path.basename(path).casefold()
+        if parent_is_profile_root and (low in CHROMIUM_INTERNAL_DIRS
+                                       or low.startswith(CHROMIUM_INTERNAL_PREFIXES)):
+            return True
+        return bool(os.listdir(path))
+    except OSError:
+        return False
+
+
+def discover_merchants(platform_keys, ignored=None):
     """扫描 browser_data/平台key/ 下的子目录,发现已建档的商户
     返回: {platform_key: [商户名, ...]}
+
+    两类不算商户:
+      - 程序保留名(`_平台调试`/`_未指定平台`, 见 `BrowserManager.set_browser_profile`);
+      - Chromium 的内部目录 —— 以前商户为空时 profile 直接落在 `browser_data/<key>/`,
+        于是这一层同时是"商户的父目录"和某个 profile 的根, 内部目录被当成商户列进左栏
+        还被自动勾上(实测本机 youzan 下 10 个"商户"里只有 1 个是真的,
+        `selection_state.json` 里那 9 项全是 true)。
+
+    ⚠ 不按"下划线开头"整批过滤: 商户目录允许用户手工建(使用说明里就教过), 按前缀筛会把
+    人家的目录也藏掉。`ignored` 传一个 list 时被剔掉的名字按 "平台key/目录名" 塞进去 —
+    — 剔除可以, 静默剔除不行(目录突然不见了得能查为什么)。
     """
+    from core.browser import BrowserManager
+    reserved = {BrowserManager.RESERVED_MERCHANT_DIR, BrowserManager.RESERVED_PLATFORM_DIR}
     result = {}
     base = os.path.abspath(BROWSER_DATA_DIR)
     try:
         if os.path.isdir(base):
             for k in platform_keys:
                 pk = os.path.join(base, k)
-                if os.path.isdir(pk):
-                    names = [d for d in os.listdir(pk)
-                             if os.path.isdir(os.path.join(pk, d)) and not d.startswith(".")]
-                    if names:
-                        result[k] = sorted(names)
+                if not os.path.isdir(pk):
+                    continue
+                polluted = _is_profile_root(pk)
+                names = []
+                for d in sorted(os.listdir(pk)):
+                    full = os.path.join(pk, d)
+                    if not os.path.isdir(full) or d.startswith("."):
+                        continue
+                    if d in reserved:
+                        continue
+                    if _looks_like_chromium_internals(full, polluted):
+                        if ignored is not None:
+                            ignored.append(f"{k}/{d}")
+                        continue
+                    names.append(d)
+                if names:
+                    result[k] = sorted(names)
     except Exception:
         pass
     return result
@@ -218,7 +289,9 @@ class LiushuiApp:
         self.login_urls = {key: plat.login_url for key, plat in self.platforms.items()}
         self.merchant_vars = {}   # platform_key -> {商户名: BooleanVar}
         self._merchant_memory = {}   # platform_key -> {商户名: bool} 平台被取消勾选那一刻的样子
-        self.merchants = discover_merchants(self.platforms.keys())
+        self._ignored_profile_dirs = []
+        self.merchants = discover_merchants(self.platforms.keys(),
+                                            ignored=self._ignored_profile_dirs)
         self.selection = self._load_selection()   # 上次勾选状态(重启后恢复)
         self._login_hint = None        # 首次登录的非模态提示窗(登录完关掉浏览器窗口即算完成)
         self._abort = threading.Event()          # 中止请求: 在任务边界生效(见 _aborted)
@@ -230,6 +303,7 @@ class LiushuiApp:
         self._build_middle_panel()
         self._refresh_summary()   # 初始化概览条
         self._report_paths()      # 工作空间在哪 / 解析与日志目录有没有兜底, 一次说清
+        self._note_ignored_profile_dirs("启动")
         self.root.after(_UI_PUMP_MS, self._pump_ui)   # 须在控件建好后启动
 
         # 登录保活服务: 后台线程周期刷新各商户登录态
@@ -380,7 +454,9 @@ class LiushuiApp:
         """新增/编辑平台后重建左侧勾选列表(重新发现商户,平台/商户可即时反映变更)。"""
         self._save_selection()   # 保存当前勾选,重建后从文件恢复
         self.selection = self._load_selection()
-        self.merchants = discover_merchants(self.platforms.keys())
+        ignored = []
+        self.merchants = discover_merchants(self.platforms.keys(), ignored=ignored)
+        self._ignored_profile_dirs = ignored
         for child in self.list_frame.winfo_children():
             child.destroy()
         self.platform_vars = {}
@@ -394,6 +470,21 @@ class LiushuiApp:
             self._build_platform_row(key, plat)
         self._refresh_summary()
 
+    def _note_ignored_profile_dirs(self, where="刷新商户"):
+        """被剔掉的"浏览器内部目录"要说一声。
+
+        静默剔不行: 用户手工放过东西进 `browser_data` 的话, 会发现"目录明明在, 界面上
+        却没有", 只能靠这行日志对上号。剔的东西也不是商户, 是老版本把「平台级」浏览器
+        数据直接放在 `browser_data/平台/` 这一层留下的 Chromium 内部目录(不影响账单,
+        也不影响任何商户的登录态)。
+        """
+        ignored = getattr(self, "_ignored_profile_dirs", None) or []
+        if not ignored:
+            return
+        shown = "、".join(ignored[:8]) + ("…" if len(ignored) > 8 else "")
+        self._append_log(f"[{where}] 已忽略 {len(ignored)} 个浏览器自己的目录, "
+                         f"它们不算商户: {shown}")
+
     def _refresh_merchants(self):
         """重新扫 browser_data 并重建左栏: 外部建的商户目录不用重启也能看见。
 
@@ -405,6 +496,7 @@ class LiushuiApp:
         except Exception as e:
             self._append_log(f"[刷新商户] 刷新失败: {e}")
             return
+        self._note_ignored_profile_dirs("刷新商户")
         added, removed = merchant_changes(before, self.merchants)
 
         def label(key, names):
@@ -1686,6 +1778,11 @@ class LiushuiApp:
             # sanitize 只换掉 <>:"/\ 这类字符, ".." 原样留着 —— 直接拼进 profile 路径
             # 会指到 browser_data 本身, 把别的商户的登录目录当成自己的 profile
             return False, "商户名称得有点实际内容(不能只用 . 或 _)"
+        from core.browser import BrowserManager
+        if name in (BrowserManager.RESERVED_MERCHANT_DIR, BrowserManager.RESERVED_PLATFORM_DIR):
+            # 这两个名字是"没有商户时"的 profile 落点, 建成商户的话商户发现会把它剔掉,
+            # 于是这家商户建完就不见了 —— 当场拒绝比事后找不到好。
+            return False, f"「{name}」是程序保留的名字(平台级调试目录), 请换个商户名"
         plat = self.platforms[key]
         known = list(self.merchants.get(key, [])) + list(self.merchant_vars.get(key, {}))
         dup = find_duplicate_merchant(name, known)

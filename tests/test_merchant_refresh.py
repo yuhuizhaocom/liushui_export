@@ -16,6 +16,7 @@ class _App:
     """只给 _refresh_merchants 用到的成员; 重建列表这一步用假的, 不碰 Tk。"""
 
     _refresh_merchants = LiushuiApp._refresh_merchants
+    _note_ignored_profile_dirs = LiushuiApp._note_ignored_profile_dirs
 
     def __init__(self, before, after):
         self.platforms = {"youzan": _Plat("youzan", "有赞"), "tmall": _Plat("tmall", "天猫")}
@@ -23,6 +24,7 @@ class _App:
         self._after = after
         self.logs = []
         self.rebuilt = 0
+        self._ignored_profile_dirs = []
 
     def _rebuild_platform_list(self):
         self.rebuilt += 1

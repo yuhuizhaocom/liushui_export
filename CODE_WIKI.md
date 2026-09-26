@@ -113,7 +113,7 @@ liushui_export/
 ├── selection_state.json     # 平台/商户勾选状态（重启恢复）
 ├── scheduled_tasks.json     # 定时任务（version 1 + jobs[]）
 ├── start.bat                # 命令行启动脚本（控制台常驻，错误可见）
-├── 启动工具.vbs             # 免控制台启动脚本（pythonw，五档找 Python，首跑装依赖）
+├── 启动工具.vbs             # 免控制台启动脚本（pythonw，五档找 Python；装依赖交给程序的体检，见 14.2）
 ├── 使用说明.md              # 面向最终用户的使用文档
 ├── 脚本编写指南.md          # 面向开发者的平台插件编写指南
 ├── core/                    # ★ 核心框架包（15 个模块，见 2 章分层图）
@@ -165,6 +165,7 @@ liushui_export/
 | `core/logger.py` | **合并后的唯一日志通道**。`log(msg, level, callback)` 三通道输出：控制台（整句包 try，`pythonw` 下 `sys.stdout` 可能是 None）、`logs/run_<启动时刻>.log`（**每次启动一个文件**，不是按天）、GUI 回调；warning/error 在界面行前加 `[WARN]/[ERROR]`。`record_stat`/`load_stats`/`summarize_stats` 管稳定性统计，其中 `load_stats(limit)` 用尾部反向分块读（`_read_tail_lines`），不再把整个 `stats.jsonl` 读进内存。 |
 | `core/keepalive.py` | **登录保活服务**。`KeepAliveService`（后台线程）按可配置间隔周期巡检已选商户的登录态（打开 `login_url` 判断会话），任务执行中自动跳过本轮；浏览器工厂可注入便于测试。 |
 | `core/crashguard.py` | **启动期崩溃兜底**。工具用 `pythonw` + 隐藏窗口启动，没有控制台；以前导入阶段抛错（缺 tkinter、`logs` 建不出来）的表现就是"图标闪一下，什么也没有"。`install()` 把 `sys.excepthook`/`threading.excepthook` 指向 `report_uncaught`：堆栈写进 `logs/crash_日期_时间_微秒.txt`，主线程再弹窗告知文件位置（一个进程只弹一次）。子线程那条**只落文件不弹窗**——在非主线程里拉 Tk 窗口可能把界面吊住。`main_gui` 在其余 import 之前装好它，所以模块自身的导入失败也覆盖得到。 |
+| `core/deps.py` | **依赖体检（三档）**。`probe()` 只回答"这台机器上缺什么"，**既不 import playwright 也不碰界面**（缺依赖时这两件事恰恰做不到，而它正是被 `core/browser.py` 顶层那句 import 挡住的），所以内核目录优先级用的是 `config.resolve_browsers_path`。三档结论：`no_playwright`（包都没有）／`bad_version`（版本与实测过的不一致）／`no_kernel`（有包没内核，**最常见**的半拉子状态）；齐活 `ok`，体检自己出错 `unknown`（=放行，原因写进 `notes`）。`find_chromium_dir()` 先认 Playwright 的 `INSTALLATION_COMPLETE` 标记、再逐个子目录找 `chrome.exe`——内核子目录名随版本变过（`chrome-win` → `chrome-win64`），写死就会在真机上集体误报"缺内核"；`chromium_headless_shell-*` 不算内核。`describe()`/`fix_commands()`/`show()` 只出结论和 argv 命令（argv 而非 shell 字符串：路径带空格不炸），弹窗由 `main_gui.check_dependencies()` 渲染。`REQUIRED_PLAYWRIGHT_VERSION` 是版本唯一真源。 |
 | `platforms/*/export.py`  | **平台插件**。每个文件定义一个继承 `PlatformBase` 的导出类，实现该平台的登录与导出流程；平台专项逻辑（如有赞的 URL 日期参数）直接写在平台脚本内，不放入 `core/`（见 [第 8 章](#8-平台插件体系)）。 |
 | `core/platform_admin.py` | **平台管理/脚本调试**。`render_platform_skeleton()` 纯函数生成骨架（输入按字面量转义，key 须字母/下划线开头）、`save_platform_script()` 先验语法再原子写（语法错误不覆盖磁盘上的好脚本）、`DebugProbe` 用 `__getattr__` 通用透传并如实抛异常、`PlatformManagerDialog`（向导+内置编辑器+列表）与 `DebugDialog`（试运行）三个 Tkinter 弹窗。 |
 | `core/scheduler.py` | **定时任务**。`CronExpr`（5 字段 cron 轻量解析/匹配/next-run）、`CronJob`/`TaskStore`（`scheduled_tasks.json` 持久化）、`CronScheduler`（后台线程到期触发 `app.trigger_job`）、`SchedulerDialog`/`JobEditDialog`（任务管理界面）；导出失败自动重试（`run_with_retry`）亦由本批提供。 |
@@ -289,7 +290,7 @@ liushui_export/
 | `delete_merchant_profile(base, key, merchant)` | 三重深度护栏（父目录必须是平台目录、target≠parent、basename 等于清洗后名字）后 `rmtree`，重试 4 次 ×0.5s（Chromium 刚退出时目录锁常有几秒残留）；本来不存在返回 `(True,"本来就不存在")`。注释 116：少核一层就会把整个平台目录甚至整个 `browser_data` 删掉。 |
 | `run_with_retry(fn, retry_times, retry_interval_s, log)` | **只有返回值恰为 `"failed"`** 才重试，间隔 `interval × 2^(n-1)`；返回最后一次结果。`retry_times=0` 即一次定生死。⚠ 形参 `log` 遮蔽了模块级 `logger.log`。 |
 | `check_date_range(start_text, end_text, today=None)` | 见 `_validate_dates`；纯函数、`today` 可注入。 |
-| `check_dependencies()` | 只探测 `import playwright`；缺则隐藏 Tk 问一句 → `pip install playwright` + `playwright install chromium` → **`os.execv` 原地重启**；用户拒绝或安装失败返回 False。 |
+| `check_dependencies()` | 启动前体检：`deps.probe()` → `ok`/`unknown` 直接放行（一行日志说明结论或吞掉了什么）。`no_playwright` → 问一句，装了（**钉死版本** + 内核）就 `os.execv` 原地重启，用户拒绝或装不上则返回 False——只有这一种情况会拦住启动。`no_kernel` → 只补内核下载；选"否"**照样进程序**（设置/日志/看板都能看，只写一句"导出会失败"）。`bad_version` → 只问不拦，选"继续用当前版本"就放行。装不上时弹窗带 pip 自己的输出尾部 + 两条能抄的命令 + 离线退路；Tk 弹窗起不来时**放行**（附加检查不许变成"程序打不开"）。 |
 | `report_crash(summary, detail)` | `main()` 的异常兜底：先用顶部已导入的 `log` 记 ERROR 再弹窗，**返回值=日志是否真写成功**，文案跟着变（写不成就不谎称"已记录到 logs 文件夹"）。注释 2104 记录旧错：那里曾写 `from logger import log`，根目录没这个文件，必然 ModuleNotFoundError 又被自己吞掉。与 crashguard 分工：crashguard 兜导入期与子线程，这里兜 `main()` 起来之后。 |
 | `main()` | `check_dependencies()` → 建 Tk → `LiushuiApp` → 绑关闭回调（顺序见 `cleanup()`）→ `mainloop`；整体 try/except → `report_crash`，不静默崩溃。 |
 
@@ -518,7 +519,7 @@ liushui_export/
 | `discover_merchants(platform_keys)`   | `core/main_gui.py` | 扫描 `browser_data/<平台key>/` 下的子目录，发现已建档商户，返回 `{key: [商户名]}`。                                                  |
 | `load_settings()` / `save_settings()` | `core/config.py`   | 读写 `settings.json`，缺失字段回退 `DEFAULT_SETTINGS`（8 个键，见 10 章）。                           |
 | `log(message, level, callback)`       | `core/logger.py`   | 统一日志：输出控制台（容错 `pythonw` 无 stdout 场景）→ 写入 `logs/run_YYYYMMDD.log` → 转发 GUI 回调。                                |
-| `check_dependencies()` / `main()`     | `core/main_gui.py` | 依赖检测与自动安装；程序入口。 |
+| `check_dependencies()` / `main()`     | `core/main_gui.py` | 启动前三档依赖体检（缺包/版本不对/缺内核，见 `core/deps.py`）与引导安装；程序入口。 |
 | `report_crash(summary, detail)`       | `core/main_gui.py` | `main()` 的异常兜底：先用模块顶部已导入的 `log` 记 ERROR，再弹窗。**返回值=日志是否真写成功**，弹窗文案跟着变（写不成功就不谎称"已记录到 logs 文件夹"）。与 crashguard 的区别：这里兜的是 `main()` 内部已起来之后的异常。 |
 | `find_duplicate_merchant(name, existing)` | `core/main_gui.py` | 返回 `existing` 中与该名字视为同一家商户的那个名字（忽略首尾空格、不分大小写），没有则空串。 |
 | `merchant_profile_dir(base, key, merchant)` / `delete_merchant_profile(...)` | `core/main_gui.py` | 前者按 `BrowserManager.set_browser_profile` 同一套算法算出 profile 路径（有测试钉住两者一致）；后者只删这一层目录，路径深度不对/名字为空一律拒绝，被占用时重试 4 次后如实返回失败。 |
@@ -656,7 +657,7 @@ liushui_export/
 
 - **Python 3.10+**（启动脚本探测 Python3.10\~3.14 常见路径）
 
-- **playwright==1.62.0** + Chromium 浏览器（首次运行由 `启动工具.vbs` 或 `check_dependencies()` 自动安装）
+- **playwright==1.62.0** + Chromium 浏览器（版本钉在三处，见 12 章第 30 条。全量版随包带；核心版/源码版首次运行由 `check_dependencies()` 分三档引导安装 —— 以前是 `启动工具.vbs` 自己 `pip install playwright`（没钉版本），现在判断只留 Python 一处）
 
 ***
 
@@ -667,10 +668,9 @@ liushui_export/
 ```
 启动脚本(start.bat / 启动工具.vbs)
   → 探测 Python 解释器(vbs 按五档找: 写死路径 → py 启动器 → 用户级目录 → .venv → C:\Python3xx)
-  → (vbs 专用)检查 playwright，缺失则自动安装
   → 运行 python -m core.main_gui
       ├─ crashguard.install()         # 先装兜底，之后任何导入失败都会落 logs/crash_*.txt
-      ├─ check_dependencies()         # 兜底依赖检测
+      ├─ check_dependencies()         # 三档体检: 缺包(可退出)/版本不对(只问不拦)/缺内核(只补内核)
       ├─ LiushuiApp.__init__
       │    ├─ discover_platforms()    # 加载已实现平台插件
       │    ├─ load_settings()         # 读取 settings.json
@@ -949,14 +949,16 @@ python -m playwright install chromium
 | `core/config.py`         | 280 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写与"只覆盖传入键"的设置保存 |
 | `core/keepalive.py` | 96 行 | 登录保活服务（后台线程周期巡检，任务执行中跳过本轮） |
 | `core/crashguard.py` | 119 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
+| `core/deps.py` | 219 行 | 依赖三档体检（缺包/版本不对/缺内核）、内核目录识别、修复命令与离线退路；不 import playwright、不碰界面，见 14.2 |
 | `core/outputs.py` | 89 行 | 导出成品查找与汇总副本复制（纯文件操作，可脱离界面单测） |
+
 | `core/theme.py` | 17 行 | 配色常量（供 dialogs 复用，避免反向 import main_gui 成环） |
-| `tools/build_portable.py` | 170 行 | 绿色包组装：白名单复制、`scan_forbidden` 挡住用户数据/凭证、`--verify` 用包内解释器自检 |
-| `packaging/` + `.github/workflows/build-portable.yml` | — | 绿色版启动器（纯 ASCII vbs / 可看错的 bat）与出包流水线，见 14.2 |
+| `tools/build_portable.py` | 282 行 | 绿色包组装：`--flavor full/core` 两版、白名单复制、`scan_forbidden` 挡用户数据/凭证、`check_flavor` 核结构与版本一致、`--verify` 自检路径（不需要依赖） |
+| `packaging/` + `.github/workflows/build-portable.yml` | — | 两个版本的启动器与说明（`run-portable.*` / `run-core.*`，纯 ASCII vbs + 可看错的 bat）和出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台共 987 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 38 个文件约 5900 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（410 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序） |
-| `start.bat` / `启动工具.vbs` | 40 / 158 行 | 启动脚本（vbs 五档找 Python + 首跑装依赖；**必须保持纯 ASCII**，见 13 章） |
+| `tests/` | 41 个文件约 6450 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（451 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、启动前后依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构 |
+| `start.bat` / `启动工具.vbs` | 40 / 124 行 | 源码版的启动脚本（vbs 五档找 Python；**必须保持纯 ASCII**，见 13 章）。它**不再**自己检查/安装依赖 —— 那个判断只在 `core/deps.py` + `check_dependencies()`（见 12 章第 29 条） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
 | `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
@@ -1009,6 +1011,14 @@ python -m playwright install chromium
 25. 判断"这份拷贝用过没有"只能看三个 json；`logs/`、`downloads/`、`browser_data/` 是跑一次就会出现的副产品，拿它们当痕迹会让新包不再问用户，把账单和登录态写回可能只读的程序目录。
 26. 换工作空间必须重启进程（`main_gui.relaunch_for_workspace`）：模块常量是取值拷贝，就地改不传导；书签写不进程序目录时靠环境变量把路径递给下一个进程，否则会陷入"每次启动都问一遍"。
 27. 绿色包只能白名单组装（`tools/build_portable.py` 的 `APP_ITEMS`）：整目录复制 + 排除项迟早会把 `browser_data`（明文会话凭证）发出去，所以成品还有一道 `scan_forbidden` 兜底。
+
+**依赖体检与两个版本**
+
+28. **附加检查不许拦住业务**：`deps.probe()` 自身出错 → 结论 `unknown` 并照常启动，只把"吞了什么"写进 `notes`；`check_dependencies()` 里只有"连 playwright 包都没有"这一种情况会让程序退出（那时确实跑不动），版本不对、内核没下都是**只问不拦**。
+29. **"缺什么/怎么装"的判断只许有一处**（`core/deps.py` + `main_gui.check_dependencies()`）。三个 `.vbs`/`.bat` 启动器只负责挑解释器——它们各自判断过一次依赖时，一处钉版本一处装最新，而内核目录名带版本号，混版本直接起不来（`tests/test_launcher_vbs.py::test_nothing_in_the_launchers_installs_dependencies` 钉着这条）。
+30. 同一个 playwright 版本钉在**三处**：`core/deps.REQUIRED_PLAYWRIGHT_VERSION`、`requirements.txt`、工作流的 `PLAYWRIGHT_VERSION`。前两处由测试核，三处齐全由 CI 那一步核（见 14.2）。
+31. 判断内核在不在**不许写死子目录名**：`chrome-win` 在新版本里叫 `chrome-win64`，先认 `INSTALLATION_COMPLETE` 标记、再逐个子目录找 `chrome.exe`；`chromium_headless_shell-*` 不算内核（我们用持久化上下文）。体检解析出的内核目录**不回退**到 Playwright 默认位置——运行时 `PLAYWRIGHT_BROWSERS_PATH` 已按解析结果设好，回退会让体检和实际行为各说一套。
+32. 启动器的 `--print-python` 诊断分支必须**排在任何会弹窗的检查之前**且自己绝不弹窗：测试/支持人员是在"未必是一个完整包"的目录里问"你会挑中哪个解释器"，一个模态框就能把调用方吊死（`run-core.vbs` 第一版真这么挂过一次）。
 
 ***
 
@@ -1072,19 +1082,34 @@ python -m playwright install chromium
 
 默认两者相同（就地模式），现有安装零迁移；全新的一份包第一次启动会问用户"账单和登录数据存哪儿"（`ensure_workspace` 在建界面之前跑，因为商户列表与日志目录都是 `LiushuiApp.__init__` 里按当前路径建的）。解析优先级与兜底见 5.9；选完/换完都要**重启一次进程**（`relaunch_for_workspace`），原因是各模块 `from .config import DOWNLOAD_DIR` 是取值拷贝。界面「工作空间」按钮可以看路径、打开它、换到别的文件夹；启动日志的 `_report_paths` 会说明工作空间在哪以及是否发生过兜底（书签指向的盘没了、日志退到临时目录）。
 
-### 14.2 打包：`tools/build_portable.py` + GitHub Actions
+### 14.2 打包：两个版本 + GitHub Actions
 
-    python tools/build_portable.py --out dist/包 --python-dir <解释器> --site-dir <依赖> --browsers-dir <ms-playwright> [--zip] [--verify]
+一次构建出**两个包**，程序部分完全一样，区别只在带不带依赖：
 
+    python tools/build_portable.py --out dist/全量版 --verify                        # full
+    python tools/build_portable.py --out dist/核心版 --flavor core --verify           # core
+
+| | 全量版 `-full` | 核心版 `-core` |
+| --- | --- | --- |
+| 里面 | 代码 + `python\` + `app\site-packages\` + `app\runtime\ms-playwright\` | 只有代码树（几 MB） |
+| 双击 | `run-portable.vbs`（只用包内解释器，找不到就报错） | `run-core.vbs`（`%WINDIR%\pyw.exe` → PATH 的 `pythonw.exe` → `%LocalAppData%\Programs\Python\Python3xx`） |
+| 排错 | `run-portable.bat` | `run-core.bat`（会先打印用的是哪个 Python） |
+| 缺依赖时 | 不会缺 | 启动后 `check_dependencies()` 按三档引导安装 |
+| 给谁 | **业务用户就给这个**，不需要装任何东西 | 已有 Python、pip 能通的机器 |
+
+- **两版启动器文件名故意不同**：用户说"我双击的是 run-core.vbs"就能立刻判断他手上是哪一版；共用一个名字时这件事只能靠猜。核心版找解释器时跳过 `WindowsApps` 下 0 字节的 `pythonw.exe`（微软的"还没装，点开会跳商店"占位桩）。
+- **`build()` 拒收错参数**：核心版拿到 `--python-dir/--site-dir/--browsers-dir` 直接失败中止——CI 里两版只差这三个参数，抄错太容易；另有一道 `check_flavor()`：成品结构与名义版本对不上（名叫 core 却躺着 `site-packages`/`runtime`，或包里混进另一版的入口）就中止，绝不发一个"看起来更小、其实一模一样"的包。
 - **白名单复制** `APP_ITEMS = core/ platforms/ tools/ 三份 md`，不是"整仓复制再删"。新增的数据目录不会因为忘加排除项而被发出去。
 - 成品里出现 `browser_data`/`login_state.json`/`downloads`/三个 json/`workspace.json` → `scan_forbidden` 直接失败中止（这些是各人工作空间里的东西，也是明文的后台会话凭证）。
-- `--verify` 用成品内的解释器跑一遍：断言 `LIUSHUI_DATA_DIR` 被尊重、派生路径跟着走、成品里没有用户配置，并打印 `resolve_browsers_path()` 选中的内核目录。⚠ 它把数据目录指到自己的临时目录，否则"只是验一下"就会在成品里留下 `logs/`。
+- `--verify` **只 import `core.config`**：断言 `LIUSHUI_DATA_DIR` 被尊重、派生路径跟着走、成品里没有用户配置，并打印解析出的内核目录。⚠ 它把数据目录指到自己的临时目录，否则"只是验一下"就会在成品里留下 `logs/`。⚠ 自检里不许出现 `core.browser`（顶层就 import playwright）—— 那样"组装 + 自检"必须排在装依赖之后，核心版更是永远自检不了；依赖真能不能用是 CI 冒烟那一步的事。自检里那句 `assert 'playwright' not in sys.modules` 就是防以后有人顺手把重依赖请回来。
 - 布局与启动器：`packaging/run-portable.vbs`（双击，纯 ASCII、只用包内 `python\pythonw.exe`）、`packaging/run-portable.bat`（同一件事但保留控制台，排错用）、`packaging/README-绿色版.txt`（给业务用户的说明）。
 - **CI 的测试步骤不另装依赖**：playwright 只按 `--target` 装进包里，runner 全局没有它，而 9 个测试模块 import `core.browser`（它顶层就 `from playwright.sync_api import ...`）就需要它 → 第一次 CI 就是红在 collection。`tests/conftest.py` 把仓库根插到 `sys.path` 最前（以前只有"在仓库根 `python -m pytest`"这一种起法能 import core），包内依赖按 `build/*/app/site-packages` **追加到最后**：本机有真依赖就用本机的，不会被包内那份或本地跑过打包留下的半成品抢走；只挂 site-packages，绝不挂 `build/.../app`（那会让测试跑进打进包的代码副本里）。⚠ 改 `PKG` 目录结构要连带看 conftest；工作流里也补了一行"包内没有 playwright 就直接 throw"，别再留一个莫名其妙缺模块的错。
 - **`test_launcher_vbs` 在 CI 机上会跳过其中一条**：runner 的 Python 在 `hostedtoolcache` 里，既不在 `.vbs` 的写死路径、也没注册 py 启动器，"五个档全落空"是脚本的正常行为，不该拿来点红打包构建；另加一步打印 `py --list-paths`，把这台机器到底有什么解释器留在日志里。CI 机没有 `.venv`、也没有用户数据 → 已用"`git archive` 出来的干净树 + 没装 playwright 的干净解释器 + 只有包内一份假依赖"实测：409 passed, 1 skipped。
 - **runner 的 stdout 是 cp1252 管道**：Actions 的 windows runner 是英文区域，Python 按 cp1252 建 `sys.stdout`，第一次构建就死在 `print("组装绿色包 → …")` 上——`UnicodeEncodeError` 的 traceback，而不是打包结论。`build_portable.harden_streams()` 只在**当前编码写不出中文探针**时把流换成 UTF-8（探针 `PROBE = "组装→校验"`，连箭头一起测，只测汉字会放过 `→`）；简中控制台（cp936）写得出来 → 原样不动，免得花屏。流被框架换成没有 `reconfigure` 的对象时退到 `emit()` 的 `\uXXXX` 转义——**宁可丑，不能丢行**；`fail()` 在抛 `SystemExit` 前先调 `harden_streams()`，因为中文的报错信息自己触发编码错误是最坑的失败方式。工作流另设 `PYTHONIOENCODING=utf-8`（pytest 的失败报告也是中文的），但**故意不设 `PYTHONUTF8`**：那会连 `open()` 的默认编码一起改，让 CI 与开发机不一致。业务侧不受影响——`logger.log()` 的 `print` 本来就包在 try 里。
 
-`.github/workflows/build-portable.yml`（`workflow_dispatch` 或打 `v*` tag）：`setup-python` 3.14 → `build_portable` 组装 → `pip install --target app/site-packages playwright==1.62.0` → `PLAYWRIGHT_BROWSERS_PATH` 指包内后 `playwright install chromium`（**内核必须由同版本 playwright 生成**）→ 拷整个解释器目录（先断言 `Lib/tkinter` 在，界面全靠它）→ **包内解释器冒烟**：从包内 `site-packages` import playwright、按包内内核目录起一次真 Chromium 并开一页 → 跑仓库离线测试 → `Compress-Archive` → artifact（tag 时同时发 Release）。体积量级：Chromium 428M（`chromium_headless_shell` 另有 272M，随包只带 `chromium-*` 时需实测 headless 是否仍可用）+ playwright 108M + 解释器与代码 ~100M。
+`.github/workflows/build-portable.yml`（`workflow_dispatch` 或打 `v*` tag，14 步）：`setup-python` 3.14 → 打印这台机器有哪些解释器 → **核版本**（`deps.REQUIRED_PLAYWRIGHT_VERSION` / `requirements.txt` / `PLAYWRIGHT_VERSION` 三处不一致就红：发出去的包不能是没实测过的组合）→ 组装两棵目录（`build/full --verify`、`build/core --flavor core --verify`）→ `pip install --target build/full/app/site-packages` → `PLAYWRIGHT_BROWSERS_PATH` 指包内后 `playwright install chromium`（**内核必须由同版本 playwright 生成**）→ 拷整个解释器目录进全量包（先断言 `Lib/tkinter` 在，界面全靠它）→ **全量包冒烟**：包内解释器 + 包内依赖 + 包内内核起一次真 Chromium，并断言 `deps.probe()` 在那棵目录里得出 `ok` → **核心版冒烟**：在没有随包依赖的解释器里跑体检，结论必须是 `no_playwright`（这一版靠引导安装活着，体检认不出缺什么就等于启动后一声不响）→ 跑仓库离线测试 → 压两个 zip → 一起进 artifact（tag 时同时发 Release，说明里写清"发给业务用户就给全量版"）。体积量级：Chromium 428M（`chromium_headless_shell` 另有 272M，随包只带 `chromium-*` 时需实测 headless 是否仍可用）+ playwright 108M + 解释器与代码 ~100M；核心版只有几 MB。
+
+- **推之前先在本地彩排**（这条是两次红下来的教训）：CI 的失败要么是"某步偷偷依赖了上一步的产物"，要么是"runner 环境与开发机不一致"，两类都能在本地逼出来——`py -m venv` 建一个**没装 playwright** 的干净解释器 + `git archive HEAD | tar -x` 导出的**干净树**（CI 没有 `.venv`/`settings.json`/`downloads`），再把依赖目录假造出来跑一遍：核版本、两版组装+自检、核心版体检、借到依赖后不再报缺、全套测试。真需要联网装内核的那几步只能留给 CI。
 
 ***
 

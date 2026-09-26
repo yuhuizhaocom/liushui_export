@@ -587,20 +587,51 @@ class BrowserManager:
             # 归档/校验里的任何文件系统意外都不该冒到 wait_download 之外: 以前它会
             # 把 _dl_capture_on 卡在 True、本次成品留在 临时/ 里, 下一次
             # begin_wait_download 的 rmtree 又把它删掉 —— 明明下成功却报 failed, 越重试
-            # 越丢。折成"这一份没认领成"才是这里该有的结果。
-            self._log(f"[归档] 处理下载文件出错({type(e).__name__}: {str(e)[:80]}), "
-                      "本次不认领这个文件", "warning")
-            return None
+            # 越丢。折成"这一份没认领成"才是这里该有的结果, 但"没认领成"不等于"可以丢"。
+            self._log(f"[归档] 处理下载文件出错({type(e).__name__}: {str(e)[:80]})", "warning")
+            return self._park_unarchivable(final, "归档过程出错")
+
+    def _park_unarchivable(self, src, why):
+        """拿到了文件却归不进商户目录 → 原名原字节挪进 `downloads/待确认/`。
+
+        这条出口以前只是"返回 None": 文件还躺在 `临时/`, 而 `end_wait_download` 收尾会
+        `_cleanup_temp_dir` 把整个目录删掉(下一次 `begin_wait_download` 也会先 rmtree)
+        —— 一份下载成功的账单被工具自己删了, 用户只知道"失败", 而盘上什么都没有。
+        先复制再删原件: 复制本身失败时原件至少还在原地, 日志会把原地路径写出来。
+        与孤儿归位同一条规矩: `待确认/` 不校验、不改名冒充任何商户。
+        """
+        try:
+            if not os.path.isfile(src):
+                return None
+            pending = os.path.join(os.path.abspath(DOWNLOAD_DIR), self.ORPHAN_DIR_NAME)
+            os.makedirs(pending, exist_ok=True)
+            stem, ext = os.path.splitext(os.path.basename(src))
+            dst = self._free_path(pending, stem, ext)
+            shutil.copy2(src, dst)
+            try:
+                os.remove(src)
+            except OSError:
+                pass            # 删不掉原件也认了: 至少 待确认/ 里有一份能打开的
+            self._log(f"[待确认] {why}, 没能归进商户目录; 这份文件已原样放进 "
+                      f"{self.ORPHAN_DIR_NAME}/{os.path.basename(dst)}, 请人工核对后归位",
+                      "warning")
+        except Exception as e:
+            self._log(f"[待确认] 连挪进 {self.ORPHAN_DIR_NAME}/ 都没成({str(e)[:60]}); "
+                      f"文件留在 {src}", "warning")
+        return None
 
     def _accept_download_inner(self, final):
-        final = self._finalize_download(final)
-        if not final or not os.path.isfile(final):
-            return None
-        ok = self._validate_download(final)
+        archived = self._finalize_download(final)
+        if not archived:
+            # 归档没走通: 原件(final)通常还在 临时/ —— 那是会被 rmtree 的地方
+            return self._park_unarchivable(final, "归档没走通(文件被占用/磁盘写入失败)")
+        if not os.path.isfile(archived):
+            return self._park_unarchivable(final, "归档后在正式位置找不到这份文件")
+        ok = self._validate_download(archived)
         if ok:
-            self._log(f"下载完成并校验通过: {os.path.basename(final)}")
-            return final
-        self._log(f"下载文件校验未通过,已清除: {os.path.basename(final)}", "warning")
+            self._log(f"下载完成并校验通过: {os.path.basename(archived)}")
+            return archived
+        self._log(f"下载文件校验未通过,已清除: {os.path.basename(archived)}", "warning")
         try:
             os.remove(final)
         except Exception:

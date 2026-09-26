@@ -21,6 +21,7 @@ import core.browser as bm
 from core.browser import BrowserManager
 
 GOOD = "订单号,金额\nA001,1.00\nA002,2.00\n"
+LOGIN_PAGE = "<!DOCTYPE html>\n<html>\n<body>请登录后台</body>\n</html>\n"
 NEW = "订单号,金额\nB001,9.00\nB002,8.00\n"
 
 
@@ -146,6 +147,45 @@ def test_free_path_never_hands_out_an_occupied_name(mgr):
 def _write_placeholder(path):
     with open(path, "w", encoding="utf-8") as f:
         f.write("x")
+
+
+def test_unarchivable_file_is_parked_not_left_for_the_temp_cleanup(mgr, monkeypatch):
+    """主用例: 归不进商户目录的那一份必须进 待确认/, 不能留在 临时/ 等着被 rmtree。
+
+    以前这几条出口只是返回 None, 而 `end_wait_download` 收尾会 `_cleanup_temp_dir`
+    把整个 临时/ 删掉 —— 明明下载成功的一份账单被工具自己删了, 盘上什么都没有。
+    """
+    b, root, logs = mgr
+    b.begin_wait_download()
+    src = os.path.join(b._dl_temp_dir, "有赞_旗舰店A_2026-09-01_2026-09-02_bill.csv")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(GOOD)
+    monkeypatch.setattr(b, "_finalize_download", lambda p: None)   # 归档走不通
+
+    assert b._accept_download(src) is None
+    pending = os.path.join(root, BrowserManager.ORPHAN_DIR_NAME)
+    parked = os.listdir(pending)
+    assert len(parked) == 1, parked
+    assert open(os.path.join(pending, parked[0]), encoding="utf-8").read() == GOOD
+    assert not os.path.exists(src), "原件应被挪走, 别留在会被清的 临时/ 里"
+    assert any("待确认" in l for l in logs), logs
+
+    b.end_wait_download()                    # 这一步以前就是它的死刑
+    assert os.listdir(pending) == parked, "收尾清理临时目录不许连累待确认里那份"
+
+
+def test_failed_validation_is_still_deleted_not_parked(mgr):
+    """反向钉: 校验明确判否的(登录页/空表)照旧删掉, 不进待确认 —— 否则待确认会被
+    会话过期时刷下来的登录页堆满, 淹掉真正需要人看的那几份。"""
+    b, root, logs = mgr
+    b.begin_wait_download()
+    src = os.path.join(b._dl_temp_dir, "有赞_旗舰店A_2026-09-01_2026-09-02_bill.csv")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(LOGIN_PAGE)
+    assert b._accept_download(src) is None
+    pending = os.path.join(root, BrowserManager.ORPHAN_DIR_NAME)
+    assert not os.path.isdir(pending) or os.listdir(pending) == [], os.listdir(pending)
+    assert any("校验未通过" in l for l in logs), logs
 
 
 def test_any_finalize_accident_becomes_not_claimed(mgr, monkeypatch):

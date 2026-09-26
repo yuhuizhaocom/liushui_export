@@ -312,7 +312,7 @@ class BrowserManager:
 
     def _task_tmp_dir(self):
         """本次任务临时目录: downloads/平台/商户[/子商户]/日期范围/临时"""
-        return os.path.join(self._task_base_dir(), "临时")
+        return os.path.join(self._task_base_dir(), self.TEMP_DIR_NAME)
 
     def _carry_over_orphans(self):
         """把下载根目录里没人认领的 UUID 残留文件移到 downloads/待确认/。
@@ -496,12 +496,18 @@ class BrowserManager:
         self._cleanup_stale_files(root)
         return None
 
-    # 归属不明的残留下载文件放这儿, 不冒充任何商户的账单
-    ORPHAN_DIR_NAME = "待确认"
+    # ===== downloads 树里"本轮流程自己写"的目录: 一份名字, 一处定义 =====
+    # 兜底扫描认的是"与开始那一刻的快照的差集", 而这些差集正是我们自己造出来的;
+    # 少认一个目录 = 那个目录里的东西会被当成"本次新下载"搬走(见 12 章第 42 条)。
+    TEMP_DIR_NAME = "临时"          # 归档前的暂存(`_task_tmp_dir`)
+    ARCHIVE_DIR_NAME = "历史"        # 顶层同名旧版的备份(`_archive_previous`)
+    ORPHAN_DIR_NAME = "待确认"       # 归属不明的残留, 不冒充任何商户的账单
+    SNAPSHOT_DIR_NAME = "snapshots"  # `snapshot()` 的步骤取证图
 
-    # 本轮流程自己往 downloads 树里写的目录(归档前的暂存、旧版备份、归属不明的残留)。
-    # 兜底扫描认的是"与开始那一刻的快照的差集", 而这些差集正是我们自己造出来的。
-    _INTERNAL_DOWNLOAD_DIRS = ("临时", "历史", ORPHAN_DIR_NAME)
+    _INTERNAL_DOWNLOAD_DIRS = (TEMP_DIR_NAME, ARCHIVE_DIR_NAME, ORPHAN_DIR_NAME,
+                               SNAPSHOT_DIR_NAME)
+    # 顶层旧件删不掉/归档没成时, 本次成品的标记(`_keep_both_name`)
+    KEEP_BOTH_MARK = "原件保留"
 
     @classmethod
     def _is_internal_download_path(cls, root, path):
@@ -540,6 +546,12 @@ class BrowserManager:
                 continue
             if self._is_internal_download_path(root, fp):
                 self._log(f"[兜底] 跳过本轮自己写进去的文件: {name}", "debug")
+                continue
+            # 与路 1 同一道判断: 截图不是账单。放在这里而不是只靠校验, 是因为校验
+            # 会"判否 + 删文件" —— 本轮的取证截图(`snapshot()`/`screenshot()` 写的)
+            # 一旦被当成候选, 就会被改名挪出 snapshots/ 再删掉, 现场照片凭空消失。
+            if self._is_image_file(fp):
+                self._log(f"[兜底] 忽略图片文件: {name}", "debug")
                 continue
             # 时刻这道过滤带富余量, 且**读不到时间就当它是候选**(宁可多认领一次再靠
             # 校验挡, 也不许把本轮刚下的真账单过滤掉)
@@ -833,9 +845,6 @@ class BrowserManager:
         except Exception:
             return False
 
-    ARCHIVE_DIR_NAME = "历史"
-    KEEP_BOTH_MARK = "原件保留"
-
     def _archive_previous(self, final_path, save_name):
         """把顶层即将被覆盖的旧版复制进 `历史/`(带它自己的时间戳)。成功 True。
 
@@ -980,7 +989,7 @@ class BrowserManager:
         返回截图完整路径(失败返回None)。"""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         # 存到 downloads/平台/商户[/子商户]/日期/snapshots/步骤_时间.png
-        snap_dir = os.path.join(self._task_base_dir(), "snapshots")
+        snap_dir = os.path.join(self._task_base_dir(), self.SNAPSHOT_DIR_NAME)
         try:
             os.makedirs(snap_dir, exist_ok=True)
         except Exception:

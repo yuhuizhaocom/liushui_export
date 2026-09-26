@@ -15,6 +15,7 @@ import core.browser as bm
 from core.browser import BrowserManager
 
 GOOD = "订单号,金额\nA001,1.00\nA002,2.00\n"
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"0" * 2000      # 文件头是真的 PNG 签名
 LOGIN_PAGE = "<!DOCTYPE html>\n<html>\n<body>请登录后台</body>\n</html>\n"
 NEW = "订单号,金额\nB001,9.00\n"
 
@@ -114,6 +115,49 @@ def test_unreadable_mtime_does_not_hide_the_candidate(mgr, monkeypatch):
     monkeypatch.setattr(BrowserManager, "_mtime_of", staticmethod(lambda p: 0.0))
     assert [os.path.basename(p) for p in b._new_download_candidates(root, known)] == \
         ["statement.csv"]
+
+
+def test_screenshot_written_this_round_is_left_alone(mgr):
+    """回归: 本轮写的取证截图以前会被兜底"认领"走 —— 改名挪出 snapshots、判成图片、删掉。
+
+    `snapshot()` 在建目录失败时还会退到 downloads **根目录**, 那正是最早那次
+    "一张页面截图被改名成 .xlsx 报 success"事故的位置, 所以根目录也要按图片跳。
+    """
+    b, root = mgr
+    b.begin_wait_download()
+    known = b._dir_snapshot(root)
+
+    class _Page:
+        def screenshot(self, path=None, **kw):
+            with open(path, "wb") as f:
+                f.write(PNG_BYTES)
+
+    b.page = _Page()
+    shot = b.snapshot("FAIL_下载现场")
+    assert shot and os.path.isfile(shot)
+    assert b._new_download_candidates(root, known) == [], "本轮自己截的图不该出现在候选里"
+    assert os.path.isfile(shot), "取证截图必须留在原地"
+
+    root_shot = os.path.join(root, "manual_20260926_233000.png")
+    with open(root_shot, "wb") as f:
+        f.write(PNG_BYTES)
+    assert b._new_download_candidates(root, known) == [], "根目录的 PNG 也不该被认领"
+    assert os.path.isfile(root_shot)
+
+
+def test_exclusion_list_covers_every_self_written_dir(mgr):
+    """结构钉: downloads 树里凡是本轮自己建的目录, 名字必须来自那四个类常量。
+
+    这条防的是"以后又加一层自写目录、忘了同步排除名单" —— 那会原样复刻 54e1002
+    认回上一版、这条提交前认走截图这两次事故。
+    """
+    names = set(BrowserManager._INTERNAL_DOWNLOAD_DIRS)
+    assert names == {BrowserManager.TEMP_DIR_NAME, BrowserManager.ARCHIVE_DIR_NAME,
+                     BrowserManager.ORPHAN_DIR_NAME, BrowserManager.SNAPSHOT_DIR_NAME}
+    b, root = mgr
+    assert os.path.basename(b._task_tmp_dir()) in names
+    assert os.path.basename(os.path.join(b._task_base_dir(),
+                                         BrowserManager.SNAPSHOT_DIR_NAME)) in names
 
 
 @pytest.mark.parametrize("rel,expected", [

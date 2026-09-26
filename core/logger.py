@@ -10,6 +10,7 @@ import json
 import glob
 import logging
 import tempfile
+import threading
 from datetime import datetime
 
 from . import config as _config
@@ -46,6 +47,13 @@ def _ensure_log_dir():
     return ""
 
 
+_STATS_LOCK = threading.Lock()
+# 为什么要有这把锁: stats.jsonl 是"每次导出一行"的追加写, 而写它的线程不止一个
+# (任务线程收尾、导出前预检那一路也落统计)。实测同进程 10 线程各写 100 行: 不加锁
+# 只落 964 行、0 个坏行 —— **整条静默消失**, 看板分母凭空变小, 查都没法查。
+# ⚠ 这把锁挡不住"开了两份程序"(跨进程), 那一层由 core/instance.py 的单实例守卫去问。
+
+
 def record_stat(platform, merchant, start_date, end_date, result, duration_s=0, error=""):
     """记录一次导出结果到 stats.jsonl,供稳定性看板汇总。
     result: success/manual/failed"""
@@ -60,8 +68,10 @@ def record_stat(platform, merchant, start_date, end_date, result, duration_s=0, 
             "duration_s": round(duration_s or 0, 1),
             "error": (error or "")[:200],
         }
-        with open(STATS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
+        with _STATS_LOCK:
+            with open(STATS_FILE, "a", encoding="utf-8") as f:
+                f.write(line)
     except Exception:
         pass
 

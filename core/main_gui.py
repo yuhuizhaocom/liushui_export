@@ -2731,6 +2731,24 @@ def main():
             except Exception:
                 pass
             return
+        # 单实例守卫: 商户目录=Chromium profile, 一个 profile 同一时刻只能被一个进程用
+        # (12 章第 1 条)。双开时另一边只会报"Sync API inside asyncio loop"这种莫名错。
+        # 只问不拦: 锁可能是上次崩溃留下的, 拦死就等于让人永远开不了。
+        try:
+            from core import instance
+            import atexit
+            _allowed, other_pid = instance.claim(workspace.DATA_ROOT)
+            atexit.register(instance.release)
+            if other_pid:
+                if not messagebox.askyesno(
+                        "已经开着另一个导出工具",
+                        f"这份工作空间正被另一个实例使用(进程号 {other_pid})。\n\n"
+                        "同时开两份会互相抢浏览器的登录目录(表现为莫名的启动失败),"
+                        "也会把设置与统计写乱。\n\n建议先关掉另一个窗口。仍要继续打开吗?"):
+                    root.destroy()
+                    return
+        except Exception:
+            pass                     # 守卫自己坏了绝不影响启动(第 28 条同一条红线)
         app = LiushuiApp(root)
 
         def _on_close(app, root):

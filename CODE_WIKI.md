@@ -516,7 +516,7 @@ liushui_export/
 - `CronScheduler.trigger(job, now)`：**只有真的开始执行才写 `last_run`**；到点时若被手动导出占着，本次不记，下个轮询周期自动重试（"程序关闭期间错过不补跑"的语义保持不变）。
 - 界面：`SchedulerDialog` 列表的「对象」列显示 `pair_job_targets` 算出的**实际项数**（配不出来标「0 项(商户与平台不匹配)」）；`JobEditDialog` 保存时对空商户/不匹配商户先问一句再存。
 - `SchedulerDialog`/`JobEditDialog`：任务新增/编辑/删除/启停；cron 带常用模板与校验。编辑走 `CronJob.apply_edit(...)`：**改了 cron 就把起算点挪到编辑时刻**，否则老 `last_run` 配新 cron 早已"到期"，保存后 30 秒内会立刻跑一次。
-- 几个容易被忽略的细节：`next_run` 是**逐分钟步进**、上限 527040 次（一年），闰年/2 月 30 日这类表达式最坏要空转一年才放弃并返回 None（`should_trigger` 把 None 当不触发）；`check_all` 每轮先 `store.load()`（手改 json 也能生效），但 `_run` 的 `except: continue` 意味着**一条坏任务会跳过当轮剩余任务**；`poll_interval = max(10, int(...))` 有下限；`CronJob.from_dict` 对残缺条目兜的是 `cron = "* * * * *"` —— 手工编辑 json 漏写 cron 的任务会变成"每分钟跑一次"。
+- 几个容易被忽略的细节：`next_run` 是**逐分钟步进**、上限 527040 次（一年），闰年/2 月 30 日这类表达式最坏要空转一年才放弃并返回 None（`should_trigger` 把 None 当不触发）；`check_all` 每轮先 `store.load()`（手改 json 也能生效），但 `_run` 的 `except: continue` 意味着**一条坏任务会跳过当轮剩余任务**；`poll_interval = max(10, int(...))` 有下限；`CronJob.from_dict` 对没写 `id` 的条目**每轮都新生成一个随机 job_id**（所以任何"按 id 记一次"的机制都会失效，见 12 章第 40 条）；cron 缺失/非法的任务不跑、并且日志会说一句（以前兜成"每分钟跑一次"）。
 - 失败重试：`run_with_retry(fn, retry_times, retry_interval_s, log)` 与 `_execute_export_tasks`（自 `_do_export` 提炼）；settings `retry_times`(默认 2)/`retry_interval_s`(默认 30，递增 ×2)；`retry_times=0` 关闭。`_run_single_export` 对任何异常都在内部消化成返回值 `"failed"`（含浏览器启动阶段），否则抛出会让重试整批失效；导出时那层登录预检失败返回 `"manual"` 且同样落 `stats.jsonl`（`error` 写明「登录已失效」）。
 - 人工介入集中：settings `preflight_login_check`(默认 `True`) 让手动导出在开跑前先逐家 `_probe_login`（无头）核一遍登录态，失效的一次性列出、集中重登，仍未登录的从本批剔除；需扫码的平台按 `manual_intervention` 排在队尾。`_probe_login` 把异常折成"没能核实"并照常导出——检查失败绝不能变成业务失败。定时任务（`trigger_job`）不做预检：确认框无人应答会把整批吊住。
 
@@ -1043,7 +1043,7 @@ python -m playwright install chromium
 37. **"是不是账单"只许看文件头，不许拿全文文案判生死**。HTML 那道门必须排在"数数据行"**之前**（登录页存成 `.csv` 时按逗号数得出行），而它只比对跳掉 BOM/空白后的开头若干字节；`_match_error_keyword` 只在"读不出数据行"时用，且两侧都小写。反过来把这两条合起来写成一个"全文找关键字"的判断，就会退回到"备注里一句'请登录'把真账单删掉"的老事故（第 7 条）。
 38. **登录判定的等待只许往宽、不许往严**：`check_login` 现在按 `LOGIN_POLL_STEP/MAX/STABLE` 采样看 URL，落地即返回。要调参数就调 `LOGIN_POLL_STABLE`（越大越接近旧的 3 秒死等），但**不许改回 `wait_for(timeout=3)` 这种不传条件的写法** —— 它必然耗满预算还会打一条假的"等待超时"WARN。判成"未登录"会把本该到手的账单挡掉（第 28 条同一条红线），判成"已登录"最多白跑一次，所以拿不准时取后者，`tests/test_check_login_wait.py::test_stability_window_is_a_documented_trade_off` 就是钉这个方向的。
 39. **状态灯宁可漏报也别误报**。保活巡检现在只看 URL 里有没有 `login`，页面标题带"登录"字样只写日志不置红 —— 灯一旦因为误报失去可信度，用户就不再信它了。同理 `deps.probe()` 自身出错折成 `unknown` 放行（第 28 条）。
-40. **cron 缺失/非法 = 这个任务不跑，并且要说一次**。`from_dict` 不许再给空 cron 兜 `* * * * *`（那是每分钟起一次浏览器）；`CronScheduler._warn_once` 按任务只提醒一次、整段包在 `try` 里，提示本身绝不能把调度线程带下去。用户显式写 `* * * * *` 是他的选择，照旧生效。
+40. **cron 缺失/非法 = 这个任务不跑，并且要说一次**。`from_dict` 不许再给空 cron 兜 `* * * * *`（那是每分钟起一次浏览器）；`CronScheduler._warn_once` 按任务只提醒一次、整段包在 `try` 里，提示本身绝不能把调度线程带下去。用户显式写 `* * * * *` 是他的选择，照旧生效。⚠ 这个"只说一次"**不许按 `job_id` 记**：json 里没写 `id` 的条目，`from_dict` 每次 load 都新生成一个随机 id，而 `check_all` 每轮都 load —— 按 id 记等于每 30 秒刷一遍同一句（现在按「名字 + cron + 毛病」记）。
 
 ***
 
@@ -1064,7 +1064,7 @@ python -m playwright install chromium
 | `core/browser.py` `_validate_download` | 会话过期时后台把登录页以 `200 + Content-Disposition: xxx.csv` 发下来，而"先数数据行"那道门按逗号数、HTML 标签本身就占行 → **数得出 4 行的登录页被当成品放行**，日志报 success、`stats.jsonl` 记成功，交出去的是一份网页（实测：5 行 HTML 存成 `.csv` → `_count_rows=4` → `_validate_download=True`） | 数行之前加 `_looks_like_web_page` 文件门头；文案匹配改大小写不敏感；`8b0f075` |
 | `core/platform_base.py` `check_login` | `browser.wait_for(timeout=3)` 不传条件 → 已登录/未登录两个分支都必然等满 3.00s（实测），收尾还固定打一条"等待超时"WARN；预检 + inline 预检每家两遍，10 家商户 60 秒白等 + 20 行假警告 | 改成 `LOGIN_POLL_STEP/MAX/STABLE` 采样、落地即返回，不再借道 `wait_for`；`e8a1241` |
 | `core/keepalive.py` `run_once` | `"login" in url or "登录" in title` —— 正是 `check_login` 注释点名抛弃的旧判法，后台已登录而页面名仍带"登录"字样时把状态灯判红，于是"灯红着、导出却一切正常" | 判失效只看 URL，标题命中只写一行"只当提示不判失效"；`18d9b2f` |
-| `core/scheduler.py` `CronJob.from_dict` | 缺 cron 的条目兜 `* * * * *` = **每分钟起一次浏览器导账单**，而界面新建/编辑都有校验、只有手改 `scheduled_tasks.json` 漏写这个键的人会把整台机器点着 | 空 cron 原样留着（`CronExpr` 解析不过 → 该任务不跑），调度线程按任务写一句"不会被执行"且只说一次；`ea5b7a1` |
+| `core/scheduler.py` `CronJob.from_dict` | 缺 cron 的条目兜 `* * * * *` = **每分钟起一次浏览器导账单**，而界面新建/编辑都有校验、只有手改 `scheduled_tasks.json` 漏写这个键的人会把整台机器点着 | 空 cron 原样留着（`CronExpr` 解析不过 → 该任务不跑），调度线程按任务写一句"不会被执行"且只说一次；`ea5b7a1`。第一次提交的记号用 `job_id`，而 `from_dict` 对没写 id 的条目**每轮 load 都新生成一个随机 id** → 变成每 30 秒刷屏，改按"名字+cron+毛病"记；`5529689` |
 | `core/main_gui.py` `_action_help` | 弹窗仍教"在浏览器完成登录并点『确定』"，而第九轮起登完的标志是**关掉浏览器窗口** —— 用户照旧文案在没登完时点掉窗口，正是那次改造要治的病 | 文案跟回现流程并补上预检/「中止」，加 `tests/test_action_help_text.py` 钉住；`a62a7ed` |
 
 > 同批还修了序列快照 harness 的一处失真：`tests/test_platform_sequences.py` 的 `Recorder.page` 以前返回记录函数，平台脚本里 `browser.page.locator(...)` 取属性直接 AttributeError、被脚本自己的 try 吞掉，于是录出来的是"页面操作整段失败"那一支（微信支付停在 `assert_selector` 结果 `failed`、视频号停在 `_set_time`）。给 `page` 一个可链式哑对象后两家录到完整流程（16→18、11→29 次调用，结果 `failed`→`success`），两条快照按新口径重录。

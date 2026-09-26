@@ -457,6 +457,17 @@ class BrowserManager:
         if not self._dl_capture_on:
             self._dl_queue = []
             self._dl_capture_on = True
+            # t0 也必须在这里定下来: 只置 _dl_capture_on 不记时刻, 下面那条兜底扫描
+            # 就没有"本轮开始"这条线可参考(临时目录同理, 没它事件路整个失效)。
+            if not self._dl_capture_t0:
+                self._dl_capture_t0 = time.time()
+            if not self._dl_temp_dir:
+                tmp = self._task_tmp_dir()
+                try:
+                    os.makedirs(tmp, exist_ok=True)
+                    self._dl_temp_dir = tmp
+                except Exception:
+                    pass
         deadline = time.time() + timeout
         known = self._dir_snapshot(root)
         while time.time() < deadline:
@@ -472,11 +483,8 @@ class BrowserManager:
                         self.end_wait_download()
                         return final
                 # 文件还未就绪则继续轮询等待
-            # 2) 兜底: 目录中"等待开始后"新出现且已写完整的文件
-            for fp in sorted(self._dir_snapshot(root) - known, key=os.path.getmtime, reverse=True):
-                name = os.path.basename(fp)
-                if name.endswith(PARTIAL_DOWNLOAD_SUFFIXES):
-                    continue
+            # 2) 兜底: 目录中"本轮开始之后"新出现且已写完整的文件
+            for fp in self._new_download_candidates(root, known):
                 if self._is_stable(fp):
                     final = self._accept_download(fp)
                     if final:
@@ -487,6 +495,55 @@ class BrowserManager:
         self._log("等待下载超时", "warning")
         self._cleanup_stale_files(root)
         return None
+
+    # 归属不明的残留下载文件放这儿, 不冒充任何商户的账单
+    ORPHAN_DIR_NAME = "待确认"
+
+    # 本轮流程自己往 downloads 树里写的目录(归档前的暂存、旧版备份、归属不明的残留)。
+    # 兜底扫描认的是"与开始那一刻的快照的差集", 而这些差集正是我们自己造出来的。
+    _INTERNAL_DOWNLOAD_DIRS = ("临时", "历史", ORPHAN_DIR_NAME)
+
+    @classmethod
+    def _is_internal_download_path(cls, root, path):
+        """这个文件是不是躺在 downloads 树里某个内部目录下(任意深度)。"""
+        try:
+            rel_parts = os.path.relpath(os.path.abspath(path),
+                                        os.path.abspath(root)).split(os.sep)
+        except Exception:
+            return False
+        return bool(set(rel_parts[:-1]) & set(cls._INTERNAL_DOWNLOAD_DIRS))
+
+    def _new_download_candidates(self, root, known):
+        """路 2 的候选文件: 与开始快照的差集, 再套上与 `_find_new_candidate` 同样的口径。
+
+        以前这里只做"快照差集 + 排除半成品后缀", 而 `_finalize_download` 在校验**之前**
+        就把顶层同名旧版复制进了 `平台/商户/区间/历史/` —— 于是本轮校验一失败(最常见是
+        会话过期把登录页当文件发下来), 同一个 while 循环下一步就把那份**上一版的真账单**
+        从 历史/ 搬回顶层认领: 文件是真的、数据行是够的、日志写"下载完成并校验通过"、
+        stats 记 success, 只有"它不是这一轮的东西"没人知道。重导恰恰是最容易拿到登录页
+        的场合, 所以这条不是理论风险(离线实测复现过)。
+        两道过滤各打一半: 内部目录按名字挡(确定性最高), `_dl_capture_t0` 按时刻挡
+        (copy2 保留旧 mtime, 所以 历史/ 那份的时间戳本来就早于本轮开始)。
+        """
+        try:
+            fresh = self._dir_snapshot(root) - set(known)
+        except Exception:
+            return []
+        out = []
+        for fp in sorted(fresh, key=os.path.getmtime, reverse=True):
+            name = os.path.basename(fp)
+            if name.endswith(PARTIAL_DOWNLOAD_SUFFIXES):
+                continue
+            if self._is_internal_download_path(root, fp):
+                self._log(f"[兜底] 跳过本轮自己写进去的文件: {name}", "debug")
+                continue
+            try:
+                if os.path.getmtime(fp) < self._dl_capture_t0:
+                    continue
+            except OSError:
+                continue
+            out.append(fp)
+        return out
 
     def _accept_download(self, final):
         """把下载文件归档到正式位置后再做完整性校验。
@@ -510,9 +567,7 @@ class BrowserManager:
         return None
 
     # ===== 下载文件完整性/内容校验(避免"下完了但实为空表") =====
-
-    # 归属不明的残留下载文件放这儿, 不冒充任何商户的账单
-    ORPHAN_DIR_NAME = "待确认"
+    # (ORPHAN_DIR_NAME 定义在上面, 兜底扫描的内部目录名单要用它)
 
     # ===== 下载文件类型识别(按文件头, 不看扩展名) =====
     # 兜底扫描会把 downloads/ 根目录里"最新出现的文件"当成本次下载认领, 而

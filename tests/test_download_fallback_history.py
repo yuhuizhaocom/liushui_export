@@ -160,6 +160,46 @@ def test_exclusion_list_covers_every_self_written_dir(mgr):
                                          BrowserManager.SNAPSHOT_DIR_NAME)) in names
 
 
+def test_root_scan_uses_the_same_slack_as_the_fallback_scan(mgr):
+    """路 1(`_find_new_candidate`)与路 2 必须用同一个富余量。
+
+    不齐的后果: 事件已经触发但没能移动进临时目录时, 路 1 对这个文件"装作看不见"
+    (mtime 比 t0 早 0.x 秒), 于是 `_wait_root_download` 一路找到 deadline 才由路 2 兜住。
+    """
+    b, root = mgr
+    b.begin_wait_download()
+    fresh = _write(root, "statement.csv", NEW)
+    now = time.time()
+    b._dl_capture_t0 = now - 30
+    os.utime(fresh, (now - 30.5, now - 30.5))       # Windows 实测会有的形状: 比 t0 还早
+    assert b._find_new_candidate(root) == fresh, "路 1 不该因为 0.5 秒的时钟抖动漏掉它"
+    assert [os.path.basename(p) for p in b._new_download_candidates(root, set())] == \
+        ["statement.csv"], "路 2 的判定必须与路 1 一致"
+
+
+def test_a_file_from_a_previous_round_is_not_a_candidate(mgr):
+    """带富余量不等于放弃这条判据: 上一轮的文件两条路都不许认。"""
+    b, root = mgr
+    b.begin_wait_download()
+    stale = _write(root, "old.csv", GOOD)
+    now = time.time()
+    os.utime(stale, (now - 300, now - 300))
+    b._dl_capture_t0 = now
+    assert b._find_new_candidate(root) is None
+    assert b._new_download_candidates(root, set()) == []
+
+
+def test_settle_window_is_not_the_same_thing_as_the_slack(mgr):
+    """`_WRITE_SETTLE_S`(还在不在落盘)和富余量(属不属于本轮)是两件事, 不许合并。"""
+    b, root = mgr
+    b.begin_wait_download()
+    hot = _write(root, "hot.csv", GOOD)
+    b._dl_capture_t0 = time.time() - 30             # 时刻上属于本轮
+    assert b._find_new_candidate(root) is None, "刚改过的文件要视为还在写"
+    os.utime(hot, (time.time() - 5, time.time() - 5))
+    assert b._find_new_candidate(root) == hot, "写完 5 秒后就该被认出来"
+
+
 @pytest.mark.parametrize("rel,expected", [
     (os.path.join("有赞", "旗舰店A", "2026-09-01_2026-09-02", "历史", "a.csv"), True),
     (os.path.join("有赞", "旗舰店A", "2026-09-01_2026-09-02", "临时", "a.csv"), True),

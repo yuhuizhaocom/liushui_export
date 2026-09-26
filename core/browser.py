@@ -562,9 +562,12 @@ class BrowserManager:
         return out
 
     # 文件 mtime 与本轮开始时刻比较时留的富余量(秒)。Windows 的 mtime 由粗粒度系统
-    # 时钟盖, 实测"先 time.time() 再写文件"有半数以上拿到更早的 mtime; 本仓 `_find_new_candidate`
-    # 也早有"刚改过 2 秒内的视为还在写"这一档, 数量级一致。
+    # 时钟盖, 实测"先 time.time() 再写文件"有半数以上拿到更早的 mtime; 路 1 与路 2
+    # 必须用同一个值, 否则同族两条路口径不齐(见 12 章第 42 条)。
     _DL_MTIME_SLACK_S = 2.0
+    # "刚改过就先不当它写完"的等待窗口(秒)。这是**另一件事**: 判的是还在不在落盘,
+    # 不是"属不属于本轮", 别和上面的富余量合并。
+    _WRITE_SETTLE_S = 2.0
 
     @staticmethod
     def _mtime_of(path):
@@ -853,11 +856,14 @@ class BrowserManager:
                     st = os.stat(fp)
                 except Exception:
                     continue
-                # 只认捕获开始后出现的文件,避免误取上次残留
-                if st.st_mtime < self._dl_capture_t0:
+                # 只认捕获开始后出现的文件,避免误取上次残留。
+                # 与路 2 用**同一个富余量**: mtime 由粗粒度时钟盖, 可能比刚取的 t0 还早,
+                # 两条路口径不一致时会出现"路 1 看不见的文件路 2 看得见"(白等一整段
+                # deadline 才由路 2 兜住)。
+                if st.st_mtime < self._dl_capture_t0 - self._DL_MTIME_SLACK_S:
                     continue
-                # 文件还在写(刚修改过) → 不选
-                if now - st.st_mtime < 2:
+                # 文件还在写(刚改过) → 这一轮的等待是另一件事, 单独命名
+                if now - st.st_mtime < self._WRITE_SETTLE_S:
                     continue
                 if st.st_mtime > best_score:
                     best_score = st.st_mtime

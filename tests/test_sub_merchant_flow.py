@@ -463,3 +463,123 @@ def test_the_dialog_lists_saved_sub_merchants_and_saves_edits(monkeypatch, tmp_p
         assert app.rebuilds == 1, "保存后要刷新那行按钮上的数量"
     finally:
         root.destroy()
+
+
+# ===== 银联那份占位实现 =====
+
+class _Loc:
+    def __init__(self, text):
+        self.text = text
+
+    @property
+    def first(self):
+        return self
+
+    def inner_text(self):
+        return self.text
+
+
+class _Page:
+    def __init__(self, text="8234000540", raises=False):
+        self.text = text
+        self.raises = raises
+
+    def locator(self, sel):
+        if self.raises or not sel:
+            raise RuntimeError("元素不存在")
+        return _Loc(self.text)
+
+
+class _YinlianBrowser:
+    """按脚本会调的顺序记流水账; 哪个动作"存在"由构造参数决定。"""
+
+    def __init__(self, clickable=(), fillable=(), page=None):
+        self.actions = []
+        self.clickable = set(clickable)
+        self.fillable = set(fillable)
+        self.snapshots = []
+        self.logs = []
+        self.page = page or _Page()
+
+    def navigate(self, url, **kw):
+        self.actions.append(("navigate", url))
+
+    def sleep(self, s):
+        self.actions.append(("sleep", s))
+
+    def click_text(self, text, exact=False, **kw):
+        self.actions.append(("click", text, exact))
+        return text in self.clickable
+
+    def fill_placeholder(self, label, value, **kw):
+        self.actions.append(("fill", label, value))
+        if label in self.fillable:
+            self.clickable.add(value)          # 搜出来之后那一行才可点
+            return True
+        return False
+
+    def snapshot(self, name):
+        self.snapshots.append(name)
+
+    def _log(self, msg, level="info"):
+        self.logs.append((level, msg))
+
+
+def _yinlian():
+    from core.loader import discover_platforms
+    return discover_platforms()["yinlian"]
+
+
+def test_only_yinlian_declares_sub_merchant_support_for_now():
+    plats = discover_platforms()
+    assert plats["yinlian"].supports_sub_merchants is True
+    others = sorted(k for k, p in plats.items() if p.supports_sub_merchants and k != "yinlian")
+    assert others == [], f"新平台要显式声明才进循环: {others}"
+
+
+def test_yinlian_switch_walks_entry_search_confirm():
+    plat = _yinlian()
+    b = _YinlianBrowser(clickable={plat.SUB_SWITCH_ENTRY, plat.SUB_CONFIRM_TEXTS[0]},
+                        fillable=["商户号"])
+    assert plat.switch_sub_merchant(b, "8234000540") is True
+    kinds = [a[0] for a in b.actions]
+    assert kinds[0] == "navigate" and "fill" in kinds and "click" in kinds
+    assert ("click", "8234000540", False) not in b.actions, "搜索框填上了就不该再乱点文字"
+    assert b.snapshots == []
+
+
+def test_yinlian_switch_falls_back_to_clicking_the_list_row():
+    """有些后台不给搜索框, 是列表里一行一行列着的。"""
+    plat = _yinlian()
+    b = _YinlianBrowser(clickable={plat.SUB_SWITCH_ENTRY, "8234000541", "确定"})
+    assert plat.switch_sub_merchant(b, "8234000541") is True
+    assert ("click", "8234000541", True) in b.actions
+
+
+def test_yinlian_switch_stops_when_the_entry_is_not_there():
+    plat = _yinlian()
+    b = _YinlianBrowser(clickable=set())
+    assert plat.switch_sub_merchant(b, "A1") is False
+    assert b.snapshots, "点不到入口要留下现场证据"
+    assert any("切换商户" in m for _l, m in b.logs)
+
+
+def test_yinlian_switch_stops_when_the_row_cannot_be_found():
+    plat = _yinlian()
+    b = _YinlianBrowser(clickable={plat.SUB_SWITCH_ENTRY})   # 入口在, 里面没有这家
+    assert plat.switch_sub_merchant(b, "录错的名字") is False
+    assert b.snapshots
+
+
+def test_yinlian_readback_is_empty_until_the_selector_is_calibrated():
+    """读回选择器还没核过 → 老实返回空串, 让流程去说"归属未经校验", 绝不瞎猜一个。"""
+    plat = _yinlian()
+    assert plat.SUB_ID_SELECTOR == "", "核到真实选择器后请把它填上并同步这条测试"
+    assert plat.current_sub_merchant(_YinlianBrowser()) == ""
+    plat.SUB_ID_SELECTOR = ".merchant-now"
+    try:
+        assert plat.current_sub_merchant(_YinlianBrowser(page=_Page(" 8234000540 "))) == "8234000540"
+        # 填了选择器但页面上没有那个元素: 同样是"读不到", 不是"读到了空商户"
+        assert plat.current_sub_merchant(_YinlianBrowser(page=_Page(raises=True))) == ""
+    finally:
+        plat.SUB_ID_SELECTOR = ""

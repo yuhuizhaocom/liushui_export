@@ -35,7 +35,8 @@ def test_every_path_hangs_off_the_data_root(sub, const):
 def test_derived_names_cover_exactly_the_public_constants():
     assert set(cfg._derive("x")) == {"DATA_ROOT", "DOWNLOAD_DIR", "BROWSER_DATA_DIR",
                                      "LOG_DIR", "RECORDINGS_DIR", "SETTINGS_FILE",
-                                     "SCHEDULED_TASKS_FILE", "SELECTION_FILE"}
+                                     "SCHEDULED_TASKS_FILE", "SELECTION_FILE",
+                                     "SUB_MERCHANTS_FILE"}
 
 
 # ===== 解析优先级 =====

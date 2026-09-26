@@ -84,27 +84,30 @@ class BrowserManager:
     def set_export_context(self, platform="", start_date="", end_date="", merchant="",
                            sub_merchant=""):
         """设置当前导出上下文(平台名/商户/子商户/日期)
-        下载文件按 平台/商户/日期范围 分文件夹;同商户同日期范围的最新文件在顶层,
+        下载文件按 平台/商户[/子商户]/日期范围 分文件夹;同商户同日期范围的最新文件在顶层,
         之前的版本自动归档到 历史/ 子目录并加时间戳。
-        sub_merchant 只影响文件名(多一段 商户_子商户), 不参与目录分层。
+        sub_merchant 非空时**既多一层目录也多一段文件名**(银联这类"一次登录切着导多份"),
+        没传时所有路径与只有商户层时逐字一致。名字先过一遍清洗: 它会变成目录名。
         """
         self._export_platform = platform
         self._export_start = start_date
         self._export_end = end_date
         self._export_merchant = merchant or ""
-        self._export_sub_merchant = sub_merchant or ""
+        self._export_sub_merchant = self._safe_name(sub_merchant) if sub_merchant else ""
         # 任务ID = 日期范围,保证同一平台/商户同一区间的所有导出都落在同一个文件夹
         self._export_task_id = f"{start_date}_{end_date}" if start_date and end_date else ""
 
     def _task_base_dir(self):
-        """任务根目录: downloads/平台/商户/日期范围(无商户时省略商户层)"""
+        """任务根目录: downloads/平台/商户[/子商户]/日期范围(空掉的层自动省略)。
+
+        层的顺序固定, 且**跳过空值** —— 没配子商户的商户不能多出一层空目录,
+        那会让老用户的既有归档结构看起来变了样。
+        """
         base = os.path.abspath(DOWNLOAD_DIR)
-        if self._export_platform:
-            base = os.path.join(base, self._export_platform)
-        if self._export_merchant:
-            base = os.path.join(base, self._export_merchant)
-        if self._export_task_id:
-            base = os.path.join(base, self._export_task_id)
+        for part in (self._export_platform, self._export_merchant,
+                     self._export_sub_merchant, self._export_task_id):
+            if part:
+                base = os.path.join(base, part)
         return base
 
     def _setup_dirs(self):

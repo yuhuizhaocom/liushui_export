@@ -161,3 +161,34 @@ def test_original_mode_uuid_falls_back_to_unified(tmp_path, monkeypatch):
     b.set_export_context("有赞", START, END, MERCHANT)
     assert b._normalize_download_name(UUID, "有赞", START, END) == \
         f"有赞_{MERCHANT}_{START}_{END}"
+
+
+# ===== 子商户那一级目录 =====
+
+def test_task_dir_is_unchanged_without_a_sub_merchant(mgr):
+    """没配子商户的商户绝不能多出一层空目录 —— 老用户的归档形状不许变。"""
+    b, root = mgr
+    assert b._task_base_dir() == os.path.join(root, PLATFORM, MERCHANT, f"{START}_{END}")
+
+
+def test_sub_merchant_adds_exactly_one_directory_level(tmp_path, monkeypatch):
+    monkeypatch.setattr(bm, "DOWNLOAD_DIR", str(tmp_path))
+    b = BrowserManager(headless=True)
+    b.set_export_context(PLATFORM, START, END, MERCHANT, "8234000540")
+    assert b._task_base_dir() == os.path.join(str(tmp_path), PLATFORM, MERCHANT,
+                                              "8234000540", f"{START}_{END}")
+    # 名字和文件名两处用的是同一份清洗后的值, 不会出现"目录一个名、文件名另一个名"
+    assert b._export_sub_merchant == "8234000540"
+    assert b._normalize_download_name("对账单.csv", PLATFORM, START, END) == \
+        f"{PLATFORM}_{MERCHANT}_8234000540_{START}_{END}_对账单.csv"
+
+
+def test_sub_merchant_cannot_escape_the_merchant_dir(tmp_path, monkeypatch):
+    """子商户名会直接成为一级目录名: 传进来的脏东西必须在设上下文时就被吃掉。"""
+    monkeypatch.setattr(bm, "DOWNLOAD_DIR", str(tmp_path))
+    b = BrowserManager(headless=True)
+    b.set_export_context(PLATFORM, START, END, MERCHANT, "../../恶意的")
+    base = b._task_base_dir()
+    assert os.sep not in b._export_sub_merchant.replace(str(tmp_path), ""), b._export_sub_merchant
+    assert base.startswith(os.path.join(str(tmp_path), PLATFORM, MERCHANT)), base
+    assert ".." not in base.split(os.sep)[-3:], base

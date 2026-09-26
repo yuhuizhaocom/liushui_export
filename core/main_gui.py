@@ -700,6 +700,62 @@ class LiushuiApp:
                   font=("Microsoft YaHei", 8),
                   command=lambda k=key, m=name: self._prompt_delete_merchant(k, m)
                   ).pack(side=tk.RIGHT, padx=(4, 2))
+        # 只有声明支持子商户的平台才给这个入口, 否则点了只会得到一句"没用"
+        plat = self.platforms.get(key)
+        if plat is not None and getattr(plat, "supports_sub_merchants", False):
+            n = len(submerchants.get(key, name)[0])
+            tk.Button(mrow, text=(f"子商户 {n}" if n else "子商户"), width=7, relief=tk.FLAT,
+                      fg="#ffffff", bg="#8e44ad", cursor="hand2",
+                      font=("Microsoft YaHei", 8),
+                      command=lambda k=key, m=name: self._prompt_sub_merchants(k, m)
+                      ).pack(side=tk.RIGHT, padx=(4, 2))
+
+    def _prompt_sub_merchants(self, key, merchant):
+        """录入这家商户名下的子商户: 一行一个, 导出时按这个顺序逐个切过去导一份。
+
+        刻意不做勾选树 —— 想少导几家就把那几行删掉, 比再维护一套"选了但没导"的状态清楚。
+        """
+        plat = self.platforms.get(key)
+        subs, note = submerchants.get(key, merchant)
+        win = tk.Toplevel(self.root)
+        win.title(f"{getattr(plat, 'name', key)} · {merchant} —— 子商户")
+        win.configure(bg=BG_MAIN)
+        tip = ("一次登录里按下面的顺序逐个切换子商户并各导一份, 成品会多一层子商户目录。\n"
+               "一行一个子商户(商户号或商户名都行); 留空保存 = 取消子商户, 这家按普通商户导。\n"
+               "每次切换后都会核对页面上当前是哪个商户, 对不上就停手转人工。")
+        if note:
+            tip += f"\n⚠ {note}"
+        tk.Label(win, text=tip, bg=BG_MAIN, fg=FG_MUTED, justify=tk.LEFT,
+                 font=("Microsoft YaHei", 9)).pack(anchor="w", padx=10, pady=(10, 4))
+        box = tk.Text(win, width=52, height=8, font=("Consolas", 10))
+        box.pack(fill=tk.BOTH, expand=True, padx=10)
+        box.insert("1.0", "\n".join(subs))
+        row = tk.Frame(win, bg=BG_MAIN)
+        row.pack(fill=tk.X, padx=10, pady=10)
+
+        def _save():
+            raw = box.get("1.0", tk.END)
+            ok, cleaned, why = submerchants.save_one(key, merchant, raw)
+            if not ok:
+                messagebox.showerror("没能保存", why, parent=win)
+                return
+            win.destroy()
+            self._rebuild_platform_list()      # 按钮上的数量要跟着变
+            self._append_log(f"[子商户] {getattr(plat, 'name', key)}({merchant}): "
+                             f"已保存 {len(cleaned)} 个"
+                             + ("" if cleaned else "(已清空, 这一家按普通商户导出)"))
+
+        tk.Button(row, text="保存", command=_save, bg="#27ae60", fg="#ffffff",
+                  relief=tk.FLAT, width=8).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(row, text="取消", command=win.destroy, bg="#95a5a6", fg="#ffffff",
+                  relief=tk.FLAT, width=8).pack(side=tk.RIGHT)
+        if plat is not None and not plat.verifies_sub_merchant_identity():
+            tk.Label(win, text="提示: 这个平台的脚本还没实现「读回当前子商户」, "
+                               "导出时归属不会被校验。",
+                     bg=BG_MAIN, fg="#c0392b", justify=tk.LEFT,
+                     font=("Microsoft YaHei", 9)).pack(anchor="w", padx=10, pady=(0, 8))
+        win.transient(self.root)
+        win.grab_set()
 
     def _sync_platform_on_merchant(self, key, *_):
         """商户被勾选时自动勾选平台(平台未勾选且存在已勾选商户时补勾)。"""

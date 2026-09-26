@@ -319,3 +319,147 @@ def test_export_one_without_sub_merchant_keeps_the_old_stat_label(monkeypatch):
                                     "2026-09-01", "2026-09-02")
     assert recs[0][0][1] == "主账号甲"
     assert app.browser.contexts == [("银联", "主账号甲", "")]
+
+
+# ===== 界面入口 =====
+
+def test_readback_support_is_reported_per_platform():
+    """界面要靠这个判断要不要提醒"归属不会被校验": 只认脚本有没有真的覆盖。"""
+    assert PlatformBase().verifies_sub_merchant_identity() is False
+    assert _plat(on_page="8234000540").verifies_sub_merchant_identity() is True
+
+    class _Empty(PlatformBase):
+        def current_sub_merchant(self, browser):
+            return ""          # 覆盖了但永远读不到, 等于没校验
+
+    assert _Empty().verifies_sub_merchant_identity() is True, "覆盖过就该说覆盖了(读不到另有提醒)"
+
+
+def _tk_or_skip():
+    pytest.importorskip("tkinter")
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception:                       # 远程会话/没有窗口站: 界面测不了就跳
+        pytest.skip("这台机器起不了 Tk 窗口")
+    root.withdraw()
+    return root
+
+
+def _walk(widgets, out=None):
+    """摊平整棵控件树。
+
+    ⚠ 必须传**列表**: tkinter 的 widget 自身就有 `append`(= pack_append)和 `__iter__`,
+    把一个 Frame 当 accumulator 传进来会变成"边遍历边往容器上挂控件"的死循环(第一版就卡在这)。
+    """
+    if not isinstance(widgets, (list, tuple)):
+        widgets = [widgets]
+    out = [] if out is None else out
+    for w in widgets:
+        out.append(w)
+        try:
+            kids = list(w.winfo_children())
+        except Exception:
+            kids = []
+        if kids:
+            _walk(kids, out)
+    return out
+
+
+def _button_texts(widget):
+    import tkinter as tk
+    return [w.cget("text") for w in _walk(widget) if isinstance(w, tk.Button)]
+
+
+class _RowApp:
+    """只挂 `_add_merchant_checkbox` 用到的成员, 让真方法在临时窗口里长出一行。"""
+
+    def __init__(self, root, plat):
+        import tkinter as tk
+        self.root = root
+        self.platforms = {"yinlian": plat}
+        self.selection = {"merchant": {}}
+        self.merchant_frames = {"yinlian": tk.Frame(root)}
+        self.merchant_rows = {}
+        self.merchant_vars = {}
+        self.platform_vars = {}
+        self.rebuilds = 0
+
+    def _refresh_summary(self):
+        pass
+
+    def _save_selection(self):
+        pass
+
+    def _sync_platform_on_merchant(self, key, *args):
+        pass
+
+    def _action_open_merchant(self, key, name):
+        pass
+
+    def _prompt_delete_merchant(self, key, name):
+        pass
+
+    def _rebuild_platform_list(self):
+        self.rebuilds += 1
+
+
+def _button_texts(widget):
+    import tkinter as tk
+    return [w.cget("text") for w in _walk([widget]) if isinstance(w, tk.Button)]
+
+
+def test_the_entry_only_shows_up_on_platforms_that_support_it():
+    root = _tk_or_skip()
+    try:
+        app = _RowApp(root, _plat(supports=True))
+        LiushuiApp._add_merchant_checkbox(app, "yinlian", "主账号甲")
+        texts = _button_texts(app.merchant_frames["yinlian"])
+        assert any(str(t).startswith("子商户") for t in texts), texts
+
+        app2 = _RowApp(root, _plat(supports=False))
+        LiushuiApp._add_merchant_checkbox(app2, "yinlian", "主账号甲")
+        assert not any(str(t).startswith("子商户")
+                       for t in _button_texts(app2.merchant_frames["yinlian"]))
+    finally:
+        root.destroy()
+
+
+def test_the_button_shows_how_many_sub_merchants_are_configured(monkeypatch):
+    root = _tk_or_skip()
+    try:
+        monkeypatch.setattr(sm, "get", lambda key, merchant, data=None, path=None:
+                            (["A1", "A2"], ""))
+        app = _RowApp(root, _plat())
+        LiushuiApp._add_merchant_checkbox(app, "yinlian", "主账号甲")
+        assert "子商户 2" in _button_texts(app.merchant_frames["yinlian"])
+    finally:
+        root.destroy()
+
+
+def test_the_dialog_lists_saved_sub_merchants_and_saves_edits(monkeypatch, tmp_path):
+    """对话框要能看见已录的、改完点保存就落盘并刷新数量 —— 这条走的是真存储路径。"""
+    import tkinter as tk
+    root = _tk_or_skip()
+    try:
+        monkeypatch.setattr("core.config.SUB_MERCHANTS_FILE",
+                            str(tmp_path / "sub_merchants.json"))
+        assert sm.save_one("yinlian", "主账号甲", ["A1", "A2"])[0] is True
+        app = _RowApp(root, _plat())
+        LiushuiApp._prompt_sub_merchants(app, "yinlian", "主账号甲")
+        dialog = [w for w in _walk(root.winfo_children()) if isinstance(w, tk.Toplevel)]
+        assert dialog, "没弹出对话框"
+        box = [w for w in _walk(dialog) if isinstance(w, tk.Text)][0]
+        assert box.get("1.0", tk.END).strip().splitlines() == ["A1", "A2"]
+        # 这个假平台实现了读回, 所以不该出现"归属不会被校验"的红字提醒
+        assert not any("不会被校验" in str(w.cget("text"))
+                       for w in _walk(dialog) if isinstance(w, tk.Label))
+        box.delete("1.0", tk.END)
+        box.insert("1.0", "A1\nA3\nA3\n")
+        save = [w for w in _walk(dialog) if isinstance(w, tk.Button)
+                and w.cget("text") == "保存"][0]
+        save.invoke()
+        assert sm.get("yinlian", "主账号甲")[0] == ["A1", "A3"], "重复行要塌成一个"
+        assert app.rebuilds == 1, "保存后要刷新那行按钮上的数量"
+    finally:
+        root.destroy()

@@ -158,6 +158,13 @@ class PlatformBase:
         """
         return ""
 
+    def verifies_sub_merchant_identity(self):
+        """这个平台的脚本实现了「读回当前子商户」吗 —— 决定导出时归属能不能被校验。
+
+        界面上拿它决定要不要提示"归属不会被校验", 免得用户以为切错了会有人拦。
+        """
+        return type(self).current_sub_merchant is not PlatformBase.current_sub_merchant
+
     # ===== 通用导出骨架(平台脚本按需改用;不调用则完全不受影响) =====
     # 各平台脚本里"打开页面 → 填日期 → 点查询/导出 → 等下载"这段几乎逐字相同,
     # 差异只有中间点哪些按钮、下载等多久。收在这里后平台只需覆盖有差异的钩子,

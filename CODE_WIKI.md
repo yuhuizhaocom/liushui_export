@@ -32,6 +32,8 @@
 
 - [13. 已知不一致、未接线与待议](#13-已知不一致未接线与待议)
 
+- [14. 绿色版与工作空间](#14-绿色版与工作空间)
+
 ***
 
 ## 1. 项目概述
@@ -115,8 +117,8 @@ liushui_export/
 ├── 使用说明.md              # 面向最终用户的使用文档
 ├── 脚本编写指南.md          # 面向开发者的平台插件编写指南
 ├── core/                    # ★ 核心框架包（15 个模块，见 2 章分层图）
-│   ├── main_gui.py          # 2150 行 · 界面 + 批任务编排
-│   ├── browser.py           # 1366 行 · BrowserManager
+│   ├── main_gui.py          # 2285 行 · 界面 + 批任务编排
+│   ├── browser.py           # 1390 行 · BrowserManager
 │   ├── scheduler.py         # 443 行 · cron 与定时任务
 │   ├── platform_admin.py    # 336 行 · 平台管理与脚本调试
 │   ├── exporters.py         # 229 行 · SmartExporter
@@ -132,8 +134,11 @@ liushui_export/
 │   ├── kuaishou/ xiaohongshu/ tmall/ shipinhao/ yinlian/
 │   └── <key>/__init__.py + export.py     # 详见 8.2
 ├── tools/
-│   └── recording_to_script.py # 272 行 · 录制 JSONL → 平台脚本骨架
-├── tests/                   # 35 个文件约 5370 行，372 项 pytest（离线，不碰真浏览器）
+│   ├── recording_to_script.py # 272 行 · 录制 JSONL → 平台脚本骨架
+│   └── build_portable.py    # 170 行 · 绿色包白名单组装 + 成品扫描/自检
+├── packaging/               # 绿色包的启动器与随包说明（run-portable.vbs / .bat / README）
+├── .github/workflows/build-portable.yml   # Actions 出包：自带 Python + playwright + Chromium
+├── tests/                   # 37 个文件约 5670 行，402 项 pytest（离线，不碰真浏览器）
 ├── downloads/               # 运行时创建：账单归档 + 汇总副本 + 待确认/
 ├── browser_data/            # 运行时创建：<平台key>/<商户名>/ 每商户一个 profile
 ├── recordings/              # 「打开」手工测试窗口的点击录制 jsonl（已 gitignore）
@@ -302,6 +307,8 @@ liushui_export/
 ### 5.2 `BrowserManager`（core/browser.py）— 浏览器管理类
 
 封装 Playwright 的**持久化上下文**（`launch_persistent_context`，`user_data_dir` 按平台/商户隔离），是平台脚本与浏览器之间的唯一桥梁。构造时初始化下载捕获状态机（`_dl_queue` 事件队列、`_dl_capture_on` 捕获开关、`_dl_temp_dir` 临时目录）。模块顶部还会在 `C:\pw_browsers` 存在时把 `PLAYWRIGHT_BROWSERS_PATH` 指过去（离线打包时内核随包放这里），**这条副作用必须发生在 `from playwright…` 导入之前**。
+
+> **Playwright 内核目录** `resolve_browsers_path()`（写在模块顶部，必须早于 `from playwright…` 导入）：① 外部已设的 `PLAYWRIGHT_BROWSERS_PATH` ② 包内 `<程序目录>/runtime/ms-playwright`（绿色版随包内核）③ `C:\pw_browsers`（开发机既有位置），且**只有目录真实存在才设**。版本必须配对：内核目录名带版本号（`chromium-1234`），由同版本 playwright 生成，混用两套会直接起不来浏览器。
 
 #### 实例状态（`__init__`，25-46）
 
@@ -524,11 +531,18 @@ liushui_export/
 | 成员 | 说明 |
 | --- | --- |
 | `ROOT_DIR` / `DOWNLOAD_DIR` / `BROWSER_DATA_DIR` / `SETTINGS_FILE` / `SCHEDULED_TASKS_FILE` / `SELECTION_FILE` | 全部**基于项目根的绝对路径**（注释：不依赖运行目录）。`.vbs` 双击时 CWD 不定，早期用相对路径会把产物落到别处。这里只拼路径不建目录（`downloads`/`browser_data` 由 `BrowserManager._setup_dirs` 建，`logs` 由 logger 导入时建）。 |
+| `ROOT_DIR` / `PROGRAM_DIR` vs `DATA_ROOT` | **程序目录**（代码/平台脚本/内核，可只读）与**工作空间**（账单、浏览器数据、日志、三个 json、录制，必须可写）分成两类，绿色版靠这条界线成立。`ROOT_DIR` 仍由 `__file__` 上溯得到；七个用户可见路径全部由 `_derive(root)` 一处算出。 |
+| `resolve_data_root()` | 定工作空间并返回 `(路径, 是否还要问用户)`，优先级：命令行 `--data-dir=` > 环境变量 `LIUSHUI_DATA_DIR` > 书签 `workspace.json` > 就地（程序目录已有"用户真动过"的痕迹）> 程序目录 + 待选。取到的目录会**试写探针文件**（`_probe_writable`：只 `mkdir` 不算数，只读介质上 mkdir 也可能成功）。指定的目录不可用时退回程序目录并把原因记进 `RESOLVE_NOTES` —— 悄悄换位置比报错更糟。 |
+| `LEGACY_MARKERS` | 只认 `settings.json`/`selection_state.json`/`scheduled_tasks.json` 三个。⚠ 不能把 `logs`/`downloads`/`browser_data` 当痕迹：`import core.logger` 就会建 `logs/`、`BrowserManager()` 就会建另两个 —— 那样自检跑过一次之后新包就永远不再问用户，账单与登录态被写回可能只读的程序目录（有回归测试钉住）。 |
+| `apply_data_root(root, remember=True)` | 换工作空间的唯一入口：试写 → 重算派生常量 → 清 `PENDING_PICK` → 写工作空间标记 `.liushui_workspace.json` + 书签。不可写返回 `(False, 原因)`。⚠ 各模块是 `from .config import DOWNLOAD_DIR` 的**取值拷贝**，换完必须重启进程才传导（见 14 章）。 |
+| `read_pointer()` / `write_pointer()` | 书签的两个位置：程序目录 `workspace.json` 优先，写不进（只读介质）就退到 `~/.liushui_export/workspace.json`。这是全仓唯一一处 `expanduser`：权威标记在工作空间内，书签只负责"下次去哪找它"。 |
+| `default_workspace_suggestion()` | 首启给用户的默认位置：`~/Documents/流水导出工作空间`。 |
 | `DEFAULT_SETTINGS` | 8 个键的唯一默认值来源。⚠ `load_settings()` **只遍历这 8 个键**，用户在 `settings.json` 里手加的未知键会被静默丢弃。 |
 | `load_settings()` | 读文件、缺字段回默认；文件缺失/坏 JSON/顶层不是 dict 三种情况都吞掉，返回值恒为完整 8 键副本。不写盘。 |
 | `write_text_atomic(path, text)` | 同目录 `path+".tmp"` → write + `flush` + `os.fsync` → `os.replace`；失败时删临时文件后 **raise**（"失败的这次不算数，别留垃圾文件"）。⚠ tmp 名固定，同一文件并发写会互相踩；同目录保证 `os.replace` 不跨卷。 |
 | `write_json_atomic(path, data)` | `ensure_ascii=False, indent=2` 后委托上者。注释 76-79 是全部理由：`settings`/`scheduled_tasks`/`selection_state` 都是"界面每次改动整体重写"，非原子写时进程写一半崩掉文件就是截断的，而三处读取都是 `except → 用默认值/返回空`，**用户看到的是"配置和定时任务被静默清空"**。 |
 | `save_settings(partial)` | **以 `load_settings()` 现值为底只覆盖传进来的键**。注释 87-90 记录旧事故：旧实现以 `dict(DEFAULT_SETTINGS)` 为底，界面各处"点一下只写自己那一两个键"，于是勾一下"失败重试"就把首次重试间隔写回 30、动一下保活开关就把文件名模式和显示浏览器统统恢复默认。整体 try/except **pass**：写盘失败静默，界面不会提示"保存失败"。 |
+| `_ensure_log_dir()` / `LOGGER_NOTES` | 日志目录建不出来（只读介质、U 盘、权限）时退到 `%TEMP%/liushui_export/logs`；连 `FileHandler` 打不开也只是没有文件通道，**绝不在 import 期抛错** —— `logger` 是最早被导入的模块之一，那时除了 crashguard 没有别的兜底。经过记进 `LOGGER_NOTES`，由界面 `_report_paths` 在启动日志里说一声。 |
 | `log(message, level="info", callback=None)` | 三通道：① `print`（整句包 try，`pythonw` 下 `sys.stdout` 可能是 None）；② `logging.FileHandler` 写 `logs/run_<启动时刻>.log`（格式 `时间 [LEVEL] 消息`）；③ GUI 回调（同样吞异常，回调可能是已销毁的文本控件）。界面行带 `[HH:MM:SS] [WARN]/[ERROR]` 前缀，与文件行不同；`info` 无前缀，`critical` 未在映射表里会落 INFO。返回值是拼好的界面行。 |
 | `logger` | 模块级单例，`if not logger.handlers` 防重复挂 handler（重复导入/测试重跑）。 |
 | `record_stat(...)` | 往 `logs/stats.jsonl` 追加一行 JSON，固定 8 字段：`ts/platform/merchant/start_date/end_date/result/duration_s/error`(截 200 字)。**整个函数 `except: pass`** —— 统计绝不许影响导出。唯一调用点在 `_run_single_export` 收尾无条件执行。 |
@@ -922,24 +936,26 @@ python -m playwright install chromium
 
 | 文件                       | 规模（当前实际行数）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
-| `core/main_gui.py`       | 2150 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、录制/调试/平台管理对话框入口 |
-| `core/browser.py`        | 1366 行      | 浏览器管理、下载捕获与归档、成品校验（含格式门）、登录态存取、操作录制（项目体量最大的核心模块） |
+| `core/main_gui.py`       | 2285 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、录制/调试/平台管理对话框入口 |
+| `core/browser.py`        | 1390 行      | 浏览器管理、下载捕获与归档、成品校验（含格式门）、登录态存取、操作录制（项目体量最大的核心模块） |
 | `core/scheduler.py` | 443 行 | 定时任务（cron 解析 / `TaskStore` 持久化 / 轮询触发 / 管理界面） |
 | `core/platform_admin.py` | 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/exporters.py`      | 229 行       | 智能导出器（无人写 `export()` 时的默认兜底导出）  |
 | `core/platform_base.py`  | 214 行       | 平台基类（元信息 + 登录判据 + 选择器自检 + 通用导出骨架钩子） |
 | `core/dialogs.py` | 198 行 | 历史日志窗口与稳定性看板（只依赖 `logger` + `theme`） |
-| `core/logger.py`         | 165 行       | 日志三通道 + 稳定性统计（`stats.jsonl` 尾部读与全量汇总） |
+| `core/logger.py`         | 200 行       | 日志三通道 + 稳定性统计（`stats.jsonl` 尾部读与全量汇总） |
 | `core/cleanup.py` | 121 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/loader.py`         | 112 行        | 平台加载器与免重启 reload（含清磁盘 `.pyc`） |
-| `core/config.py`         | 98 行        | 路径常量、`DEFAULT_SETTINGS`、原子读写与"只覆盖传入键"的设置保存 |
+| `core/config.py`         | 280 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写与"只覆盖传入键"的设置保存 |
 | `core/keepalive.py` | 96 行 | 登录保活服务（后台线程周期巡检，任务执行中跳过本轮） |
-| `core/crashguard.py` | 96 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
+| `core/crashguard.py` | 119 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
 | `core/outputs.py` | 89 行 | 导出成品查找与汇总副本复制（纯文件操作，可脱离界面单测） |
 | `core/theme.py` | 17 行 | 配色常量（供 dialogs 复用，避免反向 import main_gui 成环） |
+| `tools/build_portable.py` | 170 行 | 绿色包组装：白名单复制、`scan_forbidden` 挡住用户数据/凭证、`--verify` 用包内解释器自检 |
+| `packaging/` + `.github/workflows/build-portable.yml` | — | 绿色版启动器（纯 ASCII vbs / 可看错的 bat）与出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台共 987 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 35 个文件约 5370 行 | pytest 测试（372 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门 |
+| `tests/` | 37 个文件约 5670 行 | pytest 测试（402 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单 |
 | `start.bat` / `启动工具.vbs` | 40 / 158 行 | 启动脚本（vbs 五档找 Python + 首跑装依赖；**必须保持纯 ASCII**，见 13 章） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
@@ -986,6 +1002,13 @@ python -m playwright install chromium
 21. 骨架生成的 key 必须小写字母/下划线开头（数字开头会生成非法类名，目录还留着 → 死路）。
 22. `启动工具.vbs` 必须保持**纯 ASCII**且各档找 Python 的原文不能被改动（`tests/test_launcher_vbs.py` 以 ascii 解码并按每档原文精确替换）；档位顺序里"写死路径排第一"是有意的——现在能用的机器不许悄悄换解释器。
 23. 平台显示名与平台 key 是两套标识：归档目录、`stats.jsonl`、汇总用**显示名**，profile 目录与删除用 **key**。给平台改名会同时断掉历史统计与旧归档。
+
+**绿色版与工作空间**
+
+24. 路径分两类：程序目录可只读，**工作空间必须可写**（`_probe_writable` 用探针文件判定，不看 `mkdir` 成不成功）。
+25. 判断"这份拷贝用过没有"只能看三个 json；`logs/`、`downloads/`、`browser_data/` 是跑一次就会出现的副产品，拿它们当痕迹会让新包不再问用户，把账单和登录态写回可能只读的程序目录。
+26. 换工作空间必须重启进程（`main_gui.relaunch_for_workspace`）：模块常量是取值拷贝，就地改不传导；书签写不进程序目录时靠环境变量把路径递给下一个进程，否则会陷入"每次启动都问一遍"。
+27. 绿色包只能白名单组装（`tools/build_portable.py` 的 `APP_ITEMS`）：整目录复制 + 排除项迟早会把 `browser_data`（明文会话凭证）发出去，所以成品还有一道 `scan_forbidden` 兜底。
 
 ***
 
@@ -1035,6 +1058,30 @@ python -m playwright install chromium
 - `main_gui._action_help()` 的弹窗文案仍写"在浏览器完成登录并点『确定』"，与 `_show_login_hint` 的"关掉窗口即代表登完"新流程矛盾。
 - `使用说明.md` 第 4 节列出的"11 个平台均已内置"是对的；本文档以前写"仅实现有赞"的部分已在本版全面更正（见 1、2、3、8 章）。
 - `platforms/alipay` docstring 记着"仅支持 2025-08-24 及以后的流水"；`kuaishou`/`xiaohongshu` 的 docstring 各列了两种方式，**只实现了 A 方式**。
+
+***
+
+## 14. 绿色版与工作空间
+
+### 14.1 一条界线
+
+| 类别 | 内容 | 权限要求 |
+| --- | --- | --- |
+| **程序目录** `ROOT_DIR` | `core/`、`platforms/`、`tools/`、`site-packages/`（依赖）、`runtime/ms-playwright/`（Chromium）、启动器 | 只读即可 |
+| **工作空间** `DATA_ROOT` | `downloads/`（账单）、`browser_data/`（登录态，**含明文会话凭证**）、`logs/`、`recordings/`、`settings.json`/`selection_state.json`/`scheduled_tasks.json` | 必须可写 |
+
+默认两者相同（就地模式），现有安装零迁移；全新的一份包第一次启动会问用户"账单和登录数据存哪儿"（`ensure_workspace` 在建界面之前跑，因为商户列表与日志目录都是 `LiushuiApp.__init__` 里按当前路径建的）。解析优先级与兜底见 5.9；选完/换完都要**重启一次进程**（`relaunch_for_workspace`），原因是各模块 `from .config import DOWNLOAD_DIR` 是取值拷贝。界面「工作空间」按钮可以看路径、打开它、换到别的文件夹；启动日志的 `_report_paths` 会说明工作空间在哪以及是否发生过兜底（书签指向的盘没了、日志退到临时目录）。
+
+### 14.2 打包：`tools/build_portable.py` + GitHub Actions
+
+    python tools/build_portable.py --out dist/包 --python-dir <解释器> --site-dir <依赖> --browsers-dir <ms-playwright> [--zip] [--verify]
+
+- **白名单复制** `APP_ITEMS = core/ platforms/ tools/ 三份 md`，不是"整仓复制再删"。新增的数据目录不会因为忘加排除项而被发出去。
+- 成品里出现 `browser_data`/`login_state.json`/`downloads`/三个 json/`workspace.json` → `scan_forbidden` 直接失败中止（这些是各人工作空间里的东西，也是明文的后台会话凭证）。
+- `--verify` 用成品内的解释器跑一遍：断言 `LIUSHUI_DATA_DIR` 被尊重、派生路径跟着走、成品里没有用户配置，并打印 `resolve_browsers_path()` 选中的内核目录。⚠ 它把数据目录指到自己的临时目录，否则"只是验一下"就会在成品里留下 `logs/`。
+- 布局与启动器：`packaging/run-portable.vbs`（双击，纯 ASCII、只用包内 `python\pythonw.exe`）、`packaging/run-portable.bat`（同一件事但保留控制台，排错用）、`packaging/README-绿色版.txt`（给业务用户的说明）。
+
+`.github/workflows/build-portable.yml`（`workflow_dispatch` 或打 `v*` tag）：`setup-python` 3.14 → `build_portable` 组装 → `pip install --target app/site-packages playwright==1.62.0` → `PLAYWRIGHT_BROWSERS_PATH` 指包内后 `playwright install chromium`（**内核必须由同版本 playwright 生成**）→ 拷整个解释器目录（先断言 `Lib/tkinter` 在，界面全靠它）→ **包内解释器冒烟**：从包内 `site-packages` import playwright、按包内内核目录起一次真 Chromium 并开一页 → 跑仓库离线测试 → `Compress-Archive` → artifact（tag 时同时发 Release）。体积量级：Chromium 428M（`chromium_headless_shell` 另有 272M，随包只带 `chromium-*` 时需实测 headless 是否仍可用）+ playwright 108M + 解释器与代码 ~100M。
 
 ***
 

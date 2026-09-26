@@ -13,6 +13,9 @@ import uuid
 from datetime import datetime, timedelta
 from tkinter import ttk, messagebox
 
+# 一年内无解的 cron 表达式(如 0 9 30 2 *), 见 CronExpr.next_run
+_NEVER_MATCHING = set()
+
 
 class CronExpr:
     """5 字段 cron 表达式: 分 时 日 月 周(0=周日)
@@ -20,8 +23,12 @@ class CronExpr:
     day-of-month 与 day-of-week 同时受限时为 OR 语义(标准 cron)。
     """
 
+    # 各月最大日; 2 月按闰年的 29 算 —— 0 9 29 2 * 是"四年一次", 不是"永不成立"
+    MONTH_DAYS = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
     def __init__(self, expr):
-        parts = str(expr).split()
+        self.expr = str(expr).strip()
+        parts = self.expr.split()
         if len(parts) != 5:
             raise ValueError("cron 表达式必须为 5 个字段(分 时 日 月 周)")
         self.minute = self._parse(parts[0], 0, 59)
@@ -41,11 +48,22 @@ class CronExpr:
             if "/" in part:
                 base, step = part.split("/")
                 start = lo if base in ("*", "?") else int(base)
-                values.update(range(start, hi + 1, int(step)))
+                stride = int(step)
+                if stride < 1:
+                    raise ValueError(f"步长必须是正整数: {part}")
+                if start < lo or start > hi:
+                    # 越界的起点会让 range() 直接是空集, 空集在下面变成"不限制"
+                    raise ValueError(f"取值范围越界: {part}")
+                values.update(range(start, hi + 1, stride))
             elif "-" in part:
                 a, b = map(int, part.split("-"))
                 if a > hi or b > hi or a < lo or b < lo:
                     raise ValueError(f"取值范围越界: {part}")
+                if a > b:
+                    # 少这一条, `0 9 * * 5-1`(本意周五到周一)会静默变成**天天跑**:
+                    # range(5, 2) 是空集 → 空集在末尾被判成"这个字段不设限"。
+                    # 跨周末的写法本来就存在, 那就让人明写出来, 而不是替他猜。
+                    raise ValueError(f"区间起点不能大于终点: {part}(跨周末请写成 5-6,0-1)")
                 values.update(range(a, b + 1))
             else:
                 v = int(part)
@@ -53,6 +71,19 @@ class CronExpr:
                     raise ValueError(f"取值范围越界: {part}")
                 values.add(v)
         return values or None
+
+    def impossible_date(self):
+        """日与月凑不出任何真实存在的日子时, 举一个例子; 否则返回 None。
+
+        只在"日、月都受限而周没受限"时判: 标准 cron 里 day-of-month 与 day-of-week
+        同时受限时是 **OR** 语义(`0 9 30 2 1` 靠"每周一"照样会跑), 这时说"永不成立"
+        就是误报。取值已由 `_parse` 保证在各自区间内。
+        """
+        if self.day is None or self.month is None or self.week is not None:
+            return None
+        if any(d <= self.MONTH_DAYS[m - 1] for d in self.day for m in self.month):
+            return None
+        return f"{min(self.month)} 月 {min(self.day)} 日"
 
     def match(self, dt):
         if self.minute is not None and dt.minute not in self.minute:
@@ -68,13 +99,21 @@ class CronExpr:
         return dom_ok and dow_ok
 
     def next_run(self, after=None):
-        """返回 after(默认当前时间)之后的下一个匹配时间(分钟级); 一年内无则返回 None。"""
+        """返回 after(默认当前时间)之后的下一个匹配时间(分钟级); 一年内无则返回 None。
+
+        判成"一年无解"的表达式记进 `_NEVER_MATCHING`: 这个循环要走 52.7 万分钟(实测
+        约 460ms), 而调度线程每 30 秒就为每个任务算一次 —— 不记就等于常年白烧 CPU,
+        任务却永远不跑。
+        """
+        if self.expr in _NEVER_MATCHING:
+            return None
         base = (after or datetime.now()).replace(second=0, microsecond=0)
         nxt = base + timedelta(minutes=1)
         for _ in range(527040):  # 一年(365天 有闰年余量)
             if self.match(nxt):
                 return nxt
             nxt += timedelta(minutes=1)
+        _NEVER_MATCHING.add(self.expr)
         return None
 
 
@@ -186,9 +225,14 @@ class CronJob:
         if not self.cron:
             return "没有填 cron"
         try:
-            CronExpr(self.cron)
+            expr = CronExpr(self.cron)
         except ValueError as e:
             return f"cron 表达式无效: {e}"
+        bad = expr.impossible_date()
+        if bad:
+            # 解析得动、却永远不成立: `0 9 30 2 *` 就是这种。以前它一声不响地不跑,
+            # 调度线程还每 30 秒为它白扫一遍年历(约 460ms)。
+            return f"这个日期并不存在({bad}), 这个任务永远不会到点"
         return None
 
     @classmethod
@@ -578,9 +622,18 @@ class JobEditDialog(tk.Toplevel):
             messagebox.showwarning("提示", "任务名称与至少一个平台必填", parent=self)
             return
         try:
-            CronExpr(cron)
+            expr = CronExpr(cron)
         except ValueError as e:
             messagebox.showwarning("cron 非法", str(e), parent=self)
+            return
+        bad = expr.impossible_date()
+        if bad:
+            # 语法完全正确、却永远不成立的表达式要当场拦住, 否则用户是"几个月后发现
+            # 任务从来没跑过" —— 而调度侧只会安静地每 30 秒算一次明年。
+            messagebox.showwarning(
+                "cron 不会到点",
+                f"「{cron}」里没有真实存在的日期({bad}), 这个任务永远不会执行。\n"
+                "请把日期或月份改成实际存在的组合。", parent=self)
             return
         # 商户/平台不匹配或没填商户时, 任务到点什么都不会跑; 以前是保存成功、
         # 无声无息, 现在当场提示(仍可坚持保存)。

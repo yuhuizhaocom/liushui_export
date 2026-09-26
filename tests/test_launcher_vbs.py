@@ -138,3 +138,24 @@ def test_unusable_folders_are_skipped_not_fatal(probe):
                    tier2="If False Then")
     # 走到这里说明 tier3/5 的枚举没有把脚本打断(结果本身取决于这台机器装了什么)
     assert pyw == "" or os.path.exists(pyw)
+
+
+def test_nothing_in_the_launchers_installs_dependencies():
+    r"""找解释器归 .vbs, 装依赖归 core/deps.py + check_dependencies() —— 只许有一处答案。
+
+    启动工具.vbs 以前自己也判一次"缺不缺 playwright"并跑 `pip install playwright`(**没钉版本**):
+    Python 侧钉 1.62.0、vbs 侧装最新, 而内核目录名带版本号, 混版本直接起不来; 而且它查不出
+    "有包没内核"这种最常见的半拉子状态。注释里提一句历史是可以的, **不许有执行它的一行**。
+    """
+    files = ["启动工具.vbs", os.path.join("packaging", "run-portable.vbs"),
+             os.path.join("packaging", "run-portable.bat"),
+             os.path.join("packaging", "run-core.vbs"),
+             os.path.join("packaging", "run-core.bat")]
+    for rel in files:
+        src = open(os.path.join(REPO_ROOT, rel), encoding="ascii", errors="replace").read()
+        marks = ("'", "REM ") if rel.endswith((".bat",)) else ("'",)
+        code = [ln for ln in src.splitlines() if not ln.strip().startswith(marks)]
+        body = "\n".join(code).lower()
+        assert "pip install" not in body, "%s 里又自己装起依赖来了" % rel
+        assert "-m playwright" not in body, "%s 不该自己调 playwright install" % rel
+        assert "import playwright" not in body, "%s 不该自己探测依赖(那是 core/deps.py 的事)" % rel

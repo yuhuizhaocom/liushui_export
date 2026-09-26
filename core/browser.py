@@ -721,17 +721,27 @@ class BrowserManager:
         return None
 
     def _xlsx_row_count(self, path):
-        """用 zipfile 读 xlsx 首个工作表统计<row>近似行数(不引入 openpyxl 依赖)。
-        仅用于"是否为空表"判断,返回近似非空行数;解析失败返回 None。"""
+        """用 zipfile 读 xlsx 统计<row>近似行数(不引入 openpyxl 依赖)。
+        仅用于"是否为空表"判断,返回近似非空行数;解析失败返回 None。
+
+        必须看**所有**工作表: 账单里"汇总/说明页在前、明细页在后"很常见, 只数第一个
+        sheet 会把一份 120 行明细的账单数成 0 行 → 判"表格无有效数据行" →
+        _accept_download 直接 os.remove, 用户永远拿不到那个平台的文件(离线实测)。
+        取各表的**最大值**: 调用方只问"有没有数据行", 只要有一页是满的就不是空表。
+        """
         try:
             sheet_pat = re.compile(r"xl/worksheets/sheet\d+\.xml")
             with zipfile.ZipFile(path) as z:
-                names = [n for n in z.namelist() if sheet_pat.match(n)]
-                if not names:
-                    return None
-                data = z.read(names[0]).decode("utf-8", errors="ignore")
-            rows = len(re.findall(r"<row[ >]", data))
-            return rows - 1 if rows >= 1 else 0
+                names = sorted(n for n in z.namelist() if sheet_pat.match(n))
+                found_any = bool(names)
+                rows_in = []
+                for n in names:
+                    data = z.read(n).decode("utf-8", errors="ignore")
+                    cnt = len(re.findall(r"<row[ >]", data))
+                    rows_in.append(cnt - 1 if cnt >= 1 else 0)
+            if not found_any:
+                return None
+            return max(rows_in)
         except Exception:
             return None
 

@@ -259,6 +259,36 @@ def test_xlsx_with_rows_and_keyword_cells_passes(mgr):
     assert b._validate_download(p) is True
 
 
+def _mk_xlsx(path, rows_per_sheet):
+    """按"每张表几行"手搓一个多 sheet 的 xlsx(只为 <row> 计数, Excel 打不开也无妨)。"""
+    import zipfile
+    with zipfile.ZipFile(path, "w") as zf:
+        for i, n in enumerate(rows_per_sheet, start=1):
+            body = "".join('<row r="%d"><c><v>x</v></c></row>' % r for r in range(1, n + 1))
+            zf.writestr("xl/worksheets/sheet%d.xml" % i,
+                        "<sheetData>%s</sheetData>" % body)
+        zf.writestr("pad", "x" * 2000)
+    return path
+
+
+def test_detail_in_second_sheet_is_not_an_empty_table(mgr):
+    """回归: 只数第一个 sheet 时, "汇总页(1 行表头)+ 明细页(120 行)"的真账单被数成
+    0 行 → 判空表 → 文件被 os.remove, 那个平台永远导不出东西。"""
+    b, root = mgr
+    p = _mk_xlsx(os.path.join(root, "银联_明细在第二页.xlsx"), [1, 120])
+    assert b._xlsx_row_count(p) == 119
+    assert b._validate_download(p) is True
+    assert os.path.isfile(p), "校验通过就不许有删除动作"
+
+
+def test_every_sheet_empty_is_still_rejected(mgr):
+    """改宽只能宽到"有一页有数据": 每页都只有表头仍是空表。"""
+    b, root = mgr
+    p = _mk_xlsx(os.path.join(root, "两页都空.xlsx"), [1, 1])
+    assert b._xlsx_row_count(p) == 0
+    assert b._validate_download(p) is False
+
+
 def test_legacy_xls_still_accepted_when_rows_unparseable(mgr):
     """.xls 读不出行数时维持原有的宽松判定(不能因为新增顺序而开始误拒)。"""
     b, root = mgr

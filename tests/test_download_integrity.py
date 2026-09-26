@@ -177,6 +177,71 @@ def test_html_error_page_still_rejected(mgr):
     assert b._validate_download(p) is False
 
 
+# 真实登录页是带换行的 HTML; 上面那条恰好是单行, 数出 0 行才被文案门挡住, 测不到这个洞
+LOGIN_PAGE_CSV = ("<html>\n<head><title>商户登录</title></head>\n<body>\n"
+                  "<script>location.href='/newlogin'</script>\n"
+                  "<p>您的会话已过期,请重新登录</p>\n</body>\n</html>\n")
+
+
+def test_multiline_html_named_csv_is_rejected(mgr):
+    """回归: 会话过期时后台不把登录页返回成 302, 而是 200 + Content-Disposition: xxx.csv。
+    按逗号数行能数出好几行(HTML 标签本身就占行), 于是"先数行"那道门把登录页放行了 ——
+    交出去的是一份网页, 记进 stats 的却是 success。"""
+    b, root = mgr
+    p = _touch(root, "有赞_旗舰店A_2026-09-01_2026-09-02_流水.csv", LOGIN_PAGE_CSV)
+    assert b._count_rows(p) > 0, "先确认它确实数得出行, 否则这条测试测不到问题"
+    assert b._validate_download(p) is False
+
+
+def test_uppercase_markup_named_csv_is_rejected(mgr):
+    """<!DOCTYPE HTML>/<HTML> 这种大写写法也要认得(关键字匹配以前大小写敏感)。"""
+    b, root = mgr
+    p = _touch(root, "流水.csv",
+               "<!DOCTYPE HTML>\n<HTML>\n<BODY>your session is expired</BODY>\n</HTML>\n")
+    assert b._validate_download(p) is False
+
+
+def test_html_after_bom_and_blank_lines_is_rejected(mgr):
+    b, root = mgr
+    body = "﻿\n  \n<html>\n<body>" + "登录" * 500 + "</body>\n</html>\n"
+    assert b._validate_download(_touch(root, "流水.txt", body)) is False
+
+
+def test_keyword_matching_ignores_case(mgr):
+    b, _root = mgr
+    assert b._match_error_keyword("<!DOCTYPE HTML>") == "<!doctype"
+    assert b._match_error_keyword("系统繁忙") == "系统繁忙"   # 中文不受 lower() 影响
+    assert b._match_error_keyword("一切正常") is None
+    assert b._match_error_keyword("") is None
+
+
+def test_web_page_head_recognition_is_by_content(tmp_path):
+    """只看文件头, 不看正文里有没有 html 字样 —— 备注里带链接的真账单不该被判死。"""
+    ok = tmp_path / "真账单.csv"
+    ok.write_text("订单号,金额,备注\nA,1,详情见 https://example.com/html/detail\n",
+                  encoding="utf-8")
+    assert BrowserManager._looks_like_web_page(str(ok)) is False
+    bad = tmp_path / "登录页.csv"
+    bad.write_bytes("﻿\n\n<HTML>\n<BODY>x</BODY>\n</HTML>\n".encode("utf-8"))
+    assert BrowserManager._looks_like_web_page(str(bad)) is True
+    empty = tmp_path / "空.csv"
+    empty.write_bytes(b"")
+    assert BrowserManager._looks_like_web_page(str(empty)) is False
+    assert BrowserManager._looks_like_web_page(str(tmp_path / "不存在.csv")) is False
+
+
+def test_excel_xml_workbook_is_not_a_web_page(mgr):
+    """Excel 2003 的 XML 表格存成 .xls 真有人用来发账单: <?xml 开头不能一起打死。"""
+    b, root = mgr
+    body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<x:Workbook xmlns:x="urn:schemas-microsoft-com:office:excel">\n'
+            + '<x:Row><x:Cell><x:Data>10.00</x:Data></x:Cell></x:Row>\n' * 120
+            + '</x:Workbook>\n')
+    p = _touch(root, "银联对账单.xls", body)
+    assert BrowserManager._looks_like_web_page(p) is False
+    assert b._validate_download(p) is True
+
+
 def test_header_only_table_still_rejected(mgr):
     b, root = mgr
     assert b._validate_download(_touch(root, "空表.csv", "订单号,金额\n")) is False

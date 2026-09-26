@@ -520,6 +520,27 @@ class BrowserManager:
         head = cls._file_head(path)
         return any(head.startswith(m) for m in cls._IMAGE_MAGICS)
 
+    # 会话过期时, 不少后台不把登录页返回成 302, 而是 200 + Content-Disposition: xxx.csv。
+    # 这种文件按逗号数"行"能数出好几行(HTML 标签本身就占行), 于是"先数行"那道门会把
+    # 登录页放行 —— 交出去的是网页, 记进 stats 的却是 success。
+    # 刻意不列 <?xml: Excel 2003 的 XML 表格存成 .xls 是真有人用的账单格式,
+    # 那条走"读不出行→像对账单的扩展名"放行, 不该被这里打死。
+    _WEB_PAGE_HEADS = (b"<!doctype", b"<html", b"<head", b"<body", b"<script",
+                       b"<style", b"<iframe", b"<meta")
+
+    @classmethod
+    def _looks_like_web_page(cls, path):
+        """文件头(跳过 BOM 与前导空白/空字节)是不是一份 HTML 文档。
+
+        只看开头, 不做全文子串匹配 —— 真账单的备注里写一句"请登录后台查看明细"
+        不该被判死(12 章第 7 条踩过这个坑)。
+        """
+        raw = cls._file_head(path, 256)
+        if not raw:
+            return False
+        head = raw.lstrip(b"\xef\xbb\xbf\x00 \t\r\n").lower()
+        return head.startswith(cls._WEB_PAGE_HEADS)
+
     # 命中即判定为 manual/无效的错误文案
     _VALIDATE_ERROR_KEYWORDS = [
         "登录失效", "重新登录", "请登录", "系统繁忙", "操作失败", "请求超时",
@@ -542,6 +563,12 @@ class BrowserManager:
         low = (os.path.basename(path) or "").lower()
         if low.endswith(".xlsx") and not self._file_head(path, 2).startswith(b"PK"):
             self._log(f"[校验] 扩展名是 .xlsx 但内容不是 zip: {os.path.basename(path)}", "warning")
+            return False
+        # 0.5) 内容是一份 HTML 网页 → 一定不是账单。必须排在"数行"之前:
+        #      登录页存成 .csv 时按逗号数得出行数, 那道门会把它当成品放行。
+        if self._looks_like_web_page(path):
+            self._log(f"[校验] 内容是一份 HTML 网页而不是表格, 多半是会话过期后的登录页"
+                      f"被当成文件下载了: {os.path.basename(path)}", "warning")
             return False
         # 1) 先数数据行: 能读出数据行的表格就是真账单, 不再拿文案判生死。
         #    以前是"整个文件文本 子串匹配 错误文案"优先 —— 账单里退款备注写一句
@@ -601,8 +628,11 @@ class BrowserManager:
         return ""
 
     def _match_error_keyword(self, text):
+        """大小写不敏感地找错误文案: 页面写 <!DOCTYPE HTML> / <HTML> 时也要认得。
+        返回命中的原始关键字(供日志), 没命中返回 None。"""
+        low = (text or "").lower()
         for kw in self._VALIDATE_ERROR_KEYWORDS:
-            if kw in text:
+            if kw.lower() in low:
                 return kw
         return None
 

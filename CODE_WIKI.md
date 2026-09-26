@@ -246,7 +246,7 @@ liushui_export/
 | `_do_check(tasks)`                   | **检查登录态**：逐个商户启动浏览器并调用 `plat.check_login(browser)`（多数平台靠 `export_url` 是否被重定向到登录路径判断），结果反映到平台状态灯。探测走 `_probe_login`，三档结果分别记「未登录 / 已登录 (页面标题) / 检查失败 - 原因」，读页面标题失败也只算这一家没查成。                                                                                                                    |
 | `_execute_export_tasks(tasks, start, end, label="导出", step_debug=False)` | **批量循环**（手动导出与定时任务共用）。① `tasks.sort(key=lambda t: int(t[1].manual_intervention))` 原地稳定排序，需人工的平台压到队尾，并把 `intervention_hint` 去重后播报一条「已排到最后执行」；② 从 `load_settings()` 读 `retry_times`/`retry_interval_s`（读文件不读 Var）；③ 每家先查 `_aborted()`（剩余 N 项未执行 → break，**但仍走统计与待人工清单**）；④ `run_with_retry(_run_single_export)`，外层 try 把抛错折成 `"failed"`；⑤ 状态灯按**最差**：`worst[key]` 用 `_RESULT_RANK` 比大小（未知结果串比 `failed` 更差），注释 1866 记录动机——"先失败后成功时绿灯会把失败盖掉，界面上看着全绿、其实有一家店没出账单"；⑥ 计数 `成功/手动/失败` 并返回三元组（空 tasks 时打提示后返回 **None**）。⚠ `label` 形参在函数体内**从未使用**，但 `trigger_job` 与测试都按关键字 `label=` 传，删掉或改名会同时炸两处。 |
 | `_run_single_export(plat, merchant, start, end, step_debug=False)` | **分发器**：平台声明了 `supports_sub_merchants` 且这家商户在界面「子商户」里录过清单 → 走 `_run_sub_merchants`；否则直接走 `_export_one_merchant`，也就是从前的那一条路，一个字都不变。清单读不出来时把原因写进日志再按"没配置"处理（读不到子商户最多是少导几份，不许把整批挡掉）。 |
-| `_export_one_merchant(plat, merchant, start, end, step_debug=False, sub_merchant="")` | **一家商户（或一个子商户）的一次尝试**，返回 `success`/`manual`/`failed`。顺序：`_ensure_browser`（独立 profile）→ `set_export_context`（带子商户）→ 注入 `_user_wait_cb`（`wait_user` 用）与可选 `_step_cb` → **inline 登录预检**（`check_login` 抛异常时 `login_ok` 保持 True 继续导出；判未登录则 `manual` + `err_msg="登录已失效(导出前预检)"`）→ `_self_check_selectors` → `plat.export`。`finally` 无条件复位单步/user-wait 回调；**收尾无条件 `record_stat`**（注释 1954：以前预检失败直接 return，登录失效这个最主要的失败原因永远不进 stats.jsonl，看板成功率虚高），子商户那一档记的商户字段是 `主商户/子商户`，一家一次；`t0` 在浏览器启动之后重置，"耗时不含启动"。docstring 明写**本函数不允许向外抛异常**：抛出会被上层折成"一次失败"并跳过全部重试，而"浏览器起不来"恰是最该重试的那种。 |
+| `_export_one_merchant(plat, merchant, start, end, step_debug=False, sub_merchant="")` | **一家商户（或一个子商户）的一次尝试**，返回 `success`/`manual`/`failed`。顺序：`_ensure_browser`（独立 profile）→ `set_export_context`（带子商户）→ 注入 `_ask_user_confirmed`（`wait_user` 用，见 5.2）与可选 `_step_cb` → **inline 登录预检**（`check_login` 抛异常时 `login_ok` 保持 True 继续导出；判未登录则 `manual` + `err_msg="登录已失效(导出前预检)"`）→ `_self_check_selectors` → `plat.export`。`finally` 无条件复位单步/user-wait 回调；**收尾无条件 `record_stat`**（注释 1954：以前预检失败直接 return，登录失效这个最主要的失败原因永远不进 stats.jsonl，看板成功率虚高），子商户那一档记的商户字段是 `主商户/子商户`，一家一次；`t0` 在浏览器启动之后重置，"耗时不含启动"。docstring 明写**本函数不允许向外抛异常**：抛出会被上层折成"一次失败"并跳过全部重试，而"浏览器起不来"恰是最该重试的那种。 |
 | `_run_sub_merchants(plat, merchant, subs, start, end, step_debug)` | 同一份 profile、同一次登录里按清单逐个切子商户各导一份。**重试挂在每个子商户自己身上**（取值口径与 `_execute_export_tasks` 逐字一致，包括"0 就是 0"），所以整家汇总结论永远不是 `failed`——外层据此会把成功的几家重导一遍，归档里多堆 `历史/` 反而更难看清。全部 success 才 `success`，其余一律 `manual`。 |
 | `_switch_sub_merchant(plat, merchant, sub)` | 切换 + **归属校验**，返回 False 表示这一家就此停手。三种情况分得很清：切换动作失败 → 停；页面读回来的商户和要导的对不上 → 停 + `snapshot` 留证 + 日志写清"页面是谁/要的是谁"；平台没实现读回或读回抛错 → **放行**但必留一句"归属未经校验"（读不到 ≠ 读对了，也不能因为没实现读回就彻底用不了）。 |
 | `_self_check_selectors(plat)` | 导出前校验平台声明的 `SELECTORS`，**只报警不拦截**（注释 1996：缺元素不代表这次一定失败，自检自身出错更不能影响导出）；未声明的平台直接跳过。 |
@@ -267,7 +267,7 @@ liushui_export/
 | `_set_progress(**kwargs)` / `_set_status(text)` | 投递主线程的包装（状态栏统一加 `状态: ` 前缀）。 |
 | `_aborted()` | `getattr` 容错读 `_abort.is_set()`，因此测试用轻量替身类也能借用。 |
 | `_collect_tasks(selected=None)` / `_get_selected()` / `_get_selected_merchants(key)` | 把"已勾平台 × 该平台已勾商户"展成 `[(key, plat, merchant)]`。**三个都只能在主线程调用**（读勾选框）；任务线程一律用主线程拍好的这份列表。 |
-| 「工作线程要拿用户答复」的固定写法 | `answer` dict + `threading.Event` + `self._ui(_ask)` + `done.wait(timeout=…)`，且 `_ask` 的 `finally` 一定 set（防永久阻塞）、弹窗异常按保守默认返回。四处用到：`_ask_login_retry`(放弃)、`_ask_preflight_login`(跳过)、`_user_wait_cb`(扫码，上限 3600s)、`_step_cb`(单步，默认继续)。**改成直接 `messagebox.xxx(...)` 会拿不到返回值**（`_ui` 是异步投递）。 |
+| 「工作线程要拿用户答复」的固定写法 | `answer` dict + `threading.Event` + `self._ui(_ask)` + `done.wait(timeout=…)`，且 `_ask` 的 `finally` 一定 set（防永久阻塞）、弹窗异常按保守默认返回。四处用到：`_ask_login_retry`(放弃)、`_ask_preflight_login`(跳过)、`_ask_user_confirmed`(扫码确认，上限 `USER_WAIT_TIMEOUT_S`=10 分钟、**必须回话**)、`_step_cb`(单步，默认继续)。**改成直接 `messagebox.xxx(...)` 会拿不到返回值**（`_ui` 是异步投递）。⚠ 这类等待里"没拿到答复"绝不能折算成"用户同意了"——`wait_user` 那条就是这么把"没扫码"变成"已确认"的（12 章第 45 条）。 |
 | 只能主线程调用 | `_clear_log_screen`、`_paint_platform_status`、`_validate_dates`、各 `_action_*`/`_prompt_*`/`_build_*`/`_rebuild_*`、以及所有对话框构造函数。线程安全的只有 `_append_log`/`_ui`/`_set_status`/`_set_progress`/`set_platform_status`/`_aborted`/`_request_abort`。 |
 
 #### 状态灯、日志缓冲与勾选持久化
@@ -376,25 +376,27 @@ liushui_export/
 | `begin_wait_download()`                              | **开启捕获模式**（点击"下载"前调用）：清空事件队列 → 记录捕获起点时间 → 归位根目录残留 UUID 文件 → 清空并重建 `下载目录/平台/商户/日期/临时` 目录。                                  |
 | `end_wait_download()`                                | 结束捕获：清队列、关开关、归位根目录残留、清理临时目录（空目录 rmdir，带 8 次重试防瞬时文件锁）。                                                                     |
 | `_on_download(download)`                             | 浏览器下载事件回调：捕获模式下把 `{dl, name}` 推入队列，否则忽略。                                                                                  |
-| `wait_download(timeout=120)`                         | **等待下载完成**：优先消费事件队列（`_save_download_to_temp` 保存到临时目录 → `_finalize_download` 归档）；兜底轮询根目录新出现的稳定文件；超时返回 None 并清理残留。          |
-| `_finalize_download(path)`                           | 将文件归入 `平台/商户/日期范围/`：顶层始终保留本次最新文件，同区间已存在同名旧文件则先复制到 `历史/原名_时间戳.扩展名` 再替换；移动失败有 10 次重试 + 拷贝兜底。                                |
+| `wait_download(timeout=120)`                         | **等待下载完成**：优先消费事件队列（`_save_download_to_temp` 保存到临时目录 → `_finalize_download` 归档）；兜底走 `_new_download_candidates`（见下）；超时返回 None 并清理残留。⚠ 没 `begin_wait_download` 就被调用时，这里会顺手补上 `_dl_capture_t0` 与临时目录——只置开关不记时刻，兜底那条路就没有"本轮从何时开始"这条线可参考。          |
+| `_finalize_download(path)`                           | 将文件归入 `平台/商户/日期范围/`：顶层始终保留本次最新文件，同区间已存在同名旧文件则先由 `_archive_previous` 复制到 `历史/原名_时间戳.扩展名` 再替换。**归档没成或旧件删不掉（被 Excel 占用）时保留旧件，本次成品落 `<名字>_原件保留_HHMMSS.扩展名`**，两边都找得回并各写一行 warning（以前是"归档失败静默吞掉 + 照样删旧件"）；移动失败有 10 次重试 + 拷贝兜底。                                |
+| `_archive_previous(final_path, save_name)` / `_keep_both_name(base_dir, save_name)` | 前者的返回值是"旧件是否已经在 `历史/` 里有一份"——只有 True 才允许删顶层；后者给出顶层被占时的替代名（`_原件保留_` 标记，名字仍带同一套前缀，幂等不受影响）。 |
 | `_normalize_download_name(...)`                      | 按 `download_name_mode` 生成文件名。**`unified`（默认）= 前缀 + 原始文件名**：`平台_商户[_子商户]_起_止_原名.原扩展名`；原始名是完整 UUID 或为空时退化成只有前缀（有扩展名仍保留）。**`original` = 只加 `商户_` 前缀**，其余原样（UUID/无名同样回退统一命名）。**扩展名一律原样保留、大小写不动、不再过白名单**——以前 `.zip/.rar/.pdf/无后缀` 会被强行改成 `.xlsx`，压缩包顶着表格的名字进归档。末尾过 `_safe_name`（分隔符换 `_`）。已带同一前缀的名字**不再叠第二层**（`_save_download_to_temp` 已经把临时文件叫最终名，`_finalize_download` 会对同一个名字再算一次，幂等这点是硬要求）。 |
 | `_carry_over_orphans()`                              | 把下载根目录残留的 UUID 文件**原名原字节**搬进 `downloads/待确认/`（不校验、不改名）。先跳过半成品后缀（`PARTIAL_DOWNLOAD_SUFFIXES`：搬不动正在写的文件，失败还会连累整轮），再**逐个 try**——某一家被占着只跳过它并写"留到下次"，其余照常归位。同名冲突时加 `_HHMMSS`。 |
 | `_cleanup_stale_files(root)`                         | 清理 `.~`/`.crdownload/.tmp/.part` 半成品残留（**递归**）。只在 `wait_download` 超时路径调用；⚠ `keep` 形参从未被使用，且后缀匹配是全仓递归，理论上会删掉任何叫 `xxx.tmp/.part` 的正常文件。 |
 | `_save_download_to_temp(dl)`                         | 事件路径落盘：三级取文件——① `dl.path()` 已存在就 `os.replace` **移动**进临时目录（注释：避免 downloads 根目录残留原始文件）；② `save_as`；③ 轮询等 `dl.path()` 出现（30×1s，极端情况可超出调用方 deadline 约 30 秒）。`_dl_temp_dir` 为空时直接返回 None——所以**没 `begin_wait_download` 就 `wait_download` 会退化成目录轮询那条路**。 |
-| `_accept_download(path)`                             | **先 `_finalize_download` 归档、再 `_validate_download` 校验**，不过就删文件。注释 446 的理由：必须先归档，否则文件只留在临时目录，随后 `end_wait_download` 清临时目录会把它一起删掉，出现"日志说下载完成、磁盘上找不到文件"；且校验通过与否要以归档后的最终路径为准，避免"日志写 success 实为空表"。 |
+| `_accept_download(path)` / `_accept_download_inner`  | **先 `_finalize_download` 归档、再 `_validate_download` 校验**，不过就删文件。注释 446 的理由：必须先归档，否则文件只留在临时目录，随后 `end_wait_download` 清临时目录会把它一起删掉，出现"日志说下载完成、磁盘上找不到文件"；且校验通过与否要以归档后的最终路径为准，避免"日志写 success 实为空表"。外层那一圈 `try` 是硬要求：**归档/校验里的任何文件系统意外都折成"这一份没认领成"(返回 None)**，以前异常会冒到 `wait_download` 之外，把 `_dl_capture_on` 卡在 True、成品留在 `临时/` 里，下一次 `begin_wait_download` 的 rmtree 再把它删掉。 |
 | `_wait_root_download(root, deadline)`                | 事件路径没能落盘时的兜底：在 deadline 内轮询 `_find_new_candidate`，把根目录里**本次新出现的原始文件**交出去（`sleep(1.5)` 一轮）。**不归档** —— 归档统一由调用方 `_accept_download` 做一次（以前它自己 `_finalize_download` 一遍，于是同一文件被归档两次，`original` 命名下多叠一层商户前缀）。以前叫 `_take_new_download`，名字与实现不符（既不碰队列，也不该"移动到目标位置"）。 |
 | `_find_new_candidate(root)`                          | 只在**下载根目录**找最新候选，四道过滤：跳过中间态后缀 → 跳过图片（注释："兜底扫描不能把它们认领成本次下载"）→ 只认 `_dl_capture_t0` 之后出现的（"避免误取上次残留"）→ 刚改过 2 秒内的视为还在写不选。`os.listdir` 异常吞掉返回 None。 |
 | `_is_stable(path)`                                   | 间隔 1 秒两次取 size 相等才算写完（每次调用固定耗时 1 秒）。 |
 | `_dir_snapshot(root)`                                | `os.walk` **递归**收集全部文件路径集合，供 `wait_download` 的路 2 差集用；与 `_find_new_candidate` 的"只看根目录"口径不同。 |
 | `_validate_download(path)`                           | **成品校验**，按顺序：空文件/读不出 size → 否；文件头是图片魔数 → 否；名字是 `.xlsx` 但头两字节不是 `PK` → 否；**文件头是一份 HTML 网页（`_looks_like_web_page`）→ 否**；**先数数据行**（`_count_rows`）能读出 >0 行 → 直接通过；读不出行才用文案区分空表与错误页（`_match_error_keyword`，**大小写不敏感**）；<1KB 且无数据行 → 否；`rows == 0` → 否；数不出行时还要过 **`_seems_statement_format`** 这道格式门（扩展名属于 `.xlsx/.xls/.csv/.txt/.zip/.rar/.7z`，或**没有扩展名但文件头是 `PK`**）→ 才维持原有的宽松判定放行（老 `.xls` 走这一条）。513 行注释记录顺序不能反的原因：**以前整文件子串匹配错误文案优先，账单备注里一句"客户申请操作失败""请登录后台查看明细"就把真账单判无效并被 `_accept_download` 删掉**，用户看到的是"下载成功但文件没了"。HTML 那道门必须排在数行**之前**：会话过期时有些后台不把登录页返回成 302，而是 200 + `Content-Disposition: xxx.csv`，而 HTML 标签本身就占行 —— 按逗号数得出 4 行的登录页以前会被"先数行"直接放行，交出去一份网页却记成 success（`tests/test_download_integrity.py::test_multiline_html_named_csv_is_rejected` 钉着）。门只看文件头（跳 BOM 与空白），所以 `<?xml` 开头、Excel 2003 存成 `.xls` 的 XML 表格不被一起打死。 |
-| `_count_rows(path)` / `_xlsx_row_count(path)`         | CSV 数行去表头；`.xlsx` 用 `zipfile` 数 `<row>` 标签（**不引入 openpyxl**，近似值、可能含空行、假定首行是表头）；其它扩展名或解析失败返回 `None` 表示"读不出"，不参与判空。 |
+| `_new_download_candidates(root, known)` / `_is_internal_download_path` | 路 2 的候选：与开始快照的差集，再套上与 `_find_new_candidate` **同一口径**——跳半成品后缀、按 `_dl_capture_t0` 过滤时刻、并排除躺在 `临时/`、`历史/`、`待确认/` 下的文件（按路径分段判，`历史商户/` 这种商户目录与 `历史.csv` 都不受影响）。少了这道排除会出事：`_finalize_download` 在校验**之前**就把同名旧版复制进了 `历史/`，本轮校验一失败，同一个 while 循环就把那份**上一版的真账单**搬回顶层认领，通过全部校验、日志"下载完成并校验通过"、`stats` 记 success（`tests/test_download_fallback_history.py` 钉着，含一条反向用例：真下载照样要被兜底认领）。 |
+| `_count_rows(path)` / `_xlsx_row_count(path)`         | CSV 数行去表头；`.xlsx` 用 `zipfile` 数 `<row>` 标签（**不引入 openpyxl**，近似值、可能含空行、假定首行是表头），**取所有工作表的最大值**——只数第一个 sheet 时，"汇总页在前(仅一行表头)、明细页在后"的真账单会被数成 0 行而当空表删掉。其它扩展名或解析失败返回 `None` 表示"读不出"，不参与判空。 |
 | `_seems_statement_format(path)` + `_STATEMENT_SUFFIXES` | 数不出行时的格式门：`.xlsx/.xls/.csv/.txt/.zip/.rar/.7z` 算像对账单（zip 那几档是微信支付"账单打包完成"的真实产物），没扩展名但文件头是 `PK` 也放行。**这扇门是命名改造带出来的**：以前不认识的扩展名会被强行改成 `.xlsx`，"名字 `.xlsx` 而内容不是 PK"那条顺带把 PDF/ELF 之类挡在外面；扩展名改成原样保留后，这个拦截必须显式补回来，否则一份 PDF 也能当成品交出去（`tests/test_download_integrity.py` 钉住）。 |
 | `_read_text_content(path)` / `_match_error_keyword(text)` | 多编码宽容解码（`latin-1` 永不失败，故总能返回内容；二进制/xlsx 得到近似文本不影响关键字检查）；关键字匹配**区分大小写**——页面写 `<HTML>`/`<!DOCTYPE` 不会命中，此时只能靠"读不出数据行 + 体积阈值"兜住。 |
 | `_file_head(path, n)` / `_is_image_file(path)` / `_looks_like_web_page(path)` | 读前 n 字节比对 `_IMAGE_MAGICS`；文件不存在得到 `b""` → False。`_looks_like_web_page` 跳掉 BOM/空白/空字节后比对 `_WEB_PAGE_HEADS`（`<!doctype`/`<html`/`<head`/`<body`/`<script`/`<style`/`<iframe`/`<meta`），**刻意不含 `<?xml`**（Excel 2003 的 XML 表格存 `.xls` 真有人当账单发）。 |
 | `_cleanup_temp_dir()`                                | 先置 `_dl_temp_dir=""` 再动手；空目录 `rmdir`（8 次 ×0.8s 防瞬时文件锁），非空 `rmtree(ignore_errors=True)`，注释："留待下次任务 begin 时清理"。 |
 
-> **两条捕获通道的差别**（改这块前必须清楚）：路 1 事件队列——`_on_download` 只在捕获开启时入队（关了会 warning 丢弃，但 Chromium 仍把文件写进 downloads 根目录，于是变成下一轮 `_carry_over_orphans` 处理的 UUID 残留）；路 2 目录轮询——用 `_dir_snapshot` 递归差集 + `_is_stable`，不做 t0 时间过滤也不显式排除图片（靠校验第 0 道拦）。每轮固定 `sleep(1.5)`；多个下载同时到达时只认第一个通过校验的，其余留在根目录、随后被同一次 `end_wait_download` 归进 `待确认/`。
+> **两条捕获通道的差别**（改这块前必须清楚）：路 1 事件队列——`_on_download` 只在捕获开启时入队（关了会 warning 丢弃，但 Chromium 仍把文件写进 downloads 根目录，于是变成下一轮 `_carry_over_orphans` 处理的 UUID 残留）；路 2 目录轮询——`_dir_snapshot` 递归差集（**递归**，与 `_find_new_candidate` 的"只看根目录"不同），靠 `_new_download_candidates` 补齐 t0 过滤与内部目录排除，再过 `_is_stable`，图片仍不在这里挡（由校验第 0 道负责）。每轮固定 `sleep(1.5)`；多个下载同时到达时只认第一个通过校验的，其余留在根目录、随后被同一次 `end_wait_download` 归进 `待确认/`。
 
 #### 信息与辅助
 
@@ -415,8 +417,8 @@ liushui_export/
 | --- | --- |
 | `set_step_debug(enabled, callback)` | 设开关；关闭时把回调一起清掉。GUI 在每次任务 `finally` 里复位，注释："避免影响后续任务（浏览器可能没起来）"。 |
 | `step_pause(name)` | 未开调试直接返回 True；开了先 `snapshot("DEBUG_…")` 再等回调。**回调返回假值 → 抛 `RuntimeError`**（用户点"中止"），且这条 `except RuntimeError: raise` 被刻意放在"回调自身异常只记日志继续"之前——两种失败语义必须区分。没有回调时"只截图不阻塞"。 |
-| `set_user_wait_callback(cb)` | GUI 注入"弹窗等用户操作"的回调（扫码/确认场景）。 |
-| `wait_user(prompt, timeout=300)` | 先 `snapshot("等待用户确认")` + warning，再走回调。**始终返回 True**，回调抛异常也继续往下跑；有回调时 `timeout` 参数完全不起作用（阻塞时长由 GUI 侧 `evt.wait(3600)` 决定）。 |
+| `set_user_wait_callback(cb)` | GUI 注入"弹窗等用户操作"的回调（扫码/确认场景）。**回调必须回话**：返回值就是"用户是否真的点了确定"。 |
+| `wait_user(prompt, timeout=600)` | 先 `snapshot("等待用户确认")` + warning，再走回调。**True 只来自用户亲手点"确定"**；取消、弹窗没弹出来、到点没人应答、回调自身异常，一律 False（以前是"回调一返回就无条件记 用户已确认,继续 return True"，微信上没扫码也会接着点下载）。有回调时 `timeout` 参数不起作用，实际等待时长由 GUI 侧 `LiushuiApp.USER_WAIT_TIMEOUT_S` 决定；**没回调**（录制/调试）时仍按 `timeout` 静默停留后返回 True——没人可问的场合保持旧兜底。 |
 | `snapshot(step_name)` | 按当前任务上下文存 `…/snapshots/步骤_时间.png`；建目录失败回落到下载根目录；**失败返回 None**。 |
 | `screenshot(name)` | 存到 **downloads 根目录**（`名字_时间戳.png`）；**失败也返回路径**——与 `snapshot` 语义不一致，容易误用；也正是"兜底扫描会认领截图"那个历史事故的源头。 |
 | `snapshot_on_failure(where)` | `get_page_info` 打 url/title + `snapshot("FAIL_…")` 的组合，失败取证用；取信息失败静默。 |
@@ -509,14 +511,14 @@ liushui_export/
 
 ### 5.7 CronScheduler（core/scheduler.py）— 定时任务
 
-- `CronExpr(expr)`：支持 `*`/`*/n`/`a-b`/`a,b`/`?`；`match(dt)` 按分时日月周匹配（dom 与 dow 同时受限为 OR）；`next_run(after)` 返回下一个匹配分钟（一年内）。
-- `CronJob`/`TaskStore`：任务模型与 `scheduled_tasks.json`（version 1）读写；损坏条目跳过。**新建任务走 `CronJob.new(...)`**，它把 `last_run` 记为创建时间。
-- `CronScheduler(app, store, poll_interval=30)`：后台线程轮询；`should_trigger` 基于「上次运行后的 next_run <= now」（`last_run` 为空视为已到期，故新建任务必须用 `CronJob.new` 记起算点，否则保存后 30s 内就会执行一次）；触发经 `app.trigger_job(job)` 后更新 `last_run` 并保存；错过不补跑。
+- `CronExpr(expr)`：支持 `*`/`*/n`/`a-b`/`a,b`/`?`；`match(dt)` 按分时日月周匹配（dom 与 dow 同时受限为 OR）；`next_run(after)` 返回下一个匹配分钟（一年内）。`_parse` 对**读不懂的东西一律报错而不是当"不设限"**：反向区间（`5-1`）、越界起点（`70/5`）、非正步长（`*/0`）都抛 `ValueError`——少一道判据，`range()` 得到空集，而空集在末尾被判成"这个字段完全不设限"（`0 9 * * 5-1` 于是变成天天跑）。`impossible_date()` 只在"日、月都受限而周没受限"时给出"这个日期不存在（2 月 30 日）"，日/周同时受限是 OR 语义所以不该报（`0 9 30 2 1` 靠每周一会跑），2 月按闰年 29 天算所以 `0 9 29 2 *`（四年一次）也不报。
+- `CronJob`/`TaskStore`：任务模型与 `scheduled_tasks.json`（version 1）读写；损坏条目跳过。**新建任务走 `CronJob.new(...)`**，它把 `last_run` 记为创建时间。`load()` 对同一 `job_id` **复用内存里已有的对象**（`sync_from_disk` 只搬盘上字段）——`check_all` 每 30 秒 load 一次，换成新对象会让对话框握着的引用变成孤儿（见 12 章第 45 条）。`save()` 返回是否真的落盘并把原因留在 `last_error`；`mark_triggered(job, now)` 写 `last_run`，**写不进盘时在内存里兜一份**（`trigger_floor`，按"名字\|cron"记），`should_trigger` 取盘上与内存中**较新**的那份。
+- `CronScheduler(app, store, poll_interval=30)`：后台线程轮询；`should_trigger` 基于「上次运行后的 next_run <= now」（`last_run` 为空视为已到期，故新建任务必须用 `CronJob.new` 记起算点，否则保存后 30s 内就会执行一次）；触发经 `app.trigger_job(job)` 后 `mark_triggered`；错过不补跑。写盘失败经 `_warn_store_failure` 说一次（记号带错误原因，同一种毛病不刷屏）。
 - `app.trigger_job(job)`：用 `pair_job_targets` 把任务的平台/商户配成实际可跑的组合（商户只与其所属平台配对），无匹配时在日志里提示而不是静默返回；返回 `_run_async` 是否真的开始（正忙时 False，且不弹"已有任务在执行"的窗打扰人）。
 - `CronScheduler.trigger(job, now)`：**只有真的开始执行才写 `last_run`**；到点时若被手动导出占着，本次不记，下个轮询周期自动重试（"程序关闭期间错过不补跑"的语义保持不变）。
 - 界面：`SchedulerDialog` 列表的「对象」列显示 `pair_job_targets` 算出的**实际项数**（配不出来标「0 项(商户与平台不匹配)」）；`JobEditDialog` 保存时对空商户/不匹配商户先问一句再存。
-- `SchedulerDialog`/`JobEditDialog`：任务新增/编辑/删除/启停；cron 带常用模板与校验。编辑走 `CronJob.apply_edit(...)`：**改了 cron 就把起算点挪到编辑时刻**，否则老 `last_run` 配新 cron 早已"到期"，保存后 30 秒内会立刻跑一次。
-- 几个容易被忽略的细节：`next_run` 是**逐分钟步进**、上限 527040 次（一年），闰年/2 月 30 日这类表达式最坏要空转一年才放弃并返回 None（`should_trigger` 把 None 当不触发）；`check_all` 每轮先 `store.load()`（手改 json 也能生效），但 `_run` 的 `except: continue` 意味着**一条坏任务会跳过当轮剩余任务**；`poll_interval = max(10, int(...))` 有下限；`CronJob.from_dict` 对没写 `id` 的条目**每轮都新生成一个随机 job_id**（所以任何"按 id 记一次"的机制都会失效，见 12 章第 40 条）；cron 缺失/非法的任务不跑、并且日志会说一句（以前兜成"每分钟跑一次"）。
+- `SchedulerDialog`/`JobEditDialog`：任务新增/编辑/删除/启停；cron 带常用模板与校验。编辑走 `CronJob.apply_edit(...)`：**改了 cron 就把起算点挪到编辑时刻**，否则老 `last_run` 配新 cron 早已"到期"，保存后 30 秒内会立刻跑一次。`JobEditDialog._save` 在**保存这一刻按 `job_id` 回查当前列表**（不用点"编辑"时抓住的引用），查不到就弹窗拒绝本次保存而不是把已删的任务写回盘上复活；`cron` 语法错与"没有真实存在的日期"两种都在当场拦住，写盘失败则不关窗、明说"没保存成功"。
+- 几个容易被忽略的细节：`next_run` 是**逐分钟步进**、上限 527040 次（一年），判成"一年无解"的表达式记进模块级 `_NEVER_MATCHING`（实测一次年扫约 460ms，调度线程每 30 秒为每个任务算一次，不记就是常年白烧），更常见的"2 月 30 日"那类由 `impossible_date()` 提前给出人话；`check_all` 每轮先 `store.load()`（手改 json 也能生效，且复用对象），但 `_run` 的 `except: continue` 意味着**一条坏任务会跳过当轮剩余任务**；`poll_interval = max(10, int(...))` 有下限；`CronJob.from_dict` 对没写 `id` 的条目**每轮都新生成一个随机 job_id**（所以任何"按 id 记一次"的机制都会失效，见 12 章第 40 条；内存兜底的记号同样不用 id）；cron 缺失/非法的任务不跑、并且日志会说一句（以前兜成"每分钟跑一次"）。
 - 失败重试：`run_with_retry(fn, retry_times, retry_interval_s, log)` 与 `_execute_export_tasks`（自 `_do_export` 提炼）；settings `retry_times`(默认 2)/`retry_interval_s`(默认 30，递增 ×2)；`retry_times=0` 关闭。`_run_single_export` 对任何异常都在内部消化成返回值 `"failed"`（含浏览器启动阶段），否则抛出会让重试整批失效；导出时那层登录预检失败返回 `"manual"` 且同样落 `stats.jsonl`（`error` 写明「登录已失效」）。
 - 人工介入集中：settings `preflight_login_check`(默认 `True`) 让手动导出在开跑前先逐家 `_probe_login`（无头）核一遍登录态，失效的一次性列出、集中重登，仍未登录的从本批剔除；需扫码的平台按 `manual_intervention` 排在队尾。`_probe_login` 把异常折成"没能核实"并照常导出——检查失败绝不能变成业务失败。定时任务（`trigger_job`）不做预检：确认框无人应答会把整批吊住。
 
@@ -549,7 +551,7 @@ liushui_export/
 | `default_workspace_suggestion()` | 首启给用户的默认位置：`~/Documents/流水导出工作空间`。 |
 | `DEFAULT_SETTINGS` | 8 个键的唯一默认值来源。⚠ `load_settings()` **只遍历这 8 个键**，用户在 `settings.json` 里手加的未知键会被静默丢弃。 |
 | `load_settings()` | 读文件、缺字段回默认；文件缺失/坏 JSON/顶层不是 dict 三种情况都吞掉，返回值恒为完整 8 键副本。不写盘。 |
-| `write_text_atomic(path, text)` | 同目录 `path+".tmp"` → write + `flush` + `os.fsync` → `os.replace`；失败时删临时文件后 **raise**（"失败的这次不算数，别留垃圾文件"）。⚠ tmp 名固定，同一文件并发写会互相踩；同目录保证 `os.replace` 不跨卷。 |
+| `write_text_atomic(path, text)` | 同目录唯一临时名 `path.tmp-<pid>-<序号>` → write + `flush` + `os.fsync` → `_replace_with_retry`（对 Windows 的"另一个程序正在使用此文件"做 8 次退避重试）；失败时删临时文件后 **raise**（"失败的这次不算数，别留垃圾文件"）。⚠ 临时名**不许改回固定 `path+".tmp"`**：`scheduled_tasks.json` 是调度线程与主线程都会写的文件，共用一个暂存名时后开的 `open("w")` 会截断前者正在写的那份、前者的 `os.replace` 会撞 WinError 32（实测 8 线程同写 48 次里 38 次抛错，而调用方一律 `except: pass` → 静默丢改动）。同目录保证 `os.replace` 不跨卷。 |
 | `write_json_atomic(path, data)` | `ensure_ascii=False, indent=2` 后委托上者。注释 76-79 是全部理由：`settings`/`scheduled_tasks`/`selection_state` 都是"界面每次改动整体重写"，非原子写时进程写一半崩掉文件就是截断的，而三处读取都是 `except → 用默认值/返回空`，**用户看到的是"配置和定时任务被静默清空"**。 |
 | `save_settings(partial)` | **以 `load_settings()` 现值为底只覆盖传进来的键**。注释 87-90 记录旧事故：旧实现以 `dict(DEFAULT_SETTINGS)` 为底，界面各处"点一下只写自己那一两个键"，于是勾一下"失败重试"就把首次重试间隔写回 30、动一下保活开关就把文件名模式和显示浏览器统统恢复默认。整体 try/except **pass**：写盘失败静默，界面不会提示"保存失败"。 |
 | `_ensure_log_dir()` / `LOGGER_NOTES` | 日志目录建不出来（只读介质、U 盘、权限）时退到 `%TEMP%/liushui_export/logs`；连 `FileHandler` 打不开也只是没有文件通道，**绝不在 import 期抛错** —— `logger` 是最早被导入的模块之一，那时除了 crashguard 没有别的兜底。经过记进 `LOGGER_NOTES`，由界面 `_report_paths` 在启动日志里说一声。 |
@@ -832,7 +834,7 @@ end_wait_download(): 清队列、归位残留、清理临时目录
 
 #### 视频号 `shipinhao`（唯一需人工）
 
-`manual_intervention=True` + `intervention_hint`（注释 42 写明 True 会被排到最后）。真实 placeholder 是「动账开始/结束时间」，所以覆盖成私有 `_set_time`（46-83）：正则 placeholder 定位 → `fill()` 后**回读 `input_value()` 校验** `[:10]` 是否生效，没生效就 `click → Control+a → keyboard.type → 回车`，值拼成 `"YYYY-MM-DD 00:00:00"` / `" 23:59:59"`，结束 `Escape` 关面板。步骤：进页 → 「资金流水」→ `_set_time` → 查询 → 「全部导出」`sleep(10)` → **`wait_user("…手机上使用微信扫码确认…")`**（注释 107：平台弹"需手机微信扫码"，这里阻塞等用户）→ `begin_wait_download` → 30 秒内可见才点「下载数据」→ `wait_download(60)`。`_set_time` 返回 False（找不到输入框或过程报错）时**当场停手**：写 `[中止]` 日志 + `snapshot(「日期未填入」)` + 返回 `manual`，不再往下点查询/全部导出。
+`manual_intervention=True` + `intervention_hint`（注释 42 写明 True 会被排到最后）。真实 placeholder 是「动账开始/结束时间」，所以覆盖成私有 `_set_time`（46-83）：正则 placeholder 定位 → `fill()` 后**回读 `input_value()` 校验** `[:10]` 是否生效，没生效就 `click → Control+a → keyboard.type → 回车`，值拼成 `"YYYY-MM-DD 00:00:00"` / `" 23:59:59"`，结束 `Escape` 关面板。步骤：进页 → 「资金流水」→ `_set_time` → 查询 → 「全部导出」`sleep(10)` → **`wait_user("…手机上使用微信扫码确认…")`**（注释 107：平台弹"需手机微信扫码"，这里阻塞等用户）→ `begin_wait_download` → 30 秒内可见才点「下载数据」→ `wait_download(60)`。`_set_time` 返回 False（找不到输入框或过程报错）时**当场停手**：写 `[中止]` 日志 + `snapshot(「日期未填入」)` + 返回 `manual`，不再往下点查询/全部导出。**`wait_user` 的返回值同样要看**（2026-09-26 起）：False（取消/弹窗没弹出来/超时）就 `snapshot("未确认扫码")` + `manual`，不 `begin_wait_download` —— 手机没扫码还点下载，拿到的多半是空文件或上一轮的文件，而流程会把它记成 success。
 
 #### 六个骨架平台的差异点
 
@@ -946,9 +948,9 @@ python -m playwright install chromium
 
 | 文件                       | 规模（当前实际行数）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
-| `core/main_gui.py`       | 2517 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、录制/调试/平台管理对话框入口 |
-| `core/browser.py`        | 1390 行      | 浏览器管理、下载捕获与归档、成品校验（含格式门）、登录态存取、操作录制（项目体量最大的核心模块） |
-| `core/scheduler.py` | 443 行 | 定时任务（cron 解析 / `TaskStore` 持久化 / 轮询触发 / 管理界面） |
+| `core/main_gui.py`       | 2659 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、等待用户手工确认（`_ask_user_confirmed`）、录制/调试/平台管理对话框入口 |
+| `core/browser.py`        | 1533 行      | 浏览器管理、下载捕获与归档（含"本轮自己写的目录"排除与旧件保留）、成品校验（含格式门与多 sheet 数行）、登录态存取、操作录制（项目体量最大的核心模块） |
+| `core/scheduler.py` | 675 行 | 定时任务（cron 解析含"读不懂就报错"的判据 / `TaskStore` 保身份读写与写盘失败兜底 / 轮询触发 / 管理界面） |
 | `core/platform_admin.py` | 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/exporters.py`      | 229 行       | 智能导出器（无人写 `export()` 时的默认兜底导出）  |
 | `core/platform_base.py`  | 253 行       | 平台基类（元信息 + 登录判据 + 选择器自检 + 通用导出骨架钩子 + 子商户切换/读回钩子，默认全关） |
@@ -956,7 +958,7 @@ python -m playwright install chromium
 | `core/logger.py`         | 200 行       | 日志三通道 + 稳定性统计（`stats.jsonl` 尾部读与全量汇总） |
 | `core/cleanup.py` | 121 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/loader.py`         | 112 行        | 平台加载器与免重启 reload（含清磁盘 `.pyc`） |
-| `core/config.py`         | 324 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写与"只覆盖传入键"的设置保存 |
+| `core/config.py`         | 355 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写（唯一暂存名 + 占用重试）与"只覆盖传入键"的设置保存 |
 | `core/keepalive.py` | 96 行 | 登录保活服务（后台线程周期巡检，任务执行中跳过本轮） |
 | `core/crashguard.py` | 119 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
 | `core/deps.py` | 219 行 | 依赖三档体检（缺包/版本不对/缺内核）、内核目录识别、修复命令与离线退路；不 import playwright、不碰界面，见 14.2 |
@@ -967,15 +969,13 @@ python -m playwright install chromium
 | `tools/build_portable.py` | 282 行 | 绿色包组装：`--flavor full/core` 两版、白名单复制、`scan_forbidden` 挡用户数据/凭证、`check_flavor` 核结构与版本一致、`--verify` 自检路径（不需要依赖） |
 | `packaging/` + `.github/workflows/build-portable.yml` | — | 两个版本的启动器与说明（`run-portable.*` / `run-core.*`，纯 ASCII vbs + 可看错的 bat）和出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
-| `platforms/*/export.py` | 11 个平台共 1047 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 43 个文件约 7270 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（507 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」 |
+| `platforms/*/export.py` | 11 个平台共 1053 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 134 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
+| `tests/` | 52 个文件约 8659 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（**589 项**）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」。**2026-09-26 本轮新增**：兜底扫描不认领 `历史/`（含"真下载仍要认领"的反向钉）、多 sheet xlsx 数行、定时任务编辑与 30 秒重载的竞态（真 Tk）、任务文件写不进盘的内存兜底与出声、cron 反向区间与永不成立的表达式、`wait_user` 的四种回话与"没人应答≠已确认"、归档失败/旧件被占用时两份文件都保留。 |
 | `start.bat` / `启动工具.vbs` | 40 / 124 行 | 源码版的启动脚本（vbs 五档找 Python；**必须保持纯 ASCII**，见 13 章）。它**不再**自己检查/安装依赖 —— 那个判断只在 `core/deps.py` + `check_dependencies()`（见 12 章第 29 条） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
-| `tools/recording_to_script.py` | 约 270 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
-| `platforms/*/export.py` | 11 个平台约 950 行 | 平台导出脚本（有赞、快手、小红书、抖音、天猫、京东、拼多多、视频号、微信支付、银联、支付宝）。**6 个已用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `start.bat` / `启动工具.vbs` | —             | 启动脚本（`python -m core.main_gui`） |
-| `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
+
+> 本表末尾原有四行是历史遗留的重复条目（`recording_to_script`/`platforms`/`start.bat`/两份文档各写了两遍），本轮清掉；改规模数字时以 `wc -l` 为准，别照抄旧值。
 
 ## 12. 全仓硬约束（改这些之前先读）
 
@@ -1046,13 +1046,28 @@ python -m playwright install chromium
 41. **`browser_data/<平台key>/` 这一层只放商户目录**。往这一层启动一个 Chromium（= 商户为空时的旧行为）就等于让浏览器把 `Default`/`Crashpad`/`Safe Browsing` 写进「商户名单」—— 它们会被列成商户、被自动勾上、每次批量任务各起一次浏览器。三条一起才成立：① 没有商户时用保留目录 `_平台调试`/`_未指定平台`，默认 `_profile_dir` 也不是 `browser_data` 根；② 商户发现剔内部目录**必须先确认这个平台目录自己当过 profile 根**（顶层有 `Local State`/`Last Version`），否则用户手工拷进来搬登录态的目录会被静默吞掉——那比"多出几个假商户"更糟；③ 剔了谁要写日志说出口，两个保留名不许拿来建商户。
 40. **cron 缺失/非法 = 这个任务不跑，并且要说一次**。`from_dict` 不许再给空 cron 兜 `* * * * *`（那是每分钟起一次浏览器）；`CronScheduler._warn_once` 按任务只提醒一次、整段包在 `try` 里，提示本身绝不能把调度线程带下去。用户显式写 `* * * * *` 是他的选择，照旧生效。⚠ 这个"只说一次"**不许按 `job_id` 记**：json 里没写 `id` 的条目，`from_dict` 每次 load 都新生成一个随机 id，而 `check_all` 每轮都 load —— 按 id 记等于每 30 秒刷一遍同一句（现在按「名字 + cron + 毛病」记）。
 
+**下载、校验与交付（2026-09-26 廿三轮补）**
+
+42. **兜底扫描（路 2）的候选必须与 `_find_new_candidate` 同一口径**：按 `_dl_capture_t0` 过滤时刻，并排除躺在 `临时/`、`历史/`、`待确认/` 下的文件。"`_dir_snapshot` 的差集"里出现的新文件**很可能就是本轮自己刚写进去的**——`_finalize_download` 在校验之前就把同名旧版复制进了 `历史/`，于是"本轮校验失败"与"兜底认领了上一版真账单"发生在同一个 while 循环里，日志、`stats`、文件名全都像是成功。要排除谁按**路径分段**判，别按文件名前缀（`历史商户/`、`历史.csv` 都是用户的正常目录与文件）。
+43. **删除只许发生在"另一份已经落定"之后**。往 `历史/` 的复制没成功就不许删顶层那份唯一的旧账单；旧件被 Excel 占用删不掉时，本次成品换 `_原件保留_HHMMSS` 的名字落下，两条路都要写一行 warning。同理 `_accept_download` 里任何文件系统意外都折成"这一份没认领成"返回 None——异常冒出 `wait_download` 会把 `_dl_capture_on` 卡住、成品留在 `临时/` 里被下一次 `begin_wait_download` 删掉（明明下成功却报 failed，越重试越丢）。
+44. **判空表不许只看第一个工作表**。`_xlsx_row_count` 必须遍历所有 sheet 取最大值："汇总页在前（只有一行表头）、明细页在后"是账单 xlsx 的常见结构，只数首页会把一份好文件判成空表并删掉，表现为"这个平台永远下载失败"。
+
+**交互与安全（同轮补）**
+
+45. **"没人应答"永远不许折算成"用户同意"**。`wait_user` 的回调必须回话，True 只来自用户亲手点"确定"；取消、弹窗起不来、等待超时、回调自身异常都是 False，平台脚本拿到 False 必须停手转人工（视频号那条路以前会照常点"下载数据"，拿到空文件却记 success）。这与第 33 条"归属没确认就不许点导出"是同一条红线。工作线程等主线程弹窗时，等待要**分段**并每段看一眼 `_aborted()`，弹窗本身要 `topmost`（Chromium 窗口常常盖在主窗口上面）。
+
+**任务与配置（同轮补）**
+
+46. **`TaskStore.load()` 必须对同一 `job_id` 复用内存里已有的对象**（`sync_from_disk` 只搬盘上字段），而界面保存前必须**按 id 回查当前列表**。`check_all` 每 30 秒 load 一次，换成新对象会让 `JobEditDialog` 握着的引用变孤儿——`apply_edit` 改在孤儿上、`save()` 序列化新对象，改动静默丢失且界面显示回旧值。**写盘失败必须有内存兜底**：`mark_triggered` 在 `save()` 返回 False 时把 `last_run` 记在内存（按"名字\|cron"，不用 id），`should_trigger` 取盘上与内存中**较新**的一份；否则下一轮 load 读回旧值 → 同一任务每 30 秒重跑一整批。`write_text_atomic` 的暂存名必须唯一（`path.tmp-<pid>-<n>`）并对占用退避重试，`TaskStore.save`/界面保存失败都必须说出口——这几个文件的读侧是 `except → 用默认值/返回空`，静默失败等于骗人。
+47. **cron 里"读不懂"的东西一律报错，不许折成"这个字段不设限"**。`_parse` 末尾是 `values or None`，而空集就是 `None`——所以反向区间（`5-1` → `range(5,2)` 为空）、越界起点（`70/5`）、非正步长（`*/0`）若不检查，`0 9 * * 5-1` 会静默变成**天天跑**。语法正确但永不成立的日期（`0 9 30 2 *`）要当场拦下并说清（`impossible_date()`），且 `next_run` 的"一年无解"结论要缓存（一次年扫约 460ms，调度线程每 30 秒一次）。判"永不成立"必须避开两个坑：日/周同时受限是 OR 语义（`0 9 30 2 1` 靠每周一会跑），2 月按闰年 29 天算（`0 9 29 2 *` 是四年一次）。
+
 ***
 
 ## 13. 已知不一致、未接线与待议
 
 > 这一节是把"读代码时容易当成 bug、其实要么是有意的、要么确实坏着"的地方摊开。**有意为之的别顺手清理，确实坏着的改动前先确认。**
 
-### 13.1 确实失效/会出错的地方（2026-09-25、2026-09-26 两批已全部修掉，留此备查）
+### 13.1 确实失效/会出错的地方（2026-09-25、2026-09-26 三批已全部修掉，留此备查）
 
 | 位置 | 曾经的现象 | 修法与提交 |
 | --- | --- | --- |
@@ -1068,6 +1083,13 @@ python -m playwright install chromium
 | `core/scheduler.py` `CronJob.from_dict` | 缺 cron 的条目兜 `* * * * *` = **每分钟起一次浏览器导账单**，而界面新建/编辑都有校验、只有手改 `scheduled_tasks.json` 漏写这个键的人会把整台机器点着 | 空 cron 原样留着（`CronExpr` 解析不过 → 该任务不跑），调度线程按任务写一句"不会被执行"且只说一次；`ea5b7a1`。第一次提交的记号用 `job_id`，而 `from_dict` 对没写 id 的条目**每轮 load 都新生成一个随机 id** → 变成每 30 秒刷屏，改按"名字+cron+毛病"记；`5529689` |
 | `core/browser.py` `set_browser_profile` + `core/main_gui.py` `discover_merchants` | 商户为空时 profile 目录就是 `browser_data/<平台key>/` 本身（脚本调试那条路 `_ensure_browser(plat)` 不传商户），Chromium 直接往这一层写下 `Default`、`Crashpad`、`Safe Browsing` 等内部目录，而商户发现的规矩是「这一层每个子目录=一家商户」→ 内部目录被列成商户并自动勾选。本机实测 `discover_merchants(["youzan"])` 返回 10 项、只有 `test` 是真的，`selection_state.json` 里那 9 项全是 `true`：「检查登录状态」与批量导出会为它们各起一次浏览器，商户数徽标与定时任务「对象」项数一起骗人 | 空商户时垫一层保留目录 `_平台调试`（连平台都没有时是 `browser_data/_未指定平台`），有商户时路径逐字不变、存量登录态不搬家；商户发现按「先内容后名字」认内部目录，且**只在这个平台目录本身当过 profile 根时**才启用；启动与「刷新商户」各写一行「已忽略 N 个浏览器自己的目录」；两个保留名不许拿来建商户；磁盘上的旧残留一律不动。`d798c46` + `55e99f3` |
 | `core/main_gui.py` `_action_help` | 弹窗仍教"在浏览器完成登录并点『确定』"，而第九轮起登完的标志是**关掉浏览器窗口** —— 用户照旧文案在没登完时点掉窗口，正是那次改造要治的病 | 文案跟回现流程并补上预检/「中止」，加 `tests/test_action_help_text.py` 钉住；`a62a7ed` |
+| `core/browser.py` `wait_download` 路 2 | 兜底扫描只做"`_dir_snapshot` 递归差集 + 跳半成品后缀"，**不按 `_dl_capture_t0` 过滤、也不排除本轮自己写进 `历史/` 的那份** → 同名重导 + 本轮拿到登录页时：校验失败删掉本轮文件，同一个 while 循环把刚归档进 `平台/商户/区间/历史/` 的**上一版真账单**搬回顶层认领，通过全部校验、日志"下载完成并校验通过"、`stats` 记 success，而 `历史/` 被搬空（离线实测：返回值逐字等于上一版） | 候选改走 `_new_download_candidates`：与 `_find_new_candidate` 同口径（t0 + 内部目录 `临时/历史/待确认` 排除，按路径分段判）；顺带补上"没 begin 就 wait"时漏记的 t0 与临时目录。附一条反向用例钉住"真下载照样要被兜底认领"；`54e1002` |
+| `core/browser.py` `_xlsx_row_count` | 只数 `namelist()` 里第一个 `sheetN.xml`。手搓"汇总页 1 行 + 明细页 120 行"的 6.2KB xlsx 实测：`_count_rows → 0` → `[校验] 表格无有效数据行` → `_accept_download` 直接 `os.remove`，**一份好账单被判成空表删掉**，表现为"这个平台每次下载都失败" | 遍历所有 sheet 取最大值（`a367bda`）；另钉一条"每页都只有表头仍是空表"，防止改宽变成什么都放行 |
+| `core/scheduler.py` + `SchedulerDialog`/`JobEditDialog` | `check_all` 每 30 秒 `store.load()` 且每轮换成**全新对象**，而对话框点"编辑"时抓的是旧对象 → 用户改商户名/挑平台超过 30 秒，`apply_edit` 改在孤儿上、`save()` 序列化新对象 → **改动静默丢失**，界面 `_reload` 当场显示回旧值、日志零提示，到点仍按老商户导出（实测真 Tk + 真 JobEditDialog） | `load()` 对同一 `job_id` 复用对象（`sync_from_disk`，盘上内容仍然胜出）+ 保存时按 id 回查、查不到就弹窗拒绝（不把已删的任务复活）；`a0cc95c` |
+| `core/scheduler.py` `TaskStore.save` + `core/config.py` `write_text_atomic` | `except Exception: pass`。任务文件被云盘/Excel/杀软占住时 `last_run` 落不了盘 → 下一轮 load 读回旧值 → **同一任务每 30 秒重跑一整批**（实测注入 PermissionError：5 轮 = 5 次触发），日志一个字都没有。另：暂存名固定 `path+".tmp"`，8 线程同写一个 json 实测 48 次里 38 次抛 WinError 32，全被上层咽掉 | 写失败时 `mark_triggered` 把起算点兜在内存（记号"名字\|cron"，不用每轮都会变的 job_id），`should_trigger` 取盘上/内存中较新的一份；调度与界面各说一次，界面没落盘就不关窗。暂存名改 `path.tmp-<pid>-<n>` + 对占用退避重试（只换唯一名仍剩 5/8 失败，加重试才每次都落盘）；`2a5f0e4` |
+| `core/main_gui.py` 等用户扫码 + `core/browser.py` `wait_user` | `evt.wait(timeout=3600)` 的返回值被丢掉、回调不回话，而 `wait_user` 一看回调返回就写死"用户已确认,继续" return True → **手机没扫码也会点"下载数据"**（空文件/旧文件记 success）。提示是 `showinfo` 且无 topmost（常被最大化的 Chromium 挡住），模态框还压着主窗口让「中止」点不动；回调抛异常那条会掉下去再睡满 timeout（默认 600 秒，本轮做变异实验时被这个形状真吊死过一次） | 抽成 `LiushuiApp._ask_user_confirmed`：`askokcancel` + topmost + 分段等（每秒看 `_aborted()`）+ `USER_WAIT_TIMEOUT_S`=10 分钟，True 只来自用户点"确定"；`wait_user` 照实返回 bool，取消/弹窗失败/超时/异常一律 False；视频号拿到 False 截图 + 转 manual，不再 `begin_wait_download`；`27a928a` |
+| `core/scheduler.py` `CronExpr._parse` | `-` 分支不查 `a<=b`，`range(5,2)` 是空集，末尾 `values or None` 又把空集判成"不设限" → `0 9 * * 5-1`（本意周五到周一）实测**七天全命中**，`cron_problem()` 也说没问题；`0 0 1 11-2 *` 变成每月 1 号。另一半：`0 9 30 2 *` 解析得动却永不成立，`next_run` 走满 52.7 万次才返回 None（实测 460ms）→ 任务静默不跑 + 调度线程每 30 秒白烧一次 | 反向区间/越界起点/非正步长一律 `ValueError`（界面当场拦 + 调度说一次，跨周末教人写 `5-6,0-1`）；新增 `impossible_date()`（避开 OR 语义与闰年 2/29 两个误报口）；`_NEVER_MATCHING` 缓存无解结论；`f2de521` |
+| `core/browser.py` `_finalize_download` | 往 `历史/` 的 `copy2` 整包 `except: pass`，紧接着**无条件** `os.remove(顶层旧件)` → 归档失败（路径超 260 字符、磁盘满、杀软拦）等于把上一版账单凭空删掉，全树搜不到、日志零条，而用户以为 `历史/` 有备份；兜底那句 `shutil.copy2(path, final_path)` 自己没包 try → 旧件被 Excel 占用时 PermissionError 冒出 `wait_download`，`_dl_capture_on` 卡在 True、成品留在 `临时/` 被下次 rmtree 删掉 | 归档失败/删不掉 → 保留旧件，本次成品落 `_原件保留_HHMMSS` 并各写一行 warning；`_accept_download` 整体包 try，文件系统意外折成"这一份没认领成"；`7f2e494` |
 
 > 同批还修了序列快照 harness 的一处失真：`tests/test_platform_sequences.py` 的 `Recorder.page` 以前返回记录函数，平台脚本里 `browser.page.locator(...)` 取属性直接 AttributeError、被脚本自己的 try 吞掉，于是录出来的是"页面操作整段失败"那一支（微信支付停在 `assert_selector` 结果 `failed`、视频号停在 `_set_time`）。给 `page` 一个可链式哑对象后两家录到完整流程（16→18、11→29 次调用，结果 `failed`→`success`），两条快照按新口径重录。
 
@@ -1101,6 +1123,10 @@ python -m playwright install chromium
 | 位置 | 现象 | 为什么算问题 |
 | --- | --- | --- |
 | `core/main_gui.py` `_show_login_hint` | 首次登录提示窗写的是「平台 · 商户」，没有「第 i/N 家」，也没有这个商户对应哪个登录账号；Chromium 窗口标题跟着网页走，任务栏里看不出在登谁。 | 一个平台勾了 3 个商户时，同一个提示窗会连着弹 3 次、内容只有商户名不同，用户很难确认自己现在登的是第几家、刚才关的是不是同一个账号 —— 结果常是"三家都登成同一个账号"，而三家用的是各自独立的 profile，另外两家其实是空的。 |
+| `core/main_gui.py` `_step_cb`（单步调试） | 与本轮修掉的 `wait_user` 同一形状：`evt.wait(timeout=3600)` 的返回值被丢掉、弹窗不带 topmost，`_ask` 抛异常时默认 `choice=True`（继续）。 | 只影响"单步调试"这条路径（业务用户不勾），且默认"继续"比默认"停手"更合调试的意图，所以本轮**有意没动**。要把调试也统一成"必须回话"再改。 |
+| `core/main_gui.py` `main()` 的 `_on_close` | 关主窗口时不查 `self.running`、不二次确认，直接 `scheduler.stop()`（内部 `join(timeout=5)`）+ `cleanup()` + `destroy()`。 | 导出进行中点 X，当前那一家直接蒸发：不记 `stats.jsonl`、日志里也不留"未完成"字样，`downloads` 根里会留一个 `.crdownload`（清理侧特意跳过中间态后缀，永远没人收）。加一次 `askyesno` 就能挡掉，但这是"改交互"，等你点头。 |
+| `core/main_gui.py` `_run_async` | 在 `_task_lock` 里置好 `running=True` 之后，函数体还有一句主线程之外的 `for key in self.platform_vars: set_platform_status(...)`（注释位置 1085）。 | 字典由主线程 `_rebuild_platform_list` 重建，撞上就是 `RuntimeError: dictionary changed size during iteration`，而这个异常在 `_run_async` 里、**线程包装器之外** → `running` 永久为 True，之后每个按钮都报"已有任务正在执行"，只能重启进程。窗口很窄（只在定时任务触发的那一刻），修法是遍历 `list(self.platform_vars)` 或把状态灯重置搬进 `_ui`。 |
+| `core/platform_base.py` `DOWNLOAD_TIMEOUT_S = 60` | 走骨架的 6 个平台只等 60 秒下载完成；`wait_download` 默认值是 120 秒，两边不一致。 | 后台"先生成报表、再给下载"的平台一旦生成超过 60 秒，这一家必然转 manual，而真文件随后落地时会被下一次 `begin_wait_download` 的归位扫进 `downloads/待确认/` —— 用户看到的是"失败"，东西其实在待确认里。**需要真实后台量一次**再决定改哪个数（这类"页面等待"没有离线证据）。 |
 
 ***
 

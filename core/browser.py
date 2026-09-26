@@ -276,7 +276,7 @@ class BrowserManager:
     def begin_wait_download(self):
         """开始捕获模式: 清空旧队列,后续触发的下载都会进入队列
         必须在点击"下载"按钮之前调用(异步下载文件先落地也不丢失事件)
-        本次下载先落入 平台/日期范围/临时 目录,完成后移动到正式位置
+        本次下载先落入 平台/商户[/子商户]/日期范围/临时 目录,完成后移动到正式位置
         """
         self._dl_queue = []
         self._dl_capture_on = True
@@ -297,7 +297,7 @@ class BrowserManager:
         self._dl_temp_dir = tmp
 
     def _task_tmp_dir(self):
-        """本次任务临时目录: downloads/平台/商户/日期范围/临时"""
+        """本次任务临时目录: downloads/平台/商户[/子商户]/日期范围/临时"""
         return os.path.join(self._task_base_dir(), "临时")
 
     def _carry_over_orphans(self):
@@ -556,7 +556,7 @@ class BrowserManager:
             size = os.path.getsize(path)
         except Exception:
             return False
-        # 0) 文件头是图片 → 一定不是账单; 归档时扩展名已被改成 .xlsx, 只能看内容
+        # 0) 文件头是图片 → 一定不是账单。扩展名现在原样保留, 光看名字判不出来, 只能看内容
         if self._is_image_file(path):
             self._log(f"[校验] 文件头是图片, 不可能是对账单: {os.path.basename(path)}", "warning")
             return False
@@ -726,8 +726,8 @@ class BrowserManager:
             return False
 
     def _finalize_download(self, path):
-        """将已下载文件移动/重命名并归入 平台/日期范围 文件夹
-        顶层始终保留本次最新文件;若同日期范围已有同名文件,旧版先归档到 his/ 子目录(加时间戳)
+        """将已下载文件移动/重命名并归入 平台/商户[/子商户]/日期范围 文件夹
+        顶层始终保留本次最新文件;若同区间已有同名文件,旧版先归档到 历史/ 子目录(加时间戳)
         返回最终路径; 失败返回 None
         """
         suggested = os.path.basename(path)
@@ -784,7 +784,7 @@ class BrowserManager:
             pass
 
     def latest_export_dir(self):
-        """返回当前任务(最近一次导出)的平台/商户/日期范围文件夹路径,便于用户定位文件"""
+        """返回当前任务(最近一次导出)的平台/商户[/子商户]/日期范围文件夹路径,便于用户定位文件"""
         return self._task_base_dir()
 
     def _dir_snapshot(self, root):
@@ -841,11 +841,11 @@ class BrowserManager:
         return path
 
     def snapshot(self, step_name="step"):
-        """步骤快照: 按当前任务上下文(平台/商户/日期)存到 snapshots/ 子目录。
+        """步骤快照: 按当前任务上下文(平台/商户[/子商户]/日期)存到 snapshots/ 子目录。
         平台脚本在关键步骤(设日期/查询/点下载/等弹窗)调用,失败时一眼看到当时页面状态。
         返回截图完整路径(失败返回None)。"""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # 存到 downloads/平台/商户/日期/snapshots/步骤_时间.png
+        # 存到 downloads/平台/商户[/子商户]/日期/snapshots/步骤_时间.png
         snap_dir = os.path.join(self._task_base_dir(), "snapshots")
         try:
             os.makedirs(snap_dir, exist_ok=True)

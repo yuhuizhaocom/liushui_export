@@ -187,6 +187,48 @@ def describe_data_root():
     return f"工作空间: {DATA_ROOT}" + ("（与程序同目录）" if same else "")
 
 
+# ===== Playwright 浏览器内核目录(三级优先) =====
+# 放在 config 而不是 browser: 依赖体检(core/deps.py)要在**没装 playwright 的机器**上判断
+# "内核在不在", 而 core.browser 顶层就 import playwright, 请不动它。
+# 内核目录名带版本号(chromium-1234), 必须由同版本 playwright 生成, 混用两套会直接起不来。
+# 第 2 档是**程序目录**而不是工作空间: 绿色包带的内核在 <包>/runtime/ms-playwright,
+# 产出空间里放的永远是账单/登录态/日志, 不放内核。
+PW_BROWSERS_PATH = r"C:\pw_browsers"        # 第 3 档: 老开发机上的既有位置
+PW_BROWSERS_DEFAULT = "ms-playwright"       # 一个都不命中时 Playwright 自己的默认目录名
+
+
+def resolve_browsers_path(env=None, program_dir=None, fallback=PW_BROWSERS_PATH):
+    """挑内核目录: 外部已设的 PLAYWRIGHT_BROWSERS_PATH > 包内 runtime/ms-playwright > C:\\pw_browsers。
+
+    只认**真实存在**的目录(设了个不存在的路径不如不设), 一个都不存在时返回空串,
+    交给 Playwright 的默认位置(Windows 上是 %LOCALAPPDATA%\\ms-playwright)。
+    """
+    env = os.environ if env is None else env
+    program_dir = PROGRAM_DIR if program_dir is None else program_dir
+    outside = (env.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if outside and os.path.isdir(outside):
+        return outside
+    inside = os.path.join(program_dir, "runtime", "ms-playwright")
+    if os.path.isdir(inside):
+        return inside
+    if fallback and os.path.isdir(fallback):
+        return fallback
+    return ""
+
+
+def default_browsers_root(env=None):
+    """Playwright 自己那个默认内核根(%LOCALAPPDATA%\\ms-playwright)。
+
+    resolve_browsers_path() 返回空串时内核就落在这里 —— 体检要说"没找到内核"得连它一起看。
+    """
+    env = os.environ if env is None else env
+    local = (env.get("LOCALAPPDATA") or "").strip()
+    if not local:
+        home = os.path.expanduser("~") if hasattr(os.path, "expanduser") else ""
+        local = os.path.join(home, "AppData", "Local") if home else ""
+    return os.path.join(local, PW_BROWSERS_DEFAULT) if local else ""
+
+
 DATA_ROOT = ROOT_DIR            # 工作空间: 账单/浏览器数据/日志/配置都写在这里(文件末尾解析)
 PENDING_PICK = False            # True = 全新的一份, 界面该问一次"账单存哪儿"
 

@@ -171,6 +171,26 @@ def test_browsers_path_priority(tmp_path):
                                     fallback=str(legacy)) == str(legacy)
 
 
+def test_browsers_path_lives_in_config_but_still_exports_from_browser():
+    """搬家是为了让 deps 体检能在没装 playwright 的机器上用; browser 那份再导出不能悄悄没。
+
+    CI 的冒烟脚本、build_portable 的自检、上面的测试都从 core.browser 取这个名字。
+    """
+    assert cfg.resolve_browsers_path is bm.resolve_browsers_path
+    assert cfg.PW_BROWSERS_PATH == bm.PW_BROWSERS_PATH == r"C:\pw_browsers"
+    # 默认按**程序目录**找包内内核, 不是按工作空间 —— 内核不跟着产出空间走
+    assert cfg.resolve_browsers_path(env={}) == bm.resolve_browsers_path(env={})
+
+
+def test_default_browsers_root_is_the_playwright_own_registry(tmp_path):
+    """体检要说"内核没下"就得连 Playwright 的默认位置一起看。"""
+    env = {"LOCALAPPDATA": str(tmp_path / "AppData" / "Local")}
+    assert cfg.default_browsers_root(env=env) == os.path.join(env["LOCALAPPDATA"], "ms-playwright")
+    # 没有 LOCALAPPDATA 时退回按家目录拼, 至少不返回空串
+    assert cfg.default_browsers_root(env={}).endswith("ms-playwright")
+    assert cfg.default_browsers_root(env={"LOCALAPPDATA": "  "}).endswith("ms-playwright")
+
+
 # ===== 崩溃文件跟着工作空间走 =====
 
 def test_crash_dir_follows_the_workspace(fake_pkg, tmp_path, monkeypatch):

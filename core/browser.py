@@ -13,37 +13,21 @@ import time
 import zipfile
 from datetime import datetime
 
-# Playwright 内核目录。三级优先, 且**只有目录真实存在才设**:
-#   1) 外部已经设好的 PLAYWRIGHT_BROWSERS_PATH(企业分发/自定义安装位置)
-#   2) 包内 runtime/ms-playwright —— 绿色版随包带内核, 换机器不用装任何东西
-#   3) C:\pw_browsers —— 老开发机上的既有位置
-# 内核目录名带版本号(chromium-1234), 必须由同版本 playwright 生成, 混用两套会直接起不来。
-_PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 不 import config: 要在它之前设好
-PW_BROWSERS_PATH = r"C:\pw_browsers"
+# Playwright 内核目录的三级优先解析搬到了 core/config.py(依赖体检要在没装 playwright 的
+# 机器上判断内核在不在, 而本模块顶层就 import playwright)。这里照旧再导出, 调用方与测试
+# 不用改; 从本模块 import 这两个名字仍然是有效的。
+from .config import (PW_BROWSERS_PATH, resolve_browsers_path,
+                     BROWSER_DATA_DIR, DOWNLOAD_DIR, RECORDINGS_DIR, ROOT_DIR,
+                     write_text_atomic)
+from .logger import log
 
-
-def resolve_browsers_path(env=None, program_dir=_PROGRAM_DIR, fallback=PW_BROWSERS_PATH):
-    """按上面的优先级挑内核目录; 一个都不存在时返回空串(交给 Playwright 默认位置)。"""
-    env = os.environ if env is None else env
-    outside = (env.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
-    if outside and os.path.isdir(outside):
-        return outside
-    inside = os.path.join(program_dir, "runtime", "ms-playwright")
-    if os.path.isdir(inside):
-        return inside
-    if fallback and os.path.isdir(fallback):
-        return fallback
-    return ""
-
-
+# ⚠ 必须在 import playwright 之前把 env 设好(它按 env 决定去哪个目录找内核)。
 if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
     _found = resolve_browsers_path()
     if _found:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _found
 
 from playwright.sync_api import sync_playwright
-from .config import BROWSER_DATA_DIR, DOWNLOAD_DIR, RECORDINGS_DIR, ROOT_DIR, write_text_atomic
-from .logger import log
 
 # 浏览器还没下完时留在磁盘上的中间态后缀。三处扫描(兜底找新文件、目录差集、归位残留)
 # 都必须跳过它们: 半成品改名当成账单交出去, 用户拿到的是截断文件且校验可能还给过。

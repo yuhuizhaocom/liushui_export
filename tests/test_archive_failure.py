@@ -95,6 +95,59 @@ def test_locked_old_file_does_not_raise_out_of_wait_download(mgr):
     assert any("删不掉" in l for l in logs), logs
 
 
+def test_two_kept_both_files_in_the_same_second_both_survive(mgr):
+    """回归: `_keep_both_name` 以前只带时分秒且不查存在性 —— 同一秒两次"另存"得到同一个
+    路径, 后一份被 os.replace 静默顶掉。而"归档没成"时那一份就是唯一的存照。"""
+    b, root, logs = mgr
+    top = b._finalize_download(_put(root, "bill.csv", GOOD))
+    real_copy2, real_remove = bm.shutil.copy2, os.remove
+    bm.shutil.copy2 = lambda *a, **k: (_ for _ in ()).throw(OSError("归档失败"))
+    os.remove = lambda p: (_ for _ in ()).throw(PermissionError(13, "占用"))
+    try:
+        first = b._finalize_download(_put(root, "bill.csv", "订单号,金额\nX1,1.00\n"))
+        second = b._finalize_download(_put(root, "bill.csv", "订单号,金额\nY2,2.00\n"))
+    finally:
+        bm.shutil.copy2, os.remove = real_copy2, real_remove
+    assert first and second and first != second, (first, second)
+    base = os.path.dirname(top)
+    kept = [f for f in os.listdir(base) if BrowserManager.KEEP_BOTH_MARK in f]
+    assert len(kept) == 2, kept
+    texts = {open(os.path.join(base, f), encoding="utf-8").read() for f in kept}
+    assert "订单号,金额\nX1,1.00\n" in texts and "订单号,金额\nY2,2.00\n" in texts, texts
+
+
+def test_history_archives_with_the_same_second_mtime_both_survive(mgr):
+    """`历史/` 的归档名也是精确到秒: 两份旧件 mtime 落在同一秒时必须各留一份。"""
+    b, root, logs = mgr
+    first_top = b._finalize_download(_put(root, "bill.csv", GOOD))
+    shared_mtime = os.path.getmtime(first_top)
+    b._finalize_download(_put(root, "bill.csv", NEW))          # 第一次归档
+    # 把顶层那份的 mtime 造回同一秒, 再重导一次 -> 归档名会撞
+    os.utime(first_top, (shared_mtime, shared_mtime))
+    b._finalize_download(_put(root, "bill.csv", "订单号,金额\nC3,3.00\n"))
+    his = os.path.join(os.path.dirname(first_top), "历史")
+    names = sorted(os.listdir(his))
+    assert len(names) == 2, f"同秒两份只留下一份: {names}"
+    texts = {open(os.path.join(his, n), encoding="utf-8").read() for n in names}
+    assert GOOD in texts, texts
+
+
+def test_free_path_never_hands_out_an_occupied_name(mgr):
+    b, root, _logs = mgr
+    taken = os.path.join(root, "a_20260926_233000.csv")
+    _write_placeholder(taken)
+    got = BrowserManager._free_path(root, "a_20260926_233000", ".csv")
+    assert got != taken and not os.path.exists(got), got
+    _write_placeholder(got)
+    third = BrowserManager._free_path(root, "a_20260926_233000", ".csv")
+    assert os.path.basename(third) == "a_20260926_233000_3.csv", third
+
+
+def _write_placeholder(path):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("x")
+
+
 def test_any_finalize_accident_becomes_not_claimed(mgr, monkeypatch):
     """文件系统再怎么闹, _accept_download 只许返回 None, 不许把异常抛进导出流程。"""
     b, root, logs = mgr

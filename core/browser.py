@@ -845,6 +845,21 @@ class BrowserManager:
         except Exception:
             return False
 
+    @staticmethod
+    def _free_path(folder, stem, ext):
+        """folder 里一个**还没被占用**的文件名。撞名就往后加 `_2`/`_3`。
+
+        `os.replace` 与 `shutil.copy2` 都是"目标在就覆盖", 而挑这种名字的场景恰恰是
+        "另一份东西还在" —— 同一秒里重导两次(点两下、或重试紧挨着), 两份都该活下来,
+        顶掉哪一份都是丢账单。
+        """
+        p = os.path.join(folder, f"{stem}{ext}")
+        n = 1
+        while os.path.exists(p):
+            n += 1
+            p = os.path.join(folder, f"{stem}_{n}{ext}")
+        return p
+
     def _archive_previous(self, final_path, save_name):
         """把顶层即将被覆盖的旧版复制进 `历史/`(带它自己的时间戳)。成功 True。
 
@@ -858,9 +873,10 @@ class BrowserManager:
             his_dir = os.path.join(os.path.dirname(final_path), self.ARCHIVE_DIR_NAME)
             os.makedirs(his_dir, exist_ok=True)
             # 旧文件时间戳 → 归档名: 原名_YYYYMMDD_HHMMSS.扩展名
+            # (时间戳精确到秒, 同秒的两份旧件必须各留一份 -> 交给 _free_path 让名)
             ts = datetime.fromtimestamp(os.path.getmtime(final_path)).strftime("%Y%m%d_%H%M%S")
             old_name, old_ext = os.path.splitext(save_name)
-            shutil.copy2(final_path, os.path.join(his_dir, f"{old_name}_{ts}{old_ext}"))
+            shutil.copy2(final_path, self._free_path(his_dir, f"{old_name}_{ts}", old_ext))
             return True
         except Exception as e:
             self._log(f"[归档] 上一版没能复制进 {self.ARCHIVE_DIR_NAME}/({str(e)[:60]}): "
@@ -868,10 +884,15 @@ class BrowserManager:
             return False
 
     def _keep_both_name(self, base_dir, save_name):
-        """顶层那个名字还被旧件占着时, 给本次成品换个子时分的名字 —— 两边都不丢。"""
+        """顶层那个名字还被旧件占着时, 给本次成品换一个不撞名的落点 —— 两边都不丢。
+
+        以前只带 `%H%M%S` 且不检查存在性: 实测同一秒里两次"另存"得到**同一个路径**,
+        后一份被 `os.replace` 静默顶掉前一份(而"归档没成"时那一份就是唯一的存照);
+        跨天撞在同一秒同理。所以时间戳带日期, 再让 `_free_path` 兜住同秒。
+        """
         stem, ext = os.path.splitext(save_name)
-        stamp = datetime.now().strftime("%H%M%S")
-        return os.path.join(base_dir, f"{stem}_{self.KEEP_BOTH_MARK}_{stamp}{ext}")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self._free_path(base_dir, f"{stem}_{self.KEEP_BOTH_MARK}_{stamp}", ext)
 
     def _finalize_download(self, path):
         """将已下载文件移动/重命名并归入 平台/商户[/子商户]/日期范围 文件夹

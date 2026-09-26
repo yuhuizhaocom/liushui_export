@@ -25,8 +25,8 @@ from collections import namedtuple
 # 三处必须一致: requirements.txt 由 tests 钉住, 工作流由 CI 里那一步断言钉住。
 REQUIRED_PLAYWRIGHT_VERSION = "1.62.0"
 PIP_SPEC = "playwright==%s" % REQUIRED_PLAYWRIGHT_VERSION
-INSTALL_CMD = "%s -m pip install " + PIP_SPEC
-KERNEL_CMD = "%s -m playwright install chromium"
+PIP_ARGS = ["-m", "pip", "install", PIP_SPEC]
+KERNEL_ARGS = ["-m", "playwright", "install", "chromium"]
 MIN_PYTHON = (3, 10)          # 启动工具.vbs 对用户明说的下限; 低于它只提示不拦
 
 _UNSET = object()             # 区分"没传"和"传了 None(=把这一档关掉)"
@@ -189,16 +189,26 @@ def describe(d):
 
 
 def fix_commands(d, python_exe=None):
-    """缺哪样给哪条命令 —— 装不上时原样打在窗口里, 用户/IT 复制就能跑。"""
-    py = '"%s"' % (python_exe or sys.executable)
+    """缺哪样给哪条命令: [(说明, argv)]。
+
+    argv 的 `argv[0]` 就是本机解释器路径 —— 同一个列表既能直接丢给 subprocess 跑, 也能
+    经 `show()` 拼成给人抄的一行。**不要**在这里改用 shell 字符串再拼引号: 用户名/安装
+    路径里有空格是常事。
+    """
+    py = python_exe or sys.executable
     out = []
     if d.verdict == NO_PACKAGE or not d.have_playwright:
-        out.append(("装上 playwright(钉死实测过的版本)", INSTALL_CMD % py))
+        out.append(("装上 playwright(钉死实测过的版本)", [py] + PIP_ARGS))
     if d.verdict == BAD_VERSION:
-        out.append(("换成实测过的版本", INSTALL_CMD % py))
+        out.append(("换成实测过的版本", [py] + PIP_ARGS))
     if d.verdict in (NO_PACKAGE, NO_KERNEL) or not d.kernel_dir:
-        out.append(("下载浏览器内核(约 100 多 MB, 需要联网)", KERNEL_CMD % py))
+        out.append(("下载浏览器内核(一百多 MB, 需要联网)", [py] + KERNEL_ARGS))
     return out
+
+
+def show(argv):
+    """argv → 能贴进命令行的一行(带空格的路径加引号)。"""
+    return " ".join('"%s"' % a if (" " in a or not a) else a for a in argv)
 
 
 OFFLINE_HINT = (

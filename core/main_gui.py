@@ -18,12 +18,14 @@ install_crash_guard()
 import json
 import queue
 import shutil
+import subprocess
 import threading
 import time
 import tkinter as tk
 from collections import namedtuple
 from datetime import datetime, timedelta
 from tkinter import ttk, messagebox, scrolledtext, filedialog
+from core import deps        # 启动前的依赖体检(缺包/版本不对/没内核分开说)
 from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          SELECTION_FILE, load_settings, save_settings,
                          write_json_atomic)
@@ -2137,35 +2139,109 @@ class LiushuiApp:
             self.browser.close()
 
 
+def _install_dependencies(plan):
+    """按体检开的单子装。返回 (成功?, 给人看的收尾)。
+
+    失败时把 pip/playwright 自己写的最后几行原样带回去 —— 以前只把异常对象塞进弹窗,
+    用户看到的是 `command returned non-zero exit status 1`, 真正的原因(连不上索引、
+    证书被拦、磁盘满)在它下面几行, 而那几行才是 IT 需要的东西。
+    """
+    tail = []
+    for title, argv in plan:
+        log("%s: %s" % (title, deps.show(argv)))
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=1800)
+        except Exception as e:
+            return False, "%s 没能执行: %r" % (title, e)
+        tail += ((r.stdout or "") + "\n" + (r.stderr or "")).strip().splitlines()[-6:]
+        if r.returncode != 0:
+            # 结论 + 已经攒下的输出: 光说"失败了"等于什么都没说
+            return False, "%s 失败(退出码 %s)\n%s" % (title, r.returncode, "\n".join(tail[-8:]))
+    return True, "\n".join(tail[-8:])
+
+
+def _how_to_fix(d):
+    """给弹窗/日志看的"怎么办": 命令 + 装不上时的两条退路。"""
+    plan = deps.fix_commands(d)
+    lines = ["可以手动执行:" if plan else "没有可自动执行的命令。"]
+    lines += ["  %s" % deps.show(a) for _t, a in plan]
+    lines.append("")
+    lines.append(deps.OFFLINE_HINT)
+    return "\n".join(lines)
+
+
 def check_dependencies():
-    """检查依赖是否已安装"""
-    missing = []
+    """启动前的依赖体检: 缺哪样说哪样, 能顺手装就装, 装不上把话说清。
+
+    两版绿色包的分工都在这: 全量版什么都带, 这里一趟就过; 核心版用本机 Python, 缺的多半是
+    playwright 包或浏览器内核(见 core/deps.py)。
+
+    红线: 这是**附加**检查 —— 只有"连 playwright 都没有、程序根本跑不起来"这一种情况才让
+    程序退出, 版本不对、内核没下都只提示不拦人(以前这两种本来就不检查, 放行不是新行为)。
+    """
+    d = deps.probe()
+    for line in deps.describe(d):
+        log(line)
+    if d.verdict in (deps.OK, deps.UNKNOWN):
+        return True
+
     try:
-        import playwright
-    except ImportError:
-        missing.append("playwright")
-    if missing:
         root = tk.Tk()
         root.withdraw()
-        result = messagebox.askyesno(
-            "缺少依赖",
-            "检测到缺少必要的Python依赖包(playwright)。\n\n"
-            "是否现在自动安装?(需要联网,约30秒)\n\n"
-            "如果选择否,程序将退出。"
-        )
-        if result:
-            import subprocess
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
-                subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
-                messagebox.showinfo("安装完成", "依赖安装成功!程序将重新启动。")
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception as e:
-                messagebox.showerror("安装失败", f"自动安装失败: {e}\n\n请手动运行:\npip install playwright\npython -m playwright install chromium")
+    except Exception as e:
+        # 连弹窗都起不来(远程会话、没有窗口站): 结论留在日志里放行。真缺依赖的话,
+        # 后面 import playwright 会自己报那一句, 不该由体检来当门神。
+        log("[提醒] 依赖提示的弹窗起不来(%r), 继续启动" % (e,), level="warning")
+        return True
+
+    try:
+        if d.verdict == deps.BAD_VERSION:
+            # 只问不拦: 换版本要重下一百多 MB, 有人就是不想要那个改动
+            go = messagebox.askyesno(
+                "依赖版本不一致",
+                "本机 playwright 版本 %s, 而这个工具是跟着 %s 开发和实测的。\n\n"
+                "是: 现在换成 %s(需要联网)\n"
+                "否: 就用当前版本继续 —— 真出问题时, 第一个该怀疑的就是这里。"
+                % (d.version, d.expected, d.expected))
+            if not go:
+                log("[提醒] 用户选择继续用 playwright %s" % d.version)
+                return True
+            plan = deps.fix_commands(d)
+        elif d.verdict == deps.NO_KERNEL:
+            go = messagebox.askyesno(
+                "缺少浏览器内核",
+                "%s\n\n"
+                "导出账单要用它。是: 现在自动下载(需要联网, 约 1-3 分钟)\n"
+                "否: 先进程序看看设置和日志(导出会失败)。" % "\n".join(deps.describe(d)))
+            if not go:
+                log("[提醒] 没有浏览器内核, 导出会失败。\n" + _how_to_fix(d))
+                return True
+            plan = deps.fix_commands(d)
+        else:                                    # 连 playwright 包都没有, 程序确实跑不动
+            go = messagebox.askyesno(
+                "缺少依赖",
+                "%s\n\n是否现在自动安装?(需要联网, 约 1-3 分钟)\n\n"
+                "如果选择否, 程序将退出。" % "\n".join(deps.describe(d)))
+            if not go:
                 return False
-        else:
-            return False
-    return True
+            plan = deps.fix_commands(d)
+
+        ok, tail = _install_dependencies(plan)
+        if ok:
+            messagebox.showinfo("安装完成", "依赖安装成功!程序将重新启动。")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+            return True                          # 走不到这里(execv 成功就不返回)
+        messagebox.showerror(
+            "安装失败",
+            "%s\n\n%s\n\n%s" % (tail, _how_to_fix(d),
+                                "程序将退出。" if d.verdict == deps.NO_PACKAGE else "程序继续打开, 但导出会失败。"))
+        return d.verdict != deps.NO_PACKAGE
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 def report_crash(summary, detail=""):

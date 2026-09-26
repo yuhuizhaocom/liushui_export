@@ -164,16 +164,21 @@ def test_old_python_only_warns(tmp_path, monkeypatch):
 def test_commands_match_what_is_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(deps, "has_module", lambda name: False)
     d = deps.probe(env=_env(tmp_path), program_dir=str(tmp_path), version=None, fallback=None)
-    cmds = " \n".join(c for _t, c in deps.fix_commands(d, python_exe=r"C:\py\python.exe"))
+    plan = deps.fix_commands(d, python_exe=r"C:\Program Files\py\python.exe")
+    cmds = " \n".join(deps.show(a) for _t, a in plan)
     assert "pip install playwright==%s" % deps.REQUIRED_PLAYWRIGHT_VERSION in cmds, "要钉版本"
     assert "playwright install chromium" in cmds, "包和内核都缺时两条都要给"
-    assert '"C:\\py\\python.exe"' in cmds, "用哪台机器的解释器就写哪台的路径"
+    assert '"C:\\Program Files\\py\\python.exe"' in cmds, "路径有空格必须带引号"
+    # argv 是直接能交给 subprocess 的: 解释器在第一位, 版本 pin 是一个 token
+    pip_argv = plan[0][1]
+    assert pip_argv[0] == r"C:\Program Files\py\python.exe"
+    assert pip_argv[-1] == deps.PIP_SPEC and " " not in pip_argv[-1]
 
     monkeypatch.setattr(deps, "has_module", lambda name: True)
     d2 = deps.probe(env=_env(tmp_path), program_dir=str(tmp_path),
                     version=deps.REQUIRED_PLAYWRIGHT_VERSION, fallback=None)
-    only = " \n".join(c for _t, c in deps.fix_commands(d2, python_exe="py"))
-    assert "pip install" not in only and "install chromium" in only
+    only = " \n".join(deps.show(a) for _t, a in deps.fix_commands(d2, python_exe="py"))
+    assert "pip install" not in only and "install chromium" in only, "只缺内核就别再让人重装包"
 
 
 def test_offline_hint_names_the_copy_the_kernel_escape_hatch():

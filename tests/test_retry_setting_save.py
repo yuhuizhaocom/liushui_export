@@ -32,6 +32,7 @@ class _TimesBox:
 
 class _App:
     _on_retry_setting = LiushuiApp._on_retry_setting
+    _save_setting = LiushuiApp._save_setting
 
     def __init__(self, enabled=True, text="3"):
         self.enable_retry_var = _Var(enabled)
@@ -42,7 +43,7 @@ class _App:
 @pytest.fixture()
 def written(monkeypatch):
     calls = []
-    monkeypatch.setattr(mg, "save_settings", lambda d: calls.append(dict(d)))
+    monkeypatch.setattr(mg, "save_settings", lambda d: calls.append(dict(d)) or True)
     return calls
 
 

@@ -151,6 +151,7 @@ class _Box:
 class _App:
     _run_cleanup_once = LiushuiApp._run_cleanup_once
     _on_cleanup_setting = LiushuiApp._on_cleanup_setting
+    _save_setting = LiushuiApp._save_setting
 
     def __init__(self, text="180"):
         self.logs = []
@@ -197,7 +198,7 @@ def test_cleanup_crash_is_only_a_log_line(monkeypatch):
 
 def test_keep_days_box_writes_only_its_own_key(monkeypatch):
     written = []
-    monkeypatch.setattr(mg, "save_settings", lambda d: written.append(dict(d)))
+    monkeypatch.setattr(mg, "save_settings", lambda d: written.append(dict(d)) or True)
     app = _App("60")
     app._on_cleanup_setting()
     assert written == [{"cleanup_keep_days": 60}]
@@ -209,14 +210,14 @@ def test_keep_days_box_writes_only_its_own_key(monkeypatch):
                                            (" ", DEFAULT_KEEP), ("abc", DEFAULT_KEEP)])
 def test_box_text_is_clamped_not_crashed(monkeypatch, text, expected):
     written = []
-    monkeypatch.setattr(mg, "save_settings", lambda d: written.append(dict(d)))
+    monkeypatch.setattr(mg, "save_settings", lambda d: written.append(dict(d)) or True)
     _App(text)._on_cleanup_setting()
     assert written == [{"cleanup_keep_days": expected}]
 
 
 def test_turning_cleanup_off_is_said_out_loud(monkeypatch):
     written = []
-    monkeypatch.setattr(mg, "save_settings", lambda d: written.append(dict(d)))
+    monkeypatch.setattr(mg, "save_settings", lambda d: written.append(dict(d)) or True)
     app = _App("0")
     app._on_cleanup_setting()
     assert "已关闭自动清理" in app.logs[-1]

@@ -280,18 +280,19 @@ _REPLACE_TRIES = 8
 _REPLACE_BACKOFF_S = 0.04
 
 
-def _replace_with_retry(src, dst):
-    for attempt in range(_REPLACE_TRIES):
+def _replace_with_retry(src, dst, tries=None):
+    budget = _REPLACE_TRIES if tries is None else max(1, int(tries))
+    for attempt in range(budget):
         try:
             os.replace(src, dst)
             return
         except OSError:
-            if attempt == _REPLACE_TRIES - 1:
+            if attempt == budget - 1:
                 raise
             time.sleep(_REPLACE_BACKOFF_S * (attempt + 1))
 
 
-def write_text_atomic(path, text):
+def write_text_atomic(path, text, tries=None):
     """先写同目录临时文件再 os.replace, 不留半截文件(文本/源码同理)。
 
     临时名必须**每次都不一样**。以前固定用 `path + ".tmp"`, 而 `scheduled_tasks.json`
@@ -302,6 +303,9 @@ def write_text_atomic(path, text):
     唯一名让每个写者各用各的暂存文件。
     (代价: 进程正好写在中间被硬杀, 会留下一个 `*.tmp-<pid>-<n>` 的孤儿文件。它不在任何
     读取路径上, 也不进打包白名单, 所以不去为它加启动扫描——清理那侧只管日志与汇总副本。)
+
+    `tries` 是给"在主线程里写"的调用方留的出口: 默认的 8 次退避累计约 1.1 秒, 后台线程
+    等得起, Tk 主线程等不起(见 `save_settings`)。
     """
     folder = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(folder, exist_ok=True)
@@ -311,7 +315,7 @@ def write_text_atomic(path, text):
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        _replace_with_retry(tmp, path)
+        _replace_with_retry(tmp, path, tries)
     except Exception:
         try:                      # 失败的这次不算数, 别留垃圾文件
             os.remove(tmp)
@@ -320,7 +324,7 @@ def write_text_atomic(path, text):
         raise
 
 
-def write_json_atomic(path, data):
+def write_json_atomic(path, data, tries=None):
     """JSON 版原子写。
 
     这几个文件都是"界面每次改动就整体重写"的(settings / scheduled_tasks /
@@ -328,24 +332,38 @@ def write_json_atomic(path, data):
     而三处读取都是 except → 用默认值/返回空, 结果用户看到的是"配置和定时任务被
     静默清空"。os.replace 在同一磁盘卷上是原子替换。
     """
-    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2), tries)
 
 
-def save_settings(settings):
+def save_settings(settings, ui_call=True):
     """保存用户设置: 只覆盖传进来的那几个键, 没传的键保持文件里的现状。
 
     界面各处都是"点一下只写自己那一两个键"(显示浏览器、文件名模式、保活开关、失败
     重试), 而旧实现是 `dict(DEFAULT_SETTINGS)` 再 update —— 于是勾一下"失败重试"就把
     首次重试间隔写回 30, 动一下保活开关就把文件名模式、显示浏览器统统恢复默认, 用户
     改过的设置在毫无提示的情况下被抹平。
+
+    ⚠ 全仓 6 个调用点都在 **Tk 主线程**(变量 trace 回调与几处按钮), 所以默认 `ui_call=True`
+    把占用重试压到 1 次: 走默认的 8 次退避时, 文件被云盘/Excel 长期占住会让界面冻约
+    1.13 秒(实测)。快失败 + 说出口, 比在界面上硬等更负责。
+    ⚠ 失败不再 `except: pass`: 返回值 = 是否真的落盘, 并且写一行日志说明这一项改动
+    重启后会回到原值。以前点一下勾没写进去, 用户完全看不出来。
     """
     try:
         merged = load_settings()          # 已按 DEFAULT_SETTINGS 兜底过缺失键
         if isinstance(settings, dict):
             merged.update(settings)
-        write_json_atomic(SETTINGS_FILE, merged)
-    except Exception:
-        pass
+        write_json_atomic(SETTINGS_FILE, merged, tries=1 if ui_call else None)
+    except Exception as e:
+        note = "%s: %s" % (type(e).__name__, str(e)[:120])
+        try:
+            from .logger import log
+            log(f"[设置] 没能写入 settings.json({note}): 刚改的这一项暂时没生效, "
+                "重启后会回到原值 —— 检查该文件是否正被云盘同步或其它程序占用", "warning")
+        except Exception:
+            pass                          # 日志本身坏了也不许把设置这条路带下去
+        return False
+    return True
 
 
 # ===== 导入本模块时就把工作空间定下来 =====

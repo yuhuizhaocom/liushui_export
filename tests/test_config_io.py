@@ -87,6 +87,56 @@ def test_corrupt_file_falls_back_to_defaults_before_merging(tmp_path, monkeypatc
     assert saved["retry_times"] == 4 and saved["keepalive_interval_min"] == 30
 
 
+def test_save_settings_fails_fast_and_speaks_up(tmp_path, monkeypatch):
+    """界面那一路: 文件被长期占住时, 主线程只该付一次尝试的钱, 而且必须说出口。
+
+    8 次退避累计约 1.13s(实测), 而全仓 6 个 save_settings 调用点都在 Tk 主线程的
+    变量回调里 —— 点一下勾冻一秒, 还因为 `except: pass` 零提示。
+    """
+    import time
+    import core.config as cfg
+    import core.logger as lg
+
+    logs = []
+    monkeypatch.setattr(lg, "log", lambda msg, level="info", **kw: logs.append(msg))
+    path = str(tmp_path / "settings.json")
+    monkeypatch.setattr(cfg, "SETTINGS_FILE", path)
+    cfg.write_json_atomic(path, {"show_browser": True})
+
+    def boom(src, dst):
+        raise PermissionError(13, "被云盘占住")
+    monkeypatch.setattr(cfg.os, "replace", boom)
+
+    t0 = time.time()
+    ok = cfg.save_settings({"show_browser": False})
+    quick = time.time() - t0
+    assert ok is False
+    assert any("没能写入 settings.json" in m for m in logs), logs
+    assert quick < 0.3, f"界面那一路等了 {quick:.2f}s"
+
+    t0 = time.time()
+    cfg.save_settings({"show_browser": False}, ui_call=False)
+    patient = time.time() - t0
+    assert patient > quick * 3, (quick, patient)   # 后台线程那一路仍旧重试到位
+    assert json.load(open(path, encoding="utf-8"))["show_browser"] is True, "没写进去就不该改盘"
+
+
+def test_gui_helper_relays_a_failed_save_into_the_log_window(monkeypatch):
+    """界面上的设置改动必须从这个用户看得见的窗口说出口, 不能只写进文件日志。"""
+    import core.main_gui as mg
+
+    calls = []
+    monkeypatch.setattr(mg, "save_settings", lambda d: calls.append(d) or False)
+
+    class _App:
+        def _append_log(self, line):
+            calls.append(("log", line))
+
+    assert mg.LiushuiApp._save_setting(_App(), show_browser=False) is False
+    kinds = [c for c in calls if isinstance(c, tuple)]
+    assert kinds and "[设置] 没能保存 show_browser" in kinds[0][1], calls
+
+
 def test_task_store_save_uses_atomic_path(tmp_path, monkeypatch):
     """TaskStore.save 走同一个写入器, 且坏数据不会清空已有任务文件。"""
     from core.scheduler import CronJob, TaskStore

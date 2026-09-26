@@ -589,8 +589,7 @@ class LiushuiApp:
         self.show_browser_var = tk.BooleanVar(value=self.settings.get("show_browser", True))
         self.show_browser_var.trace_add(
             "write",
-            lambda *_: save_settings(
-                {"show_browser": bool(self.show_browser_var.get())}))
+            lambda *_: self._save_setting(show_browser=bool(self.show_browser_var.get())))
         tk.Checkbutton(opt_row, variable=self.show_browser_var, text="显示浏览器",
                        bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
                        activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
@@ -600,8 +599,7 @@ class LiushuiApp:
             value=self.settings.get("download_name_mode", "unified"))
         self.name_mode_var.trace_add(
             "write",
-            lambda *_: save_settings(
-                {"download_name_mode": self.name_mode_var.get()}))
+            lambda *_: self._save_setting(download_name_mode=self.name_mode_var.get()))
         tk.Radiobutton(opt_row, variable=self.name_mode_var, value="unified",
                        text="统一命名", bg=BG_PANEL, fg=FG_MUTED,
                        font=("Microsoft YaHei", 9), activebackground=BG_PANEL
@@ -670,8 +668,7 @@ class LiushuiApp:
                                          DEFAULT_SETTINGS.get("preflight_login_check", True))))
         self.preflight_var.trace_add(
             "write",
-            lambda *_: save_settings(
-                {"preflight_login_check": bool(self.preflight_var.get())}))
+            lambda *_: self._save_setting(preflight_login_check=bool(self.preflight_var.get())))
         tk.Checkbutton(pre_row, variable=self.preflight_var, text="导出前检查登录",
                        bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
                        activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
@@ -1019,9 +1016,22 @@ class LiushuiApp:
             interval = max(1, int(self.ka_interval.get()))
         except Exception:
             interval = 30
-        save_settings({"enable_keepalive": enabled, "keepalive_interval_min": interval})
+        self._save_setting(enable_keepalive=enabled, keepalive_interval_min=interval)
         self.keepalive.enabled = enabled
         self.keepalive.interval_min = interval
+
+    def _save_setting(self, **kv):
+        """界面上每一次设置改动都走这里: 没落盘就在日志窗里说一声。
+
+        `config.save_settings` 只写文件日志(它不认识界面), 而用户看的是这个窗口 ——
+        点一下勾而 settings.json 正被云盘/Excel 占住时, 这里是唯一的出口。
+        (以前是 `except: pass`: 界面显示已改、盘上没改、重启回旧值, 全程零提示。)
+        """
+        if save_settings(kv):
+            return True
+        self._append_log(f"[设置] 没能保存 {', '.join(kv.keys())}: settings.json 写不进去"
+                         "(多半被云盘同步或其它程序占用), 重启后会回到原值")
+        return False
 
     def _on_retry_setting(self, *_):
         """失败重试设置变化即时保存(运行时从 settings 读取,无需运行时状态)。
@@ -1036,7 +1046,7 @@ class LiushuiApp:
             times = int(DEFAULT_SETTINGS.get("retry_times", 2))
         times = max(0, min(5, times))
         retry_times = times if enabled else 0
-        save_settings({"retry_times": retry_times})
+        self._save_setting(retry_times=retry_times)
         self.settings["retry_times"] = retry_times
 
     def _on_cleanup_setting(self, *_):
@@ -1047,7 +1057,7 @@ class LiushuiApp:
         except Exception:
             days = default
         days = max(0, min(3650, days))
-        save_settings({"cleanup_keep_days": days})
+        self._save_setting(cleanup_keep_days=days)
         self.settings["cleanup_keep_days"] = days
         self._append_log(f"[设置] 日志/汇总副本保留 {days} 天"
                          f"{'(已关闭自动清理)' if days == 0 else ''},下次启动时生效")

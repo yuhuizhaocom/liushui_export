@@ -1,32 +1,180 @@
 """
-全局配置
-平台信息已迁移到 platforms/ 目录下的各平台脚本中,不再在此维护
+全局配置: 路径 + 用户设置。
+
+路径分两类 —— 绿色版(整包放任意目录、甚至只读介质)靠这个区分:
+- **程序目录** `ROOT_DIR`: 代码、平台脚本、Playwright 内核, 只读也能跑;
+- **工作空间** `DATA_ROOT`: 账单、浏览器数据(登录态)、日志、三个 json 配置、录制, 必须可写。
+
+默认两者相同(就地模式, 老用户零迁移)。第一次运行(既没指过环境变量/命令行, 程序目录里
+也没有 `workspace.json` 书签, 程序目录还不像已经用过)时, 会留一个"待用户选目录"的标记,
+由界面问一次; 选定后在工作空间里放标记文件、在程序目录里放书签, 下次认路。
+平台信息已迁移到 platforms/ 目录下的各平台脚本中, 不在这里维护。
 """
 
 import json
 import os
+import sys
 
-# 项目根目录(此文件位于 core/ 子目录,上溯一级)
+# 程序根目录(此文件位于 core/ 子目录,上溯一级)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROGRAM_DIR = ROOT_DIR          # 同义, 免得读代码时和"工作空间"混起来
 
-# 下载文件保存目录(基于项目根的绝对路径,不依赖运行目录)
-DOWNLOAD_DIR = os.path.join(ROOT_DIR, "downloads")
+# ===== 工作空间的几条线索 =====
+WORKSPACE_MARKER = ".liushui_workspace.json"                  # 放工作空间里: 证明这目录是本工具的
+WORKSPACE_POINTER = os.path.join(ROOT_DIR, "workspace.json")  # 放程序目录里: 记住工作空间在哪
+WORKSPACE_ENV = "LIUSHUI_DATA_DIR"                            # 环境变量指定
+WORKSPACE_ARG = "--data-dir"                                  # 命令行指定: --data-dir=D:\流水数据
 
-# 浏览器数据目录(保存登录状态;基于项目根,不依赖运行目录)
-BROWSER_DATA_DIR = os.path.join(ROOT_DIR, "browser_data")
+# 就地模式的痕迹: 只要有一个在, 就说明这份拷贝用过了, 别再拦着用户选目录
+LEGACY_MARKERS = ("settings.json", "selection_state.json", "scheduled_tasks.json",
+                  "downloads", "browser_data", "logs")
 
-# 用户设置文件(自动保存,无需手动编辑)
-SETTINGS_FILE = os.path.join(ROOT_DIR, "settings.json")
+# 解析中咽下的话(指针指向的目录没了/不可写...), 由界面在启动日志里交代
+RESOLVE_NOTES = []
 
-# 定时任务持久化文件
-SCHEDULED_TASKS_FILE = os.path.join(ROOT_DIR, "scheduled_tasks.json")
 
-# 平台/商户勾选状态持久化文件(重启后恢复上次勾选)
-SELECTION_FILE = os.path.join(ROOT_DIR, "selection_state.json")
+def _probe_writable(path):
+    """目录能创建且能写删一个探针文件 → (True, ""); 否则 (False, 原因)。
+
+    只 mkdir 不够: 只读介质/受限目录下 mkdir 可能成功而写入失败, 那时账单才写到一半报错。
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_probe.tmp")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("x")
+        os.remove(probe)
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+def marker_path(root):
+    return os.path.join(root, WORKSPACE_MARKER)
+
+
+def has_marker(root):
+    """该目录里有本工具的工作空间标记吗(内容坏了也算, 说明用户没选错地方)。"""
+    return os.path.isfile(marker_path(root))
+
+
+def write_marker(root):
+    """在工作空间里落标记。失败不抛: 只是下次认路麻烦一点, 不能拦启动。"""
+    try:
+        write_json_atomic(marker_path(root), {"app": "liushui_export", "version": 1})
+        return True
+    except Exception:
+        return False
+
+
+def read_pointer():
+    """读程序目录里的书签, 拿上次记下的工作空间; 没有/坏了返回空串。"""
+    try:
+        with open(WORKSPACE_POINTER, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("data_root") or "").strip() if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
+def write_pointer(root):
+    try:
+        write_json_atomic(WORKSPACE_POINTER, {"data_root": os.path.abspath(root)})
+        return True
+    except Exception:
+        return False
+
+
+def _cli_data_root(argv=None):
+    """从命令行摘出 `--data-dir=...`(摘掉后别让它继续传给业务代码)。"""
+    args = list(sys.argv[1:] if argv is None else argv)
+    for a in args:
+        if a.startswith(WORKSPACE_ARG + "="):
+            return a.split("=", 1)[1].strip()
+        if a == WORKSPACE_ARG:
+            i = args.index(a)
+            if i + 1 < len(args):
+                return args[i + 1].strip()
+    return ""
+
+
+def resolve_data_root():
+    """定工作空间, 返回 (路径, 是否还要问用户)。
+
+    优先级: 命令行 `--data-dir=` > 环境变量 `LIUSHUI_DATA_DIR` > 程序目录书签
+    > 就地(程序目录已有使用痕迹) > 程序目录并标记"待用户选"。
+    取到但不可写时不硬崩: 退回程序目录, 并把原因放进 RESOLVE_NOTES 让日志说。
+    """
+    del RESOLVE_NOTES[:]
+    for source, cand in ((WORKSPACE_ARG, _cli_data_root()),
+                         ("环境变量", os.environ.get(WORKSPACE_ENV, "").strip()),
+                         ("书签", read_pointer())):
+        if not cand:
+            continue
+        ok, why = _probe_writable(cand)
+        if ok:
+            if source == "书签" and not has_marker(cand):
+                # 书签指向的目录还在, 只是标记被手动删了: 认它, 顺手补回标记
+                write_marker(cand)
+            return os.path.abspath(cand), False
+        RESOLVE_NOTES.append(f"{source}指定的工作空间不可用({cand}): {why or '目录不存在或不能写'}")
+    if any(os.path.exists(os.path.join(ROOT_DIR, m)) for m in LEGACY_MARKERS):
+        return ROOT_DIR, False          # 老拷贝就地模式, 不打扰
+    return ROOT_DIR, True               # 全新的一份: 先按程序目录跑, 稍后问用户
+
+
+def _derive(root):
+    """由工作空间算出全部派生路径。"""
+    return {
+        "DATA_ROOT": root,
+        "DOWNLOAD_DIR": os.path.join(root, "downloads"),
+        "BROWSER_DATA_DIR": os.path.join(root, "browser_data"),
+        "LOG_DIR": os.path.join(root, "logs"),
+        "RECORDINGS_DIR": os.path.join(root, "recordings"),
+        "SETTINGS_FILE": os.path.join(root, "settings.json"),
+        "SCHEDULED_TASKS_FILE": os.path.join(root, "scheduled_tasks.json"),
+        "SELECTION_FILE": os.path.join(root, "selection_state.json"),
+    }
+
+
+def apply_data_root(root, remember=True):
+    """换工作空间: 重算所有派生常量(界面在用户选完目录后调), 并按需落标记/书签。
+
+    ⚠ 各模块是 `from .config import DOWNLOAD_DIR` 这种**取值拷贝**, 已经 import 完再换
+    值对它们无效 —— 所以界面选完目录后要重启进程(见 main_gui.main())。
+    """
+    ok, why = _probe_writable(root)
+    if not ok:
+        return False, f"这个目录不能写入: {why}"
+    globals().update(_derive(os.path.abspath(root)))
+    globals()["PENDING_PICK"] = False
+    if remember:
+        write_marker(globals()["DATA_ROOT"])
+        write_pointer(globals()["DATA_ROOT"])
+    return True, globals()["DATA_ROOT"]
+
+
+def describe_data_root():
+    """给人看的一句: 工作空间在哪、和程序目录是否同一个。"""
+    same = os.path.abspath(DATA_ROOT) == os.path.abspath(ROOT_DIR)
+    return f"工作空间: {DATA_ROOT}" + ("（与程序同目录）" if same else "")
+
+
+DATA_ROOT = ROOT_DIR            # 工作空间: 账单/浏览器数据/日志/配置都写在这里(文件末尾解析)
+PENDING_PICK = False            # True = 全新的一份, 界面该问一次"账单存哪儿"
+
+# 下面这几个是本模块对外提供的路径常量; 真实值在文件末尾按 DATA_ROOT 统一算出。
+DOWNLOAD_DIR = os.path.join(DATA_ROOT, "downloads")               # 账单归档根
+BROWSER_DATA_DIR = os.path.join(DATA_ROOT, "browser_data")        # 每商户一个 Chromium profile
+LOG_DIR = os.path.join(DATA_ROOT, "logs")                         # 运行日志 / stats.jsonl / crash_*.txt
+RECORDINGS_DIR = os.path.join(DATA_ROOT, "recordings")            # 「打开」窗口录制的点击流
+SETTINGS_FILE = os.path.join(DATA_ROOT, "settings.json")          # 用户设置
+SCHEDULED_TASKS_FILE = os.path.join(DATA_ROOT, "scheduled_tasks.json")   # 定时任务
+SELECTION_FILE = os.path.join(DATA_ROOT, "selection_state.json")  # 平台/商户勾选状态
 
 DEFAULT_SETTINGS = {
     "show_browser": True,        # 是否显示浏览器窗口(取消勾选=后台运行)
-    "download_name_mode": "unified",  # 下载文件名: unified=统一命名 / original=保留原始名称(非UUID)
+    "download_name_mode": "unified",  # 下载文件名: unified=前缀+原始名 / original=只加商户前缀
     "enable_keepalive": True,        # 登录保活开关
     "keepalive_interval_min": 30,    # 保活巡检间隔(分钟)
     "retry_times": 2,                # 失败自动重试次数(0=不重试)
@@ -96,3 +244,10 @@ def save_settings(settings):
         write_json_atomic(SETTINGS_FILE, merged)
     except Exception:
         pass
+
+
+# ===== 导入本模块时就把工作空间定下来 =====
+# 放在文件末尾: 上面这些函数彼此有定义顺序依赖(write_marker 要用 write_json_atomic),
+# 而各业务模块是 `from .config import DOWNLOAD_DIR` 取值拷贝 —— 必须在我们这边先算完。
+DATA_ROOT, PENDING_PICK = resolve_data_root()
+globals().update(_derive(DATA_ROOT))

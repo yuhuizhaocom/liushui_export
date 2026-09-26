@@ -1,20 +1,49 @@
 """
 日志模块 - 同时输出到GUI和文件(项目唯一日志通道)
+
+⚠ 目录**不能保证可写**: 绿色版可能放在只读介质/U 盘/受限目录下, 而本模块是被 import 的
+最早几个之一 —— 在导入期抛错的话, 用户看到的就是"双击没反应"。所以这里的原则是
+**建不出来就退回临时目录, 一句话都不吵, 但把经过记进 LOGGER_NOTES 让界面去说**。
 """
 import os
 import json
 import glob
 import logging
+import tempfile
 from datetime import datetime
 
-from .config import ROOT_DIR
+from . import config as _config
 
-# 日志目录(基于项目根的绝对路径,不依赖运行目录)
-LOG_DIR = os.path.join(ROOT_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# 稳定性统计文件(每次导出追加一条 JSON,便于按平台/时间汇总成功率)
+# 日志目录: 由 config 按工作空间算出(config.LOG_DIR), 建不出来时退到临时目录
+LOG_DIR = _config.LOG_DIR
 STATS_FILE = os.path.join(LOG_DIR, "stats.jsonl")
+LOGGER_NOTES = []            # 界面启动时逐行写进日志区
+
+
+def _ensure_log_dir():
+    """依次试: 工作空间的 logs/ → 临时目录。返回真正可用的目录(都不行则空串)。"""
+    global LOG_DIR, STATS_FILE
+    candidates = [(LOG_DIR, "工作空间")]
+    try:
+        tmp = os.path.join(tempfile.gettempdir(), "liushui_export", "logs")
+    except Exception:
+        tmp = ""
+    if tmp:
+        candidates.append((tmp, "临时目录"))
+    for cand, label in candidates:
+        try:
+            os.makedirs(cand, exist_ok=True)
+        except Exception as e:
+            LOGGER_NOTES.append(f"日志目录建不出来({label}: {cand}): {str(e)[:80]}")
+            continue
+        if cand != LOG_DIR:
+            LOGGER_NOTES.append(f"日志改写到{label}: {cand}(原定位 {LOG_DIR} 不能写)")
+        LOG_DIR = cand
+        STATS_FILE = os.path.join(cand, "stats.jsonl")
+        _config.LOG_DIR = cand            # 让稍后才 import 的模块取到同一个值
+        return cand
+    LOGGER_NOTES.append("日志文件通道不可用, 本次运行只输出到界面与控制台")
+    return ""
 
 
 def record_stat(platform, merchant, start_date, end_date, result, duration_s=0, error=""):
@@ -117,16 +146,22 @@ def summarize_stats(records=None):
     return result
 
 # 每次程序启动新建一个日志文件(按运行次而非按天),便于查看单次运行历史
-log_file = os.path.join(LOG_DIR, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+_ensure_log_dir()
+log_file = os.path.join(LOG_DIR, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log") if LOG_DIR else ""
 
 logger = logging.getLogger("liushui")
 logger.setLevel(logging.DEBUG)
 
 if not logger.handlers:
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(fh)
+    try:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(fh)
+    except Exception as e:
+        # 连临时目录都写不了(磁盘满/权限): 文件通道这次就放弃,
+        # 控制台 + 界面回调这两条通道仍然照常, 绝不能把导入带崩
+        LOGGER_NOTES.append(f"日志文件打不开: {str(e)[:80]}")
 
 
 def list_history_logs():

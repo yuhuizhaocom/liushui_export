@@ -13,9 +13,32 @@ import sys
 import traceback
 from datetime import datetime
 
-# 项目根(本文件在 core/ 下), 崩溃文件默认落在 <根>/logs
+# 程序根(本文件在 core/ 下)。崩溃兜底必须能在 `core.config` 自己导入失败时也工作,
+# 所以这里不 import config, 只用标准库自己找落点。
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CRASH_DIR = os.path.join(ROOT_DIR, "logs")
+POINTER_FILE = os.path.join(ROOT_DIR, "workspace.json")     # 工作空间书签(与 config 同一份)
+CRASH_DIR = os.path.join(ROOT_DIR, "logs")                  # 兜底落点(测试会 monkeypatch)
+
+
+def _crash_dirs():
+    """崩溃文件的候选落点: 工作空间/logs → CRASH_DIR → 临时目录。"""
+    dirs = []
+    try:
+        import json
+        with open(POINTER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        ws = str(data.get("data_root") or "").strip() if isinstance(data, dict) else ""
+        if ws:
+            dirs.append(os.path.join(ws, "logs"))
+    except Exception:
+        pass                                   # 没有书签就是没换过工作空间, 正常
+    dirs.append(CRASH_DIR)
+    try:
+        import tempfile
+        dirs.append(os.path.join(tempfile.gettempdir(), "liushui_export"))
+    except Exception:
+        pass
+    return dirs
 
 _dialog_shown = False        # 一个进程只弹一次, 免得子线程连环崩溃刷屏
 
@@ -26,7 +49,7 @@ def write_crash_file(text):
     文件名精确到微秒: 同一秒内崩两次(用户连点两下)不该把第一条覆盖掉。
     """
     name = "crash_%s.txt" % datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    for target in (CRASH_DIR, ROOT_DIR):
+    for target in _crash_dirs():
         try:
             os.makedirs(target, exist_ok=True)
             path = os.path.join(target, name)

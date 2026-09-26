@@ -28,7 +28,34 @@ import sys
 from datetime import datetime
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REC_DIR = os.path.join(ROOT_DIR, "recordings")
+
+
+def _recordings_dir():
+    """录制目录 = 工作空间/recordings。
+
+    本工具既被界面 import(那时 core 在 sys.path 上), 也能 `python tools/...` 直接跑
+    (那时不在), 所以 core.config 导不进就退而读工作空间书签, 再退到程序目录。
+    """
+    try:
+        import sys
+        if ROOT_DIR not in sys.path:
+            sys.path.insert(0, ROOT_DIR)
+        from core.config import RECORDINGS_DIR
+        return RECORDINGS_DIR
+    except Exception:
+        pass
+    try:
+        import json
+        with open(os.path.join(ROOT_DIR, "workspace.json"), "r", encoding="utf-8") as f:
+            ws = str(json.load(f).get("data_root") or "").strip()
+        if ws:
+            return os.path.join(ws, "recordings")
+    except Exception:
+        pass
+    return os.path.join(ROOT_DIR, "recordings")
+
+
+REC_DIR = _recordings_dir()
 
 # 基类骨架收尾点击的文字(PlatformBase.download_export_file 的默认 label)。
 # 生成器要把录制里同名的那一步去掉, 否则"下载"会被点两次。

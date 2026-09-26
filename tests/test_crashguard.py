@@ -58,8 +58,12 @@ def test_two_crashes_in_the_same_second_keep_both_files(crash_dir, monkeypatch):
     assert len([f for f in os.listdir(crash_dir) if f.startswith("crash_")]) == 2
 
 
-def test_falls_back_to_project_root_when_logs_is_unwritable(crash_dir, monkeypatch):
+def test_falls_back_to_temp_when_workspace_logs_is_unwritable(crash_dir, monkeypatch):
+    """绿色版可能放在只读介质/U 盘/受限目录里: 连程序目录都写不了时, 崩溃文件还得落得下去。
+    落程序根本身没意义(logs 写不了通常根也写不了), 所以兜底是临时目录。
+    """
     _no_dialog(monkeypatch)
+    import tempfile
     real_makedirs = os.makedirs
 
     def makedirs(path, *a, **k):
@@ -68,8 +72,10 @@ def test_falls_back_to_project_root_when_logs_is_unwritable(crash_dir, monkeypat
         return real_makedirs(path, *a, **k)
 
     monkeypatch.setattr(crashguard.os, "makedirs", makedirs)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: os.path.join(crash_dir, "temp-fake"))
     path = crashguard.write_crash_file("x")
-    assert path and os.path.dirname(path) == os.path.join(crash_dir, "root-fallback")
+    assert path and os.path.dirname(path) == os.path.join(
+        crash_dir, "temp-fake", "liushui_export")
 
 
 def test_unwritable_everywhere_returns_none_instead_of_raising(monkeypatch):
@@ -166,7 +172,6 @@ def test_real_interpreter_crash_produces_a_file(crash_dir):
         f"sys.path.insert(0, {REPO_ROOT!r})",
         "from core import crashguard",
         f"crashguard.CRASH_DIR = {crash_dir!r}",
-        f"crashguard.ROOT_DIR = {os.path.join(crash_dir, 'fallback')!r}",
         "crashguard.show_crash_dialog = lambda text, path: True",
         "crashguard.install()",
         "raise RuntimeError('启动期崩溃')",

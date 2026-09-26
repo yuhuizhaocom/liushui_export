@@ -272,8 +272,10 @@ def main(argv=None):
         fail("成品结构与 --flavor 不一致, 中止")
     emit("  白名单检查通过: 无 browser_data / 登录态 / 账单 / 配置残留")
     if a.zip:
-        archive = shutil.make_archive(out, "zip", root_dir=os.path.dirname(out),
-                                      base_name=os.path.basename(out))
+        # ⚠ make_archive 的**第一个位置参数就是 base_name(输出路径, 不带 .zip)**,
+        # 写成 make_archive(out, "zip", ...) 会同时把 out 当成输出与打包目标 → TypeError。
+        # zip 里放"包的内容"(与 CI 的 Compress-Archive "$PKG\*" 一致), 不再套一层目录。
+        archive = shutil.make_archive(base_name=out, format="zip", root_dir=out, base_dir=".")
         emit("  已压缩:", archive)
     return 0
 

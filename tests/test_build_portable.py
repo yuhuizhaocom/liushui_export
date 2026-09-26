@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -205,3 +206,17 @@ def test_check_flavor_catches_a_dirty_core_package(out):
 def test_unknown_flavor_fails_loudly(out):
     with pytest.raises(SystemExit):
         bp.build(out, flavor="core2")
+
+
+def test_dash_zip_actually_produces_a_zip(out, capsys):
+    """`--zip` 以前是坏的: make_archive 的第一个位置参数就是 base_name, 把成品目录当
+    它传进去 → TypeError: got multiple values for argument 'base_name'。CI 用的是
+    Compress-Archive, 本地也没人敲过这个开关, 所以一直没暴露。"""
+    assert bp.main(["--out", out, "--flavor", "core", "--zip"]) == 0
+    archive = out + ".zip"
+    assert os.path.isfile(archive), sorted(os.listdir(os.path.dirname(out)))
+    with zipfile.ZipFile(archive) as z:
+        names = set(z.namelist())
+    assert "run-core.vbs" in names, names            # 内容在 zip 根部, 不套一层目录
+    assert "app/core/deps.py" in names or "app\\core\\deps.py" in names, names
+    assert not any("site-packages" in n for n in names)

@@ -53,7 +53,7 @@
 
 - **下载兜底机制**：事件队列 + 目录轮询双通道捕获浏览器下载，防漏、防残留；无人认领的 UUID 残留文件移入 `downloads/待确认/`（**不再**按当前上下文改名归到某个商户目录，避免上一商户的文件冒充本商户账单）；候选与归档校验按**文件头**判类型，截图、假 `.xlsx` 一律不算账单；内容校验**先数数据行**——读得出数据行的表格直接通过，"操作失败/请登录"等错误文案只在读不出行时才用来区分空表与错误页（否则备注里出现这些字样的真账单会被判无效并删除）；
 
-- **文件归档**：下载文件按 `平台/商户/日期范围` 组织，同名旧文件自动归档至 `历史/` 子目录；
+- **文件归档**：下载文件按 `平台/商户[/子商户]/日期范围` 组织，同名旧文件自动归档至 `历史/` 子目录；
 
 - **高容错**：浏览器启动失败自动清理 Chrome 锁文件并重试 3 次；任何异常均写入日志并以弹窗提示，不静默崩溃。
 
@@ -111,6 +111,7 @@ liushui_export/
 ├── requirements-dev.txt     # 开发依赖（pytest）
 ├── settings.json            # 用户设置（8 个开关，见 10 章）
 ├── selection_state.json     # 平台/商户勾选状态（重启恢复）
+├── sub_merchants.json       # 主账号下的子商户清单（键=平台key/商户名；见 core/submerchants.py，不进绿色包）
 ├── scheduled_tasks.json     # 定时任务（version 1 + jobs[]）
 ├── start.bat                # 命令行启动脚本（控制台常驻，错误可见）
 ├── 启动工具.vbs             # 免控制台启动脚本（pythonw，五档找 Python；装依赖交给程序的体检，见 14.2）
@@ -156,10 +157,11 @@ liushui_export/
 | `core/browser.py`        | **浏览器管理**。封装 Playwright 持久化上下文（含登录态），提供导航/点击/填表/等待/下载捕获/文件归档/弹窗关闭/日期选择器辅助方法；内置浏览器启动重试与 Chrome 锁文件清理。                                                                  |
 | `core/exporters.py`      | **智能导出器**。`SmartExporter` 通过 placeholder 匹配日期输入框、按文本匹配查询/导出按钮，全自动完成「填日期→查询→导出→等待下载」，失败时截图并返回提示，是平台未自定义 `export()` 时的默认实现。                                             |
 | `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典：注册模块内**所有**带 key 的 `PlatformBase` 子类（用 `__module__` 排除从别处 import 进来的），key 重复/模块里没有平台类/导入失败都会写日志（导入失败以前只 print，pythonw 下界面完全看不到）。`reload_platforms()` 供平台管理改完脚本后免重启生效，需同时清 `sys.modules`、importlib 的 stat 缓存和磁盘上的 `.pyc`。                                                                                                           |
-| `core/outputs.py` | **导出文件汇总**。`find_output_files`（认 `平台/日期` 与 `平台/商户/日期` 两种结构、跳过 `.crdownload/.tmp/.part`）、`copy_to_summary_dir`（复制到 `downloads/开始_结束_时间戳/`，无文件返回 None 因此不再打开文件夹）、`sanitize_name`（路径非法字符清理，商户名与 profile 目录共用）。纯文件操作，可脱离界面测试。 |
+| `core/outputs.py` | **导出文件汇总**。`find_output_files`（认 `平台/日期`、`平台/商户/日期`、`平台/商户/子商户/日期` 三种结构，日期目录**最多下探两层**、找到就不再往下所以 `历史/` 不会被重复计数；跳过 `.crdownload/.tmp/.part`）、`copy_to_summary_dir`（复制到 `downloads/开始_结束_时间戳/`，无文件返回 None 因此不再打开文件夹；`summary_name` 处理撞名：两个子商户的原始文件名一模一样时加"上一级非日期目录名"前缀，绝不静默覆盖）、`sanitize_name`（路径非法字符清理，商户名与 profile 目录共用）。纯文件操作，可脱离界面测试。 |
 | `core/dialogs.py` | **查看类对话框**。`show_log_history(root)` 历史日志窗口、`show_stats_dashboard(app)` 稳定性看板；只读根窗口/状态栏，与导出流程无关。 |
 | `core/theme.py` | **界面配色常量**。单独成模块供 `dialogs.py` 复用，避免反向 import `main_gui` 成环。 |
-| `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。                      |
+| `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。子商户那一档另有 `supports_sub_merchants` + `switch_sub_merchant`/`current_sub_merchant`/`verifies_sub_merchant_identity`，默认全关（见 5.3）。 |
+| `core/submerchants.py` | **子商户清单与归属比对**（银联这类"主账号一次登录、切着导多份"）。清单存在工作空间 `sub_merchants.json`（键 = `平台key/商户名`，不放 settings.json：那个文件每次点勾都整体重写），坏文件回退成"按未配置处理"并把原因带出去。`clean_list` 拆分隔符 + 清洗 + 挡掉 `.`/`..`/纯点下划线名（这些会变成一级目录名）。`matches(expected, on_page)`：归一化后相等，或一方**独立出现**在另一方里（边界只认 ASCII 字母数字，所以 `8234` 不许蒙过 `8234000540`，而 `8234000540已激活` 算命中）；任何一侧为空都是"不匹配"。全角映射用逐对字典而不是 `zip` —— 长度对不齐会静默把数字翻译成别的数字。 |
 | `core/config.py`         | **全局配置**。`ROOT_DIR`（项目根）、`DOWNLOAD_DIR`（下载目录）、`BROWSER_DATA_DIR`（浏览器数据目录）、`SETTINGS_FILE`、`DEFAULT_SETTINGS`；`load_settings()` 读设置（缺字段回默认），`save_settings(部分字典)` **以现有文件为底只覆盖传进来的键**——以前是以 `DEFAULT_SETTINGS` 为底，界面各处"点一下只写自己那一两个键"于是每次点勾都把别的设置抹回默认值；另有 `write_text_atomic`/`write_json_atomic`（临时文件 + `os.replace` 原子替换）——`settings.json`/`scheduled_tasks.json`/`selection_state.json` 三处整体重写都用它，避免写一半崩溃后被读取端"except 用默认值"静默清空。 |
 | `core/cleanup.py` | **过期文件清理**。工具长期跑会累积"每次启动一个 run_日期.log"+"每次导出一个 起_止_时间戳/ 汇总副本目录"。`prune_logs`/`prune_summary_dirs` 按 mtime 删超过保留天数的这两类，**按文件名正则白名单认领**（不合规矩的名字原样留着），`stats.jsonl`（看板唯一历史）、`downloads/待确认/`（无人认领的账单）、`downloads/<平台>/…`（账单原件）任何情况下都不碰；`keep_days<=0` 表示关闭。清理失败只写日志，绝不影响启动。 |
 | `core/logger.py` | **合并后的唯一日志通道**。`log(msg, level, callback)` 三通道输出：控制台（整句包 try，`pythonw` 下 `sys.stdout` 可能是 None）、`logs/run_<启动时刻>.log`（**每次启动一个文件**，不是按天）、GUI 回调；warning/error 在界面行前加 `[WARN]/[ERROR]`。`record_stat`/`load_stats`/`summarize_stats` 管稳定性统计，其中 `load_stats(limit)` 用尾部反向分块读（`_read_tail_lines`），不再把整个 `stats.jsonl` 读进内存。 |
@@ -243,7 +245,10 @@ liushui_export/
 | `_ask_preflight_login(expired, ok_count)` | 预检那一个确认框（`askretrycancel`：重试=集中重登这 N 家，取消=跳过它们只导其余），文案最多列 12 家并写明"等共 N 家"。与 `_ask_login_retry` 同一套"主线程弹、后台线程等"写法；弹窗起不来或一小时无人应答都按**跳过**收，不把整批吊死。 |
 | `_do_check(tasks)`                   | **检查登录态**：逐个商户启动浏览器并调用 `plat.check_login(browser)`（多数平台靠 `export_url` 是否被重定向到登录路径判断），结果反映到平台状态灯。探测走 `_probe_login`，三档结果分别记「未登录 / 已登录 (页面标题) / 检查失败 - 原因」，读页面标题失败也只算这一家没查成。                                                                                                                    |
 | `_execute_export_tasks(tasks, start, end, label="导出", step_debug=False)` | **批量循环**（手动导出与定时任务共用）。① `tasks.sort(key=lambda t: int(t[1].manual_intervention))` 原地稳定排序，需人工的平台压到队尾，并把 `intervention_hint` 去重后播报一条「已排到最后执行」；② 从 `load_settings()` 读 `retry_times`/`retry_interval_s`（读文件不读 Var）；③ 每家先查 `_aborted()`（剩余 N 项未执行 → break，**但仍走统计与待人工清单**）；④ `run_with_retry(_run_single_export)`，外层 try 把抛错折成 `"failed"`；⑤ 状态灯按**最差**：`worst[key]` 用 `_RESULT_RANK` 比大小（未知结果串比 `failed` 更差），注释 1866 记录动机——"先失败后成功时绿灯会把失败盖掉，界面上看着全绿、其实有一家店没出账单"；⑥ 计数 `成功/手动/失败` 并返回三元组（空 tasks 时打提示后返回 **None**）。⚠ `label` 形参在函数体内**从未使用**，但 `trigger_job` 与测试都按关键字 `label=` 传，删掉或改名会同时炸两处。 |
-| `_run_single_export(plat, merchant, start, end, step_debug=False)` | **一家商户的一次尝试**，返回 `success`/`manual`/`failed`。顺序：`_ensure_browser`（独立 profile）→ `set_export_context` → 注入 `_user_wait_cb`（`wait_user` 用）与可选 `_step_cb` → **inline 登录预检**（`check_login` 抛异常时 `login_ok` 保持 True 继续导出；判未登录则 `manual` + `err_msg="登录已失效(导出前预检)"`）→ `_self_check_selectors` → `plat.export`。`finally` 无条件复位单步/user-wait 回调；**收尾无条件 `record_stat`**（注释 1954：以前预检失败直接 return，登录失效这个最主要的失败原因永远不进 stats.jsonl，看板成功率虚高）；`t0` 在浏览器启动之后重置，"耗时不含启动"。docstring 明写**本函数不允许向外抛异常**：抛出会被上层折成"一次失败"并跳过全部重试，而"浏览器起不来"恰是最该重试的那种。 |
+| `_run_single_export(plat, merchant, start, end, step_debug=False)` | **分发器**：平台声明了 `supports_sub_merchants` 且这家商户在界面「子商户」里录过清单 → 走 `_run_sub_merchants`；否则直接走 `_export_one_merchant`，也就是从前的那一条路，一个字都不变。清单读不出来时把原因写进日志再按"没配置"处理（读不到子商户最多是少导几份，不许把整批挡掉）。 |
+| `_export_one_merchant(plat, merchant, start, end, step_debug=False, sub_merchant="")` | **一家商户（或一个子商户）的一次尝试**，返回 `success`/`manual`/`failed`。顺序：`_ensure_browser`（独立 profile）→ `set_export_context`（带子商户）→ 注入 `_user_wait_cb`（`wait_user` 用）与可选 `_step_cb` → **inline 登录预检**（`check_login` 抛异常时 `login_ok` 保持 True 继续导出；判未登录则 `manual` + `err_msg="登录已失效(导出前预检)"`）→ `_self_check_selectors` → `plat.export`。`finally` 无条件复位单步/user-wait 回调；**收尾无条件 `record_stat`**（注释 1954：以前预检失败直接 return，登录失效这个最主要的失败原因永远不进 stats.jsonl，看板成功率虚高），子商户那一档记的商户字段是 `主商户/子商户`，一家一次；`t0` 在浏览器启动之后重置，"耗时不含启动"。docstring 明写**本函数不允许向外抛异常**：抛出会被上层折成"一次失败"并跳过全部重试，而"浏览器起不来"恰是最该重试的那种。 |
+| `_run_sub_merchants(plat, merchant, subs, start, end, step_debug)` | 同一份 profile、同一次登录里按清单逐个切子商户各导一份。**重试挂在每个子商户自己身上**（取值口径与 `_execute_export_tasks` 逐字一致，包括"0 就是 0"），所以整家汇总结论永远不是 `failed`——外层据此会把成功的几家重导一遍，归档里多堆 `历史/` 反而更难看清。全部 success 才 `success`，其余一律 `manual`。 |
+| `_switch_sub_merchant(plat, merchant, sub)` | 切换 + **归属校验**，返回 False 表示这一家就此停手。三种情况分得很清：切换动作失败 → 停；页面读回来的商户和要导的对不上 → 停 + `snapshot` 留证 + 日志写清"页面是谁/要的是谁"；平台没实现读回或读回抛错 → **放行**但必留一句"归属未经校验"（读不到 ≠ 读对了，也不能因为没实现读回就彻底用不了）。 |
 | `_self_check_selectors(plat)` | 导出前校验平台声明的 `SELECTORS`，**只报警不拦截**（注释 1996：缺元素不代表这次一定失败，自检自身出错更不能影响导出）；未声明的平台直接跳过。 |
 | `_apply_export_result(key, plat, result)` | 只管平台状态灯（success→绿 / manual→橙 / 其余→红）；要人做的平台交给 `_prompt_manual_leftovers` 一次性汇总。 |
 | `_prompt_manual_leftovers(items, date_str)` | 需要人工完成的平台**在整批结束后一次性列出一个窗**（含各自 `guide` 与"点右侧『打开』重进页面"的指引）；以前每个 manual 各弹一个，十个商户里五个要手动就会叠五个窗。全自动成功时完全不打扰。 |
@@ -272,7 +277,7 @@ liushui_export/
 | `_append_log(line)` | **任意线程可调**（注释 769：这条是量最大的跨线程入口，BrowserManager 每个动作、保活/调度线程都会调）。就地 append 到 `log_lines`，超过 500 条裁到最后 300；控件刷新打包成 `_paint` 走 `_ui`。**裁剪只作用于缓冲，Tk 文本控件本身不裁剪**（要 `_clear_log_screen` 才清）。 |
 | `_copy_log()` / `_clear_log_screen()` / `_view_log_history()` | 复制的是缓冲（不是控件内容），`clipboard_*` 后调 `root.update()` 确保写入；清空只清显示、历史文件不动；后者转 `dialogs.show_log_history`。 |
 | `set_platform_status(key, status)` / `_paint_platform_status` | 前者是线程安全入口（**保活服务按这个名字查找回调，改名要同步 `keepalive._mark`**），后者只能主线程调；灯控件挂在 `plat.status_label` 上，一个平台一盏灯。 |
-| `_on_platform_toggled(key)` / `_sync_platform_on_merchant(key)` / `_add_merchant_checkbox` | 平台↔商户双向联动：取消平台前把每家商户的样子写进 `_merchant_memory` 再全清、勾回按记忆还原（从没记过=整平台全选）；勾任一商户自动勾回其平台；建商户行时初值取 `selection`。以前"取消=全不勾、勾回=全勾"，常年不勾的那几家只要手滑点一次平台框就悄悄回到任务里。 |
+| `_on_platform_toggled(key)` / `_sync_platform_on_merchant(key)` / `_add_merchant_checkbox` | 平台↔商户双向联动：取消平台前把每家商户的样子写进 `_merchant_memory` 再全清、勾回按记忆还原（从没记过=整平台全选）；勾任一商户自动勾回其平台；建商户行时初值取 `selection`；商户行右侧除「打开」「删」外，声明了 `supports_sub_merchants` 的平台还有「子商户」按钮（带已录数量，入口按平台显隐，见 14.3）。以前"取消=全不勾、勾回=全勾"，常年不勾的那几家只要手滑点一次平台框就悄悄回到任务里。 |
 | `_load_selection()` / `_save_selection()` | `selection_state.json` 存 `{"platform":{key:bool},"merchant":{key:{name:bool}}}`；保存时**同时更新 `self.selection` 纯数据镜像**（注释 740：保活线程要读勾选，跨线程读 Tk 变量不安全），写入走 `write_json_atomic`；读侧非 dict/异常一律回空结构。 |
 | `_refresh_merchant_badge(key)` / `_remove_merchant_row(key, name)` | 徽标数字以 `merchant_vars[key]` 为准（建好就不管的话，加/删商户后数字是骗人的）；删行是 pop Var + destroy Frame + 重扫 merchants + 刷徽标 + 存勾选，**目录删除由调用方负责**。 |
 | `_on_ka_setting` / `_on_retry_setting` / `_on_cleanup_setting` | 设置即时落盘并同步内存副本。保活那两个改动**立刻作用到运行中的服务**（`keepalive.enabled/interval_min`，间隔只影响下一轮等待）；重试那个**只写 `retry_times`**（注释 869：`retry_interval_s` 界面没有输入框，以前每次点勾都被写回 30，手工调过的值一勾就没）；清理天数改完提示"下次启动时生效"（清理只在启动跑一次）。 |
@@ -401,7 +406,7 @@ liushui_export/
 | `login_signature()`   | `(cookie 条数, 内容指纹)`，**不触发导航**；窗口没了返回 None。登录等待期间用它判断"有登录写入"，因为 `check_login` 会把页面跳走。 |
 | `save_login_state(quiet=False)` | `context.storage_state()` 导出 cookie+localStorage（含 session cookie）到 profile 目录。`quiet=True` 不写日志（登录等待期间是轮询保存的）。 |
 | `_safe_name(name)`    | 静态方法：转 `outputs.sanitize_name`，兜底值 `"default"`（profile 目录不能为空）。防目录逃逸。 |
-| `_task_base_dir()` / `_task_tmp_dir()` | 任务目录 `downloads/平台/商户/起_止`（缺哪层省哪层）与其下的 `临时/`。 |
+| `_task_base_dir()` / `_task_tmp_dir()` | 任务目录 `downloads/平台/商户[/子商户]/起_止`（四层按顺序拼、**空掉的层直接省略**，所以没配子商户的商户路径与从前逐字一致）与其下的 `临时/`。子商户名在 `set_export_context` 时就过一遍 `_safe_name`——它会直接成为一级目录名。 |
 | `latest_export_dir()` | 转 `_task_base_dir()`。**全仓无调用点**（只有本 wiki 提过），属预留 API，别在文档里写成"界面用它定位文件"。 |
 
 #### 人工介入与调试支持
@@ -452,6 +457,10 @@ liushui_export/
 | `PAGE_SETTLE_S` / `DOWNLOAD_TIMEOUT_S` / `DOWNLOAD_LABEL` / `DOWNLOAD_SETTLE_S` / `DATE_VALUE_SLICE` | 类属性 | 骨架的五个差异声明点：打开页面后等几秒（3）、下载最多等多久（60）、下载按钮的真实文字（有的叫「下载全部」「下载明细」，小红书就是「导出」）、点完给几秒落地（3）、填进日期框的字符串长度（天猫「月汇总」设成 7，只吃 `2026-09`）。 |
 | `run_standard_flow(browser, start, end)` | 方法 | 串起上述四步；日期没全部填进去时**在点导出之前停下**（`[中止]` warning + `snapshot("日期未填入")` + 返回 `"manual"`）。平台脚本 `export()` 里 `return self.run_standard_flow(...)` 即采用骨架；**不调用则行为完全不变**。 |
 | `SELECTORS`                             | 类属性 | 关键元素的选择器表（`{"date_start": ".el-range-input", …}`）。声明后导出前会被自动校验；目前只有微信支付声明了 4 个键。 |
+| `supports_sub_merchants`                | 类属性 | 默认 `False`。置 `True` 才会被"一次登录、按清单逐个切子商户导多份"的循环接管；不声明的平台连循环都进不去，行为与从前逐字一致。⚠ 必须是真布尔值——写成字符串会让"没声明"看着像声明了（有测试钉住）。 |
+| `switch_sub_merchant(browser, sub)`     | 方法  | 切到指定子商户，返回 `True` 只表示"切换动作点完了"。**默认返回 False 并写一条 warning**：声明支持却没实现切换的平台就此整家停手，绝不带着没确认过的归属去点导出。覆盖时两条底线：切不过去必须返回 False；这里不许点导出/下载（那是 `export()` 的事，混进来重试语义就说不清）。 |
+| `current_sub_merchant(browser)`         | 方法  | 从页面读回"现在是谁"。默认空串——空串在流程里走"归属未经校验"分支（放行 + 提醒），**不等于匹配通过**。这是整套机制里唯一防住"A 的账单记到 B 名下"的东西，能实现尽量实现。 |
+| `verifies_sub_merchant_identity()`      | 方法  | 脚本有没有真的覆盖读回（比对函数对象）。界面上拿它决定要不要提示"这个平台的归属不会被校验"，免得用户以为切错了会有人拦。 |
 | `check_selectors(browser, timeout=2)`   | 方法  | 面检：遍历 `SELECTORS`，`locator.count()==0` 或选择器非法都记进 `missing` 并 warning，返回 `(ok, missing)`。**由 `_run_single_export` 在导出前自动调用**，缺失只写日志不拦截；未声明直接跳过。⚠ `timeout` 形参未被使用。 |
 | `assert_selector(browser, key)`         | 方法  | 点检：单个键 `wait_for(timeout*1000)`，超时先 `snapshot_on_failure` 再**抛 `RuntimeError`**（附平台声明的选择器）。未声明该键时只 warning 并返回 True——"没声明就不拦"。微信支付在填日期前、点查询前各断言一次。 |
 
@@ -557,7 +566,8 @@ liushui_export/
 | 成员 | 说明 |
 | --- | --- |
 | `INCOMPLETE_SUFFIXES` / `sanitize_name(name, fallback)` / `task_folder(start, end)` | 半成品后缀表；路径非法字符 `<>:"/\|?*` 与控制字符替换（兜底值由调用方决定：商户名用空串提示重填、profile 用 `default`）；日期目录名 `起_止`（与 `BrowserManager._export_task_id` 同形，两处各写一份）。 |
-| `find_output_files(base, platform_names, start, end)` | 认两种结构：`平台/日期/`（旧）与 `平台/商户/日期/`（新），都收并按出现顺序去重。**只下探一层**，所以 `历史/`、`临时/` 里的归档不进汇总（原件仍在任务目录，不算丢）。跳过非文件与半成品后缀。传入的是平台**显示名**。 |
+| `find_output_files(base, platform_names, start, end)` | 认三种结构：`平台/日期/`（旧）、`平台/商户/日期/`、`平台/商户/子商户/日期/`，都收并按出现顺序去重。`_iter_task_dirs` 的层数**封顶在平台目录下两层**（`MAX_TASK_DEPTH=2`），并且**找到日期目录就不再往下走**，所以 `历史/`、`临时/` 里的归档不进汇总（原件仍在任务目录，不算丢）。跳过非文件与半成品后缀。传入的是平台**显示名**。 |
+| `summary_name(task_path, used)` | 汇总目录里用什么文件名：默认原名；撞名时加"上一级**非日期**目录名"作前缀（也就是商户或子商户——直接取父目录会得到一串日期，等于没加），还撞就再叠时间戳，`getmtime` 失败也不打断汇总。会撞的场景只有一个：「原始文件名」模式下两个子商户的原始名一模一样，静默覆盖等于把一份账单弄丢。 |
 | `copy_to_summary_dir(base, names, start, end, log, now)` | 复制到 `downloads/起_止_<落地时间戳>/`；无起止或没有可汇总文件返回 **None**（调用方据此不再打开文件夹）。逐文件 `copy2`，**单个失败 `pass`**（注释 83：不能影响其余，更不能中断导出收尾）。 |
 | `SUMMARY_DIR_RE` / `LOG_FILE_RES` / `KEEP_FOREVER` | 汇总目录名格式 `起_止_YYYYMMDD_HHMMSS`；日志文件名白名单收三种：`^run_\d{8}\.log$`（早期按天）、`^run_\d{8}_\d{6}\.log$`（现在每次启动一个）、`^crash_\d{8}_\d{6}_\d{6}\.txt$`；`stats.jsonl` 再旧也不删（看板唯一历史来源）。白名单是用来「认名字」的——不在表里的文件一律当别人的东西不碰。 |
 | `_cutoff` / `_old_enough` | 只看 `os.path.getmtime`；stat 失败（被占用/权限）按"不动"处理。 |
@@ -746,10 +756,10 @@ liushui_export/
 点击"下载"前:  begin_wait_download()
                ├─ 清空事件队列, 打开捕获开关
                ├─ _carry_over_orphans()  # 归位上次残留 UUID 文件
-               └─ 重建 <平台/商户/日期>/临时 目录
+               └─ 重建 <平台/商户[/子商户]/日期>/临时 目录
 点击"下载"后:  context "download" 事件 → _on_download → 入队
 wait_download(): 出队 → _save_download_to_temp(写入临时目录)
-                 → _finalize_download(归档到 平台/商户/日期/)
+                 → _finalize_download(归档到 平台/商户[/子商户]/日期/)
                      ├─ 顶层同名旧文件 → 复制到 历史/原名_时间戳.ext
                      └─ os.replace 移动(10 次重试 + 拷贝兜底)
 兜底: 轮询 downloads 根目录新出现的稳定文件(两份采样大小一致)
@@ -936,28 +946,29 @@ python -m playwright install chromium
 
 | 文件                       | 规模（当前实际行数）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
-| `core/main_gui.py`       | 2285 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、录制/调试/平台管理对话框入口 |
+| `core/main_gui.py`       | 2517 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制、商户增删改与刷新、日期区间校验、录制/调试/平台管理对话框入口 |
 | `core/browser.py`        | 1390 行      | 浏览器管理、下载捕获与归档、成品校验（含格式门）、登录态存取、操作录制（项目体量最大的核心模块） |
 | `core/scheduler.py` | 443 行 | 定时任务（cron 解析 / `TaskStore` 持久化 / 轮询触发 / 管理界面） |
 | `core/platform_admin.py` | 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/exporters.py`      | 229 行       | 智能导出器（无人写 `export()` 时的默认兜底导出）  |
-| `core/platform_base.py`  | 214 行       | 平台基类（元信息 + 登录判据 + 选择器自检 + 通用导出骨架钩子） |
+| `core/platform_base.py`  | 253 行       | 平台基类（元信息 + 登录判据 + 选择器自检 + 通用导出骨架钩子 + 子商户切换/读回钩子，默认全关） |
 | `core/dialogs.py` | 198 行 | 历史日志窗口与稳定性看板（只依赖 `logger` + `theme`） |
 | `core/logger.py`         | 200 行       | 日志三通道 + 稳定性统计（`stats.jsonl` 尾部读与全量汇总） |
 | `core/cleanup.py` | 121 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/loader.py`         | 112 行        | 平台加载器与免重启 reload（含清磁盘 `.pyc`） |
-| `core/config.py`         | 280 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写与"只覆盖传入键"的设置保存 |
+| `core/config.py`         | 324 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写与"只覆盖传入键"的设置保存 |
 | `core/keepalive.py` | 96 行 | 登录保活服务（后台线程周期巡检，任务执行中跳过本轮） |
 | `core/crashguard.py` | 119 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
 | `core/deps.py` | 219 行 | 依赖三档体检（缺包/版本不对/缺内核）、内核目录识别、修复命令与离线退路；不 import playwright、不碰界面，见 14.2 |
-| `core/outputs.py` | 89 行 | 导出成品查找与汇总副本复制（纯文件操作，可脱离界面单测） |
+| `core/outputs.py` | 148 行 | 导出成品查找（三种层级、下探封顶两层）与汇总副本复制，含撞名加前缀的 `summary_name`（纯文件操作，可脱离界面单测） |
+| `core/submerchants.py` | 155 行 | 子商户清单存储 + 归属比对（独立出现才算命中）；清单落在 `sub_merchants.json`，坏文件按未配置处理并把原因带出去，见 14.3 |
 
 | `core/theme.py` | 17 行 | 配色常量（供 dialogs 复用，避免反向 import main_gui 成环） |
 | `tools/build_portable.py` | 282 行 | 绿色包组装：`--flavor full/core` 两版、白名单复制、`scan_forbidden` 挡用户数据/凭证、`check_flavor` 核结构与版本一致、`--verify` 自检路径（不需要依赖） |
 | `packaging/` + `.github/workflows/build-portable.yml` | — | 两个版本的启动器与说明（`run-portable.*` / `run-core.*`，纯 ASCII vbs + 可看错的 bat）和出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
-| `platforms/*/export.py` | 11 个平台共 987 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 41 个文件约 6450 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（451 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、启动前后依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构 |
+| `platforms/*/export.py` | 11 个平台共 1047 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 129 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
+| `tests/` | 43 个文件约 7270 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（507 项）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」 |
 | `start.bat` / `启动工具.vbs` | 40 / 124 行 | 源码版的启动脚本（vbs 五档找 Python；**必须保持纯 ASCII**，见 13 章）。它**不再**自己检查/安装依赖 —— 那个判断只在 `core/deps.py` + `check_dependencies()`（见 12 章第 29 条） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
@@ -1020,6 +1031,13 @@ python -m playwright install chromium
 31. 判断内核在不在**不许写死子目录名**：`chrome-win` 在新版本里叫 `chrome-win64`，先认 `INSTALLATION_COMPLETE` 标记、再逐个子目录找 `chrome.exe`；`chromium_headless_shell-*` 不算内核（我们用持久化上下文）。体检解析出的内核目录**不回退**到 Playwright 默认位置——运行时 `PLAYWRIGHT_BROWSERS_PATH` 已按解析结果设好，回退会让体检和实际行为各说一套。
 32. 启动器的 `--print-python` 诊断分支必须**排在任何会弹窗的检查之前**且自己绝不弹窗：测试/支持人员是在"未必是一个完整包"的目录里问"你会挑中哪个解释器"，一个模态框就能把调用方吊死（`run-core.vbs` 第一版真这么挂过一次）。
 
+**子商户（一次登录导多份）**
+
+33. **归属没确认就不许点导出**。`_switch_sub_merchant` 里"切换失败"和"页面读回来不是要导的那一家"都必须让整家停手转人工——省登录次数顺带省掉的正是"人眼看着切对了才按导出"那道人工确认；机器这边不守住，结果就是把 A 的账单记到 B 名下：文件是真的、日期是真的、校验也过得去，只有归属是错的，查起来最费工夫。平台没实现读回时**放行**但必须写一句"归属未经校验"（读不到 ≠ 读对了，可也不能因为没实现读回就彻底用不了）。
+34. 归属比对只认**独立出现**：`submerchants.matches` 归一化后相等，或一方作为独立片段出现在另一方里（边界只认 ASCII 字母数字——`8234000540已激活` 算命中，`98234000540` 里的 `9` 不算）。少了这条，录错的短号 `8234` 会因为页面显示 `8234000540` 而"匹配通过"。全角→半角必须逐对写映射表：`zip` 两个字符串一旦长度不齐，会把数字**静默翻译**成另一串数字（本次真踩过，测试里钉了一条 `８２３４ → 8234`）。
+35. 子商户这一档的重试挂在**每个子商户自己身上**，整家汇总永远不返回 `failed`（全失败也报 `manual`）：外层 `run_with_retry` 若把整家重跑，成功的几家会再导一遍、往归档里堆 `历史/`，反而看不出哪家真没出来。统计按 `主商户/子商户` 记一条。取值口径必须与 `_execute_export_tasks` 一致，包括"间隔 0 就是 0"（写成 `int(x or 30)` 会把 0 变成睡满 30 秒）。
+36. 子商户名会直接成为 `downloads/平台/商户/` 下的一级目录名，所以在 `set_export_context` 就要过 `_safe_name`，清单清洗时还要挡掉 `.`/`..`/纯点下划线的名字——`sanitize_name` 不吃它们，留着就是目录逃逸。汇总目录那侧另有 `summary_name` 防同名静默覆盖（见 5.8）。
+
 ***
 
 ## 13. 已知不一致、未接线与待议
@@ -1078,7 +1096,7 @@ python -m playwright install chromium
 | 类别 | 内容 | 权限要求 |
 | --- | --- | --- |
 | **程序目录** `ROOT_DIR` | `core/`、`platforms/`、`tools/`、`site-packages/`（依赖）、`runtime/ms-playwright/`（Chromium）、启动器 | 只读即可 |
-| **工作空间** `DATA_ROOT` | `downloads/`（账单）、`browser_data/`（登录态，**含明文会话凭证**）、`logs/`、`recordings/`、`settings.json`/`selection_state.json`/`scheduled_tasks.json` | 必须可写 |
+| **工作空间** `DATA_ROOT` | `downloads/`（账单）、`browser_data/`（登录态，**含明文会话凭证**）、`logs/`、`recordings/`、`settings.json`/`selection_state.json`/`scheduled_tasks.json`/`sub_merchants.json` | 必须可写 |
 
 默认两者相同（就地模式），现有安装零迁移；全新的一份包第一次启动会问用户"账单和登录数据存哪儿"（`ensure_workspace` 在建界面之前跑，因为商户列表与日志目录都是 `LiushuiApp.__init__` 里按当前路径建的）。解析优先级与兜底见 5.9；选完/换完都要**重启一次进程**（`relaunch_for_workspace`），原因是各模块 `from .config import DOWNLOAD_DIR` 是取值拷贝。界面「工作空间」按钮可以看路径、打开它、换到别的文件夹；启动日志的 `_report_paths` 会说明工作空间在哪以及是否发生过兜底（书签指向的盘没了、日志退到临时目录）。
 
@@ -1110,6 +1128,23 @@ python -m playwright install chromium
 `.github/workflows/build-portable.yml`（`workflow_dispatch` 或打 `v*` tag，14 步）：`setup-python` 3.14 → 打印这台机器有哪些解释器 → **核版本**（`deps.REQUIRED_PLAYWRIGHT_VERSION` / `requirements.txt` / `PLAYWRIGHT_VERSION` 三处不一致就红：发出去的包不能是没实测过的组合）→ 组装两棵目录（`build/full --verify`、`build/core --flavor core --verify`）→ `pip install --target build/full/app/site-packages` → `PLAYWRIGHT_BROWSERS_PATH` 指包内后 `playwright install chromium`（**内核必须由同版本 playwright 生成**）→ 拷整个解释器目录进全量包（先断言 `Lib/tkinter` 在，界面全靠它）→ **全量包冒烟**：包内解释器 + 包内依赖 + 包内内核起一次真 Chromium，并断言 `deps.probe()` 在那棵目录里得出 `ok` → **核心版冒烟**：在没有随包依赖的解释器里跑体检，结论必须是 `no_playwright`（这一版靠引导安装活着，体检认不出缺什么就等于启动后一声不响）→ 跑仓库离线测试 → 压两个 zip → 一起进 artifact（tag 时同时发 Release，说明里写清"发给业务用户就给全量版"）。体积量级：Chromium 428M（`chromium_headless_shell` 另有 272M，随包只带 `chromium-*` 时需实测 headless 是否仍可用）+ playwright 108M + 解释器与代码 ~100M；核心版只有几 MB。
 
 - **推之前先在本地彩排**（这条是两次红下来的教训）：CI 的失败要么是"某步偷偷依赖了上一步的产物"，要么是"runner 环境与开发机不一致"，两类都能在本地逼出来——`py -m venv` 建一个**没装 playwright** 的干净解释器 + `git archive HEAD | tar -x` 导出的**干净树**（CI 没有 `.venv`/`settings.json`/`downloads`），再把依赖目录假造出来跑一遍：核版本、两版组装+自检、核心版体检、借到依赖后不再报缺、全套测试。真需要联网装内核的那几步只能留给 CI。
+
+### 14.3 子商户：主账号登录一次，切着导多份
+
+银联这类平台是"一个主商户下挂多个子商户，账单要一份一份导"。老做法只能把每个子商户
+建成一个独立商户条目，代价是**每家都要重新登录一次**（商户列表本来就是扫
+`browser_data/<平台>/` 得出来的，商户 = 一份 profile）。现在改成一个商户条目 + 一份
+profile，一次登录里按清单逐个切子商户、各导一份：
+
+    界面「子商户」录清单(一行一个, 顺序就是导出顺序)
+      → 每轮: switch_sub_merchant → current_sub_merchant 比对 → export → 归位
+      → downloads/银联/主账号甲/8234000540/起_止/   (文件名也多一段子商户)
+
+- **入口只在需要的地方出现**：平台得声明 `supports_sub_merchants`，商户行上才长出「子商户」按钮（按钮上直接显示已录数量）。清单存在工作空间的 `sub_merchants.json`，随包分发的那道 `FORBIDDEN` 收着它——它是业务档案，不是程序的一部分。
+- **为什么必须"没确认就停手"**：省登录次数顺带省掉了"人眼看着切对了才按导出"这道人工确认。切换失败或页面读回来不是要导的那一家时，整家停手转人工并截图留证；平台没实现读回时放行但写明"归属未经校验"。详见 12 章第 33-36 条。
+- **不做勾选树**：想少导几家就把那几行删掉。"选了但没导"是一种新的、只能靠界面同步的状态。
+- **银联那份是实现样例**（`platforms/yinlian/export.py` 的 `SUB_*` 字面量）：切换走"点入口 → 搜索框填商户号（填不上就按列表文字精确点）→ 提交"。**这些字面量还没在真实页面上核过**，核的办法是用「平台管理 → 打开录制」照着切一遍；没核之前会发生的是"整家停手"或"提示归属未经校验"，不是拿错账单。测试里有一条专门盯着 `SUB_ID_SELECTOR == ""`，就是为了别让它看起来像已经可用。
+- 一次登录切 N 家的其它代价：登录预检与保活仍按**商户**逐家跑（不会翻倍），但一轮导出会连着跑 N 次页面流程，中止按钮在子商户之间也会生效（剩下的家数记为需人工）。
 
 ***
 

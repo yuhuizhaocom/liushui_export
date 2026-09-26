@@ -17,6 +17,10 @@
 /workspace.json
 /.liushui_workspace.json
 
+# 出包中间产物: CI 在 build/ 下组装(测试要从里面借 playwright), 本地试跑同理, 都不许进仓库
+/build/
+/dist/
+
 # 临时/调试脚本(与导出功能无关)
 /debug_rtf.py
 /dump_rtf_full.py

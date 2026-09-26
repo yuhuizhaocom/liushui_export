@@ -36,6 +36,14 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: 交代本机有哪些解释器(启动工具.vbs 的 CI 分支只有打印可信)
+        shell: pwsh
+        run: |
+          "py --list-paths:"; if (Get-Command py -ErrorAction SilentlyContinue) {
+            & py --list-paths
+          } else { "  (这台机器没有 py 启动器 —— test_launcher_vbs 的相应分支会跳过)" }
+          "python: $((Get-Command python).Source)"
+
       - name: 组装程序目录(白名单复制 core/platforms/tools + 启动器)
         run: python tools/build_portable.py --out $env:PKG
 
@@ -82,6 +90,12 @@ jobs:
       - name: 离线测试仓库代码(不含 GUI 的部分)
         run: |
           python -m pip install --no-cache-dir pytest
+          # 依赖不再下一遍: tests/conftest.py 会把**包内** site-packages 挂进 sys.path
+          # (那份本来就要随包发出去, 为跑测试再装一份纯属浪费)。先断言它在, 否则报出来的
+          # 是"没有 playwright"这种莫名其妙错(第一次 CI 就是这么红的)。
+          if (-not (Test-Path "$env:PKG\app\site-packages\playwright")) {
+            throw "包内依赖不在: $env:PKG\app\site-packages —— conftest 挂不到东西"
+          }
           python -m pytest tests -q
 
       - name: 压缩成品

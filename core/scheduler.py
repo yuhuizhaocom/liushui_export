@@ -260,8 +260,13 @@ class CronScheduler:
                 self.trigger(job, now)
 
     def _warn_once(self, job, problem):
-        """把"这个任务为什么不会跑"写进日志一次; 提示本身绝不许弄死调度线程。"""
-        tag = job.job_id or job.name or problem
+        """把"这个任务为什么不会跑"写进日志一次; 提示本身绝不许弄死调度线程。
+
+        记号不能用 `job_id`: json 里没写 id 的条目, `from_dict` 每次 load 都会新生成
+        一个随机 id(而 `check_all` 每轮都 load), 于是"只说一次"变成每 30 秒说一次。
+        按"名字 + cron + 毛病"这三样记, 同一份坏配置天然只算一个。
+        """
+        tag = f"{job.name}|{job.cron}|{problem}"
         if tag in self._warned_jobs:
             return
         self._warned_jobs.add(tag)

@@ -237,6 +237,25 @@ def test_scheduler_says_why_a_job_never_runs(tmp_path, monkeypatch):
     assert "写错的" in hits[0] and "cron" in hits[0]
 
 
+def test_warn_once_survives_regenerated_job_ids(tmp_path, monkeypatch):
+    """json 里没写 id 的条目, from_dict 每轮 load 都会新生成一个随机 id ——
+    "只说一次"要是按 job_id 记, 就变成每 30 秒说一次。"""
+    import core.logger as lg
+    lines = []
+    monkeypatch.setattr(lg, "log", lambda msg, level="info": lines.append((level, msg)))
+    path = str(tmp_path / "t.json")
+    _write_jobs(path, [{"name": "没有 id", "platforms": ["youzan"],
+                        "merchants": ["m1"], "enabled": True}])
+    s = CronScheduler(app=_NoTriggerApp(), store=TaskStore(path))
+    now = _dt("2026-09-04 18:00")
+    ids = set()
+    for _ in range(4):
+        s.check_all(now)
+        ids.update(j.job_id for j in s.store.jobs)
+    assert len(ids) == 4, "前提: 每轮 load 出来的 id 确实不一样"
+    assert len([m for _l, m in lines if "不会被执行" in m]) == 1
+
+
 def test_cron_problem_covers_blank_and_invalid():
     def _j(cron):
         return CronJob(job_id="a", name="n", cron=cron, platforms=[], merchants=[])

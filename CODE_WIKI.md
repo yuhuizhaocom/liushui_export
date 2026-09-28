@@ -342,7 +342,8 @@ liushui_export/
 
 | 方法                                   | 说明                                                                                                                                               |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `start()`                            | 启动前清理 Chrome 锁文件（`SingletonLock` 等）；`launch_persistent_context` 带 `accept_downloads=True`、`downloads_path` 指向 downloads 根目录；失败自动清理锁文件并重试，最多 3 次。 |
+| `start()`                            | 启动前清理 Chrome 锁文件（`SingletonLock` 等）；`launch_persistent_context` 带 `accept_downloads=True`、`downloads_path` 指向 downloads 根目录；窗口尺寸见紧邻的下一条；失败自动清理锁文件并重试，最多 3 次。 |
+| `start()` 的窗口/视口                | 有头：`no_viewport=True` + `--start-maximized`，且**不许**出现 `--window-size`。三条都是实测（1.62 / chromium-1234 / 1920x1080）：① 原来那句 `viewport=None` 根本不是"不设视口"——Python 绑定 `locals_to_params` 把 `None` 当"没传"丢掉，生效的是默认 1280x720 固定视口，于是窗口拉到 1920x1080 页面只画左上角 1280x720，右边 624px、下面 265px 全空白（用户报的"手动全屏只有左上角有内容"）；② `--window-size` 会顶掉 `--start-maximized`，两个都给时窗口退回 normal 态（用户报的"新窗口不是全屏"）；③ 无头没有窗口可跟，`no_viewport=True` 会退到 800x600 把预检/快照的版面改掉，所以是 `no_viewport=not self.headless`。`tests/test_browser_window.py` 钉住这三条。 |
 | `close()` / `__enter__` / `__exit__` | 关闭 context 与 playwright 实例，支持上下文管理器用法。**关之前先 `save_login_state_on_close()`**：Chromium 退出时不保留 session cookie，而关闭点远不止首次登录（导出收尾、保活巡检、手工测试窗口、程序退出）。守卫：当前 cookie 数比已存的登录态**少**时不覆盖（防页面清 cookie 把上次的登录态换成空的），条数一样但值变了(续期/换 token)照存；用户自己关掉窗口时存不上是常态，静默跳过不刷日志。 |
 | `save_login_state_on_close()`        | 上面那层守卫的实现，返回是否真的写了文件；`_saved_cookie_count()` 读已落盘的 `login_state.json` 条数。 |
 | `_cleanup_lock_files()`              | 删除 profile 目录中的 `Singleton*/lockfile/*.lock` 残留文件，防止 Chrome 启动失败。每个 `os.remove` 与整体各自吞异常，只数条数写日志。 |

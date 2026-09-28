@@ -118,7 +118,7 @@ liushui_export/
 ├── 使用说明.md              # 面向最终用户的使用文档
 ├── 脚本编写指南.md          # 面向开发者的平台插件编写指南
 ├── core/                    # ★ 核心框架包（20 个模块 + __init__，见 2 章分层图）
-│   ├── main_gui.py          # 2874 行 · 界面 + 批任务编排
+│   ├── main_gui.py          # 2978 行 · 界面 + 批任务编排
 │   ├── browser.py           # 1626 行 · BrowserManager
 │   ├── scheduler.py         # 671 行 · cron 与定时任务
 │   ├── platform_admin.py    # 336 行 · 平台管理与脚本调试
@@ -147,7 +147,7 @@ liushui_export/
 │   └── build_portable.py    # 170 行 · 绿色包白名单组装 + 成品扫描/自检
 ├── packaging/               # 绿色包的启动器与随包说明（run-portable.vbs / .bat / README）
 ├── .github/workflows/build-portable.yml   # Actions 出包：自带 Python + playwright + Chromium
-├── tests/                   # 58 个文件约 10082 行，692 项 pytest（离线，不碰真浏览器）
+├── tests/                   # 59 个文件约 10297 行，703 项 pytest（离线，不碰真浏览器）
 ├── downloads/               # 运行时创建：账单归档 + 汇总副本 + 待确认/
 ├── browser_data/            # 运行时创建：<平台key>/<商户名>/ 每商户一个 profile
 ├── recordings/              # 「打开」手工测试窗口的点击录制 jsonl（已 gitignore）
@@ -205,7 +205,7 @@ liushui_export/
 | `_merchant_memory` | 取消平台勾选那一刻各商户的样子，**只在内存里**，重启后第一次"取消→勾回"仍走整平台全选 |
 | `login_urls` / `merchants` / `platforms` | 保活按 `login_urls` 名字取地址（keepalive.py:63），`merchants` 是定时任务配对的唯一事实来源 |
 | `_abort` | 中止事件，只在商户边界生效 |
-| `_login_hint` | 首次登录的非模态提示窗句柄（旧文档里的 `_login_confirm` 事件已随"确定按钮"一起取消） |
+| `_login_hint` / `_login_hint_after` | 首次登录的非模态提示窗句柄与该窗倒计时定时器 id（旧文档里的 `_login_confirm` 事件已随"确定按钮"一起取消）。倒计时**只关提示窗**，跟"登录完成"无关；"登完了"永远只认浏览器窗口被关掉 |
 
 类常量：`LOGIN_WAIT_TIMEOUT_S = 30*60`、`LOGIN_POLL_S = 2.0`（等用户关登录窗口的上限与轮询步长）、`MERCHANT_PROBE_TIMEOUT_S = 30*60`（手工测试窗口最长占用）、`LOGIN_RETRY_LIMIT = 3`（每家登录总次数，含第一次）。测试与替身直接引用这些类属性，改成实例属性会让测试失效。
 
@@ -216,7 +216,7 @@ liushui_export/
 | `_setup_window()` | 标题、1100x700、minsize 900x550、底色；`state("zoomed")` 默认最大化（注释：Windows 下这样仍保留标题栏与任务栏），失败静默。 |
 | `_build_left_panel()` | 宽 340 且 `pack_propagate(False)`；「全选/取消全选/刷新商户」+ Canvas 滚动区放平台行与商户子行；`enabled=False` 的平台不建行。 |
 | `_build_platform_row(key, plat)` | 一个平台一行：勾选框（初值取 `selection`）、商户数徽标、`●` 状态灯（**灯控件挂在平台对象上** `plat.status_label`）、紫色 `+` 添加商户、下方商户容器。收尾若该平台已有勾上商户则把平台勾回，保证界面与状态一致。 |
-| `_build_middle_panel()` | 设置区 + 概览条 + 按钮栅格。**落盘项**：`show_browser`、`download_name_mode`(unified/original)、`enable_keepalive`+`keepalive_interval_min`、`retry_times`、`cleanup_keep_days`、`preflight_login_check`，全部 trace/`<FocusOut>` 即写；**不落盘**：日期起止（只刷概览）、「单步调试」（每次导出时从 Var 取）。⚠ Spinbox 没有 trace，靠 `<FocusOut>` 触发，所以**输入框未失焦时 settings.json 还是旧值**，而 `_ensure_browser`/`_execute_export_tasks` 读的正是文件。 |
+| `_build_middle_panel()` | 设置区 + 概览条 + 按钮栅格。**落盘项**：`show_browser`、`download_name_mode`(unified/original)、`enable_keepalive`+`keepalive_interval_min`、`retry_times`、`cleanup_keep_days`、`preflight_login_check`、`show_login_hint`+`login_hint_seconds`（首次登录提示窗的开关与倒计时秒数），全部 trace/`<FocusOut>` 即写；**不落盘**：日期起止（只刷概览）、「单步调试」（每次导出时从 Var 取）。⚠ Spinbox 没有 trace，靠 `<FocusOut>` 触发，所以**输入框未失焦时 settings.json 还是旧值**，而 `_ensure_browser`/`_execute_export_tasks` 读的正是文件。 |
 | `_build_right_panel()` | 操作日志 `ScrolledText(state=DISABLED)` + 「清空屏/历史日志/复制日志」+ 状态栏 + `determinate` 进度条。 |
 | `_rebuild_platform_list()` | **先 `_save_selection()` 再 `_load_selection()`**，重扫商户、销毁重建左栏、刷概览；`_refresh_merchants`、平台管理保存、新增商户都走它。 |
 | `_refresh_summary()` | 「已选 N 个商户 · M 个平台 [起 ~ 止]」；整段吞异常（构建早期控件未就绪时不打扰）。 |
@@ -542,7 +542,7 @@ liushui_export/
 | ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `discover_platforms()`                | `core/loader.py`   | 扫描 `platforms/` 下含 `export.py` 的文件夹（跳过 `_` 开头的目录），动态导入，找出继承 `PlatformBase` 且定义 `key` 的子类并实例化，返回 `{key: 实例}`。 |
 | `discover_merchants(platform_keys)`   | `core/main_gui.py` | 扫描 `browser_data/<平台key>/` 下的子目录，发现已建档商户，返回 `{key: [商户名]}`。                                                  |
-| `load_settings()` / `save_settings()` | `core/config.py`   | 读写 `settings.json`，缺失字段回退 `DEFAULT_SETTINGS`（8 个键，见 10 章）。                           |
+| `load_settings()` / `save_settings()` | `core/config.py`   | 读写 `settings.json`，缺失字段回退 `DEFAULT_SETTINGS`（10 个键，见 10 章）。                           |
 | `log(message, level, callback)`       | `core/logger.py`   | 统一日志：输出控制台（容错 `pythonw` 无 stdout 场景）→ 写入 `logs/run_YYYYMMDD.log` → 转发 GUI 回调。                                |
 | `check_dependencies()` / `main()`     | `core/main_gui.py` | 启动前三档依赖体检（缺包/版本不对/缺内核，见 `core/deps.py`）与引导安装；程序入口。 |
 | `report_crash(summary, detail)`       | `core/main_gui.py` | `main()` 的异常兜底：先用模块顶部已导入的 `log` 记 ERROR，再弹窗。**返回值=日志是否真写成功**，弹窗文案跟着变（写不成功就不谎称"已记录到 logs 文件夹"）。与 crashguard 的区别：这里兜的是 `main()` 内部已起来之后的异常。 |
@@ -563,7 +563,7 @@ liushui_export/
 | `apply_data_root(root, remember=True)` | 换工作空间的唯一入口：试写 → 重算派生常量 → 清 `PENDING_PICK` → 写工作空间标记 `.liushui_workspace.json` + 书签。不可写返回 `(False, 原因)`。⚠ 各模块是 `from .config import DOWNLOAD_DIR` 的**取值拷贝**，换完必须重启进程才传导（见 14 章）。 |
 | `read_pointer()` / `write_pointer()` | 书签的两个位置：程序目录 `workspace.json` 优先，写不进（只读介质）就退到 `~/.liushui_export/workspace.json`。这是全仓唯一一处 `expanduser`：权威标记在工作空间内，书签只负责"下次去哪找它"。 |
 | `default_workspace_suggestion()` | 首启给用户的默认位置：`~/Documents/流水导出工作空间`。 |
-| `DEFAULT_SETTINGS` | 8 个键的唯一默认值来源。⚠ `load_settings()` **只遍历这 8 个键**，用户在 `settings.json` 里手加的未知键会被静默丢弃。 |
+| `DEFAULT_SETTINGS` | 10 个键的唯一默认值来源。⚠ `load_settings()` **只遍历这 10 个键**，用户在 `settings.json` 里手加的未知键会被静默丢弃。 |
 | `load_settings()` | 读文件、缺字段回默认；文件缺失/坏 JSON/顶层不是 dict 三种情况都吞掉，返回值恒为完整 8 键副本。不写盘。 |
 | `write_text_atomic(path, text, tries=None)` | 同目录唯一临时名 `path.tmp-<pid>-<序号>` → write + `flush` + `os.fsync` → `_replace_with_retry`（对 Windows 的"另一个程序正在使用此文件"做默认 8 次退避重试，**累计约 1.12 秒**；`tries` 让调用方收窄）；失败时删临时文件后 **raise**（"失败的这次不算数，别留垃圾文件"）。⚠ 临时名**不许改回固定 `path+".tmp"`**：`scheduled_tasks.json` 是调度线程与主线程都会写的文件，共用一个暂存名时后开的 `open("w")` 会截断前者正在写的那份、前者的 `os.replace` 会撞 WinError 32（实测 8 线程同写 48 次里 38 次抛错，而调用方一律 `except: pass` → 静默丢改动）。⚠ 反过来，**在主线程里跑的调用不许用默认重试**（见 `save_settings`）。同目录保证 `os.replace` 不跨卷。 |
 | `save_settings(settings, ui_call=True)` | 只覆盖传入的键、返回**是否真的落盘**。全仓 6 个调用点都在 Tk 主线程（变量 `trace_add` 与按钮回调），所以默认把占用重试压到 1 次：实测文件被长期占住时走默认 8 次会让界面冻 1.13 秒。失败由 `LiushuiApp._save_setting` 转述到**界面日志窗**（`config` 只写得了文件日志）。 |
@@ -741,7 +741,8 @@ liushui_export/
 后台线程遍历该列表（不再回读界面控件）:
   _ensure_browser(plat, merchant, force_visible=True)   # 独立 profile，强制可见
   plat.login(browser)                                    # 打开登录页
-  主线程弹非模态提示窗「登录好之后直接关掉浏览器窗口即可」（不挡事，不需要点任何按钮）
+  主线程弹非模态提示窗「登录好之后直接关掉浏览器窗口即可」（不挡事，不需要点任何按钮；
+             窗自己按 login_hint_seconds 倒计时关闭，窗里可勾「以后不再弹出」→ 写 show_login_hint）
   后台线程轮询（2s 一轮，最长 30 分钟，可被「中止」打断）:
       browser.window_closed()?  → 是 → 本商户结束
       browser.login_signature() 变了? → save_login_state(quiet=True) 当场导出登录态
@@ -976,7 +977,7 @@ python -m playwright install chromium
 | `browser_data/<平台key>/<商户>/`     | 是（点 `+` 添加商户时） | Chromium 持久化 profile，登录态隔离的边界；删商户只删这一层 |
 | `browser_data/<平台key>/<商户>/login_state.json` | 保存登录态时 | `context.storage_state()` 导出的 cookie+localStorage（含 session cookie）；启动时由 `_restore_login_state` 注回 |
 | `recordings/<平台>_<商户>_<时间>.jsonl` | 点商户「打开」时 | 操作录制（点击/输入的 tag/text/id/placeholder…），喂给「录制→脚本」；已 gitignore |
-| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 前缀+原始名 / `original` 只加商户前缀）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`preflight_login_check`（导出前统一查登录，默认开；只影响手动「开始导出」，定时任务不预检）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365） |
+| `settings.json`                  | 是              | 用户设置：`show_browser`（显示/隐藏浏览器）、`download_name_mode`（`unified` 前缀+原始名 / `original` 只加商户前缀）、`enable_keepalive`（登录保活开关）、`keepalive_interval_min`（保活间隔分钟）、`retry_times`/`retry_interval_s`（失败重试次数与首次间隔）、`preflight_login_check`（导出前统一查登录，默认开；只影响手动「开始导出」，定时任务不预检）、`cleanup_keep_days`（日志/汇总副本保留天数，0=不清理，默认 365）、`show_login_hint`（首次登录弹不弹那个提示窗，默认开；窗里勾「不再弹出」写的也是它）、`login_hint_seconds`（该提示窗倒计时秒数，默认 20，夹在 3-600） |
 | `selection_state.json`            | 是              | 平台/商户勾选状态（重启恢复），同时维护内存里的 `selection` 镜像供保活线程读                          |
 | `scheduled_tasks.json`            | 是              | 定时任务持久化（`{"version":1,"jobs":[...]}`，新增/编辑后原子保存）                                    |
 | `logs/run_YYYYMMDD_HHMMSS.log`    | 是              | **每次启动一个文件**（不是按天），格式 `时间 [LEVEL] 消息`，DEBUG 级；超过 `cleanup_keep_days` 的会被清理 |
@@ -989,18 +990,18 @@ python -m playwright install chromium
 
 | 文件                       | 规模（当前实际行数）         | 作用                              |
 | ------------------------ | ------------- | ------------------------------- |
-| `core/main_gui.py`       | 2769 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制（含重试与等待）、商户增删改与刷新、日期区间校验、等待用户手工确认（`_ask_user_confirmed` 自建非模态窗）、设置改动统一经 `_save_setting`、录制/调试/平台管理对话框入口 |
+| `core/main_gui.py`       | 2978 行    | GUI 主程序与三大业务流程、导出前登录预检、界面更新队列、中止控制（含重试与等待）、商户增删改与刷新、日期区间校验、等待用户手工确认（`_ask_user_confirmed` 自建非模态窗）、首次登录提示窗（倒计时自关 + 「不再弹出」）、设置改动统一经 `_save_setting`、录制/调试/平台管理对话框入口 |
 | `core/browser.py`        | 1624 行      | 浏览器管理、下载捕获与归档（四层自写目录排除、旧件保留、归不进去落 `待确认/`）、成品校验（含格式门与多 sheet 数行）、登录态存取、操作录制（项目体量最大的核心模块） |
 | `core/scheduler.py` | 671 行 | 定时任务（cron 解析含"读不懂就报错"的判据 / `TaskStore` 保身份读写与**按任务对象**兜底 / 轮询触发 / 管理界面） |
 | `core/platform_admin.py` | 336 行 | 平台管理/脚本调试（骨架纯函数生成 + 先验语法再原子写 + DebugProbe 通用透传 + 三个弹窗） |
 | `core/exporters.py`      | 229 行       | 智能导出器（无人写 `export()` 时的默认兜底导出）  |
 | `core/platform_base.py`  | 253 行       | 平台基类（元信息 + 登录判据 + 选择器自检 + 通用导出骨架钩子 + 子商户切换/读回钩子，默认全关） |
-| `core/dialogs.py` | 338 行 | 历史日志窗口、稳定性看板与「使用说明」窗口（只依赖 `logger` + `theme`） |
+| `core/dialogs.py` | 340 行 | 历史日志窗口、稳定性看板与「使用说明」窗口（只依赖 `logger` + `theme`） |
 | `core/logger.py`         | 200 行       | 日志三通道 + 稳定性统计（`stats.jsonl` 尾部读与全量汇总） |
 | `core/cleanup.py` | 121 行 | 过期运行日志与汇总副本的按保留期清理（白名单认领文件名，原件/统计/待确认不碰） |
 | `core/loader.py`         | 112 行        | 平台加载器与免重启 reload（含清磁盘 `.pyc`） |
 | `core/instance.py` | 107 行 | 单实例守卫（在工作空间根放 `.liushui_instance.lock` 记 pid；只问不拦，判不出来一律放行），见 5.11 |
-| `core/config.py`         | 373 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写（唯一暂存名 + 可按调用方收窄的占用重试）、`save_settings` 返回是否落盘（界面那一路只试一次）|
+| `core/config.py`         | 378 行       | 路径常量、`DEFAULT_SETTINGS`、原子读写（唯一暂存名 + 可按调用方收窄的占用重试）、`save_settings` 返回是否落盘（界面那一路只试一次）|
 | `core/keepalive.py` | 96 行 | 登录保活服务（后台线程周期巡检，任务执行中跳过本轮） |
 | `core/crashguard.py` | 119 行 | 启动期崩溃兜底（堆栈落 `logs/crash_*.txt`，主线程才弹窗） |
 | `core/deps.py` | 219 行 | 依赖三档体检（缺包/版本不对/缺内核）、内核目录识别、修复命令与离线退路；不 import playwright、不碰界面，见 14.2 |
@@ -1012,7 +1013,7 @@ python -m playwright install chromium
 | `packaging/` + `.github/workflows/build-portable.yml` | — | 两个版本的启动器与说明（`run-portable.*` / `run-core.*`，纯 ASCII vbs + 可看错的 bat）和出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台共 1053 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 134 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 58 个文件约 10082 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（**692 项**）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」。**2026-09-26 本轮新增**：兜底扫描不认领 `历史/`（含"真下载仍要认领"的反向钉）、多 sheet xlsx 数行、定时任务编辑与 30 秒重载的竞态（真 Tk）、任务文件写不进盘的内存兜底与出声、cron 反向区间与永不成立的表达式、`wait_user` 的四种回话与"没人应答≠已确认"、归档失败/旧件被占用时两份文件都保留。**廿四轮巩固**：`snapshots/` 与图片不进兜底候选（含一条"名单必须等于那四个类常量"的结构钉）、同名同 cron 的两条任务各自跑、同秒两份另存/两份历史归档都在、归不进去的落 `待确认/`（含"校验判否的照旧删"反向钉）、界面那一路写盘只试一次并转述到日志窗、非模态确认窗（按钮文案/不抢 grab/超时与中止都收窗/主窗口 topmost 不被碰）、中止能掐断重试（含批量与子商户两条接线）、统计并发写一行不丢 + 单实例守卫的接管与"只问不拦"、`.gitignore` 与暂存命名必须同步、下载等待时长只有一个来源（假时钟量 + 源码扫描）。**本轮（浏览器窗口与就地更新）**：有头 `no_viewport` / 无头留默认视口 / `--window-size` 不许混进来（断言的是真正发给 Playwright 的参数，被绑定丢掉的那个 `None` 不会出现在里面）、更新的解析与闸门（只认 `-core.zip`、缺探针/混解释器/混依赖/混内核都拒、Compress-Archive 两种分隔符都认、发布页声明的字节数对不上就丢掉、全量版要求的新 playwright 与自带的不一致就拒、核心版不拦、只读程序目录只留包）、覆盖失败整批退回且新版本才有的新文件被收走且半截暂存文件不许留在程序目录、`updates/` 不在 `downloads` 树下且与 `.gitignore` 同步、脏版本号一律按"没新版"、更新组件自己抛异常时启动那一路静默而手动那一路必须有回话。**本轮（「使用说明」弹窗）**：从源码里摘主界面按钮名逐个要求说明里提到、关窗即登完与不用回来点确定、扫码那扇窗的三种收尾、账单落点与 `历史/`/`snapshots/`/`待确认/`、更新三道闸门的方向性承诺、标题行带当前版本与工作空间、纯文本里不许残留 markdown 星号、真 Tk 下正文完整落进只读文本区且三个按钮都在（没给回调时不画「打开完整使用说明」）、`_action_help` 用的确实是 `build_help_text` 而 `_open_manual_doc` 打不开时必须写一行日志。 |
+| `tests/` | 59 个文件约 10297 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（**703 项**）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」。**2026-09-26 本轮新增**：兜底扫描不认领 `历史/`（含"真下载仍要认领"的反向钉）、多 sheet xlsx 数行、定时任务编辑与 30 秒重载的竞态（真 Tk）、任务文件写不进盘的内存兜底与出声、cron 反向区间与永不成立的表达式、`wait_user` 的四种回话与"没人应答≠已确认"、归档失败/旧件被占用时两份文件都保留。**廿四轮巩固**：`snapshots/` 与图片不进兜底候选（含一条"名单必须等于那四个类常量"的结构钉）、同名同 cron 的两条任务各自跑、同秒两份另存/两份历史归档都在、归不进去的落 `待确认/`（含"校验判否的照旧删"反向钉）、界面那一路写盘只试一次并转述到日志窗、非模态确认窗（按钮文案/不抢 grab/超时与中止都收窗/主窗口 topmost 不被碰）、中止能掐断重试（含批量与子商户两条接线）、统计并发写一行不丢 + 单实例守卫的接管与"只问不拦"、`.gitignore` 与暂存命名必须同步、下载等待时长只有一个来源（假时钟量 + 源码扫描）。**本轮（浏览器窗口与就地更新）**：有头 `no_viewport` / 无头留默认视口 / `--window-size` 不许混进来（断言的是真正发给 Playwright 的参数，被绑定丢掉的那个 `None` 不会出现在里面）、更新的解析与闸门（只认 `-core.zip`、缺探针/混解释器/混依赖/混内核都拒、Compress-Archive 两种分隔符都认、发布页声明的字节数对不上就丢掉、全量版要求的新 playwright 与自带的不一致就拒、核心版不拦、只读程序目录只留包）、覆盖失败整批退回且新版本才有的新文件被收走且半截暂存文件不许留在程序目录、`updates/` 不在 `downloads` 树下且与 `.gitignore` 同步、脏版本号一律按"没新版"、更新组件自己抛异常时启动那一路静默而手动那一路必须有回话。**本轮（「使用说明」弹窗）**：从源码里摘主界面按钮名逐个要求说明里提到、关窗即登完与不用回来点确定、扫码那扇窗的三种收尾、账单落点与 `历史/`/`snapshots/`/`待确认/`、更新三道闸门的方向性承诺、标题行带当前版本与工作空间、纯文本里不许残留 markdown 星号、真 Tk 下正文完整落进只读文本区且三个按钮都在（没给回调时不画「打开完整使用说明」）、`_action_help` 用的确实是 `build_help_text` 而 `_open_manual_doc` 打不开时必须写一行日志。**本轮（登录提示窗自关）**：倒计时文案仍写"关掉浏览器窗口才算登完"（倒计时不是完成信号）、设置里勾掉开关就一个窗都不弹、倒计时到点窗口真的被销毁、手工收窗后残留心跳不许打在死控件上、用户按 X 关窗后同理（真 Tk + `report_callback_exception` 收错）、勾「不再弹出」当场落盘且同轮后面的商户不再弹、设置行秒数夹在 3-600 与乱填退回默认、设置面板上真有这一行、内容装得进写死的窗尺寸（拿最长的倒计时文案与长操作提示量，改小窗或加内容都会红）、「使用说明」里必须提到设置区的「登录提示窗」。 |
 | `start.bat` / `启动工具.vbs` | 40 / 124 行 | 源码版的启动脚本（vbs 五档找 Python；**必须保持纯 ASCII**，见 13 章）。它**不再**自己检查/安装依赖 —— 那个判断只在 `core/deps.py` + `check_dependencies()`（见 12 章第 29 条） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
@@ -1050,7 +1051,7 @@ python -m playwright install chromium
 **任务、数据与脚本**
 
 16. `settings.json` / `scheduled_tasks.json` / `selection_state.json` 三个"整体重写"的文件必须走 `write_json_atomic`，读侧才有"截断≠清空"的保证。
-17. `save_settings` 以现值为底只覆盖传入的键；`load_settings` 只认 `DEFAULT_SETTINGS` 里的 8 个键。
+17. `save_settings` 以现值为底只覆盖传入的键；`load_settings` 只认 `DEFAULT_SETTINGS` 里的 10 个键。
 18. 新建/编辑定时任务必须挪 `last_run` 起算点（`CronJob.new` / `apply_edit`），否则保存后 30 秒内就会跑一次。
 19. 平台脚本改动要免重启生效，`reload_platforms` 必须同时清 `sys.modules`、importlib 的 stat 缓存和**磁盘上的 `.pyc`**（字节码头存"截断到秒的 mtime + 字节数"，同秒等长改动会执行旧代码）。
 20. 平台脚本要保存成功才算数：先 `compile()` 再原子写（否则坏文件落盘，loader 静默跳过该平台，用户原本能跑的脚本被毁）。

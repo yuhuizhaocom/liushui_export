@@ -168,8 +168,8 @@ liushui_export/
 | `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典：注册模块内**所有**带 key 的 `PlatformBase` 子类（用 `__module__` 排除从别处 import 进来的），key 重复/模块里没有平台类/导入失败都会写日志（导入失败以前只 print，pythonw 下界面完全看不到）。`reload_platforms()` 供平台管理改完脚本后免重启生效，需同时清 `sys.modules`、importlib 的 stat 缓存和磁盘上的 `.pyc`。                                                                                                           |
 | `core/outputs.py` | **导出文件汇总**。`find_output_files`（认 `平台/日期`、`平台/商户/日期`、`平台/商户/子商户/日期` 三种结构，日期目录**最多下探两层**、找到就不再往下所以 `历史/` 不会被重复计数；跳过 `.crdownload/.tmp/.part`）、`copy_to_summary_dir`（复制到 `downloads/开始_结束_时间戳/`，无文件返回 None 因此不再打开文件夹；`summary_name` 处理撞名：两个子商户的原始文件名一模一样时加"上一级非日期目录名"前缀，绝不静默覆盖）、`sanitize_name`（路径非法字符清理，商户名与 profile 目录共用）。纯文件操作，可脱离界面测试。 |
 | `core/dialogs.py` | **查看类对话框**。`show_log_history(root)` 历史日志窗口、`show_stats_dashboard(app)` 稳定性看板；只读根窗口/状态栏，与导出流程无关。 |
-| `core/update.py` | **检查更新与就地更新**。`fetch_latest`/`parse_release` 读公开 release 仓的 `releases/latest`（只认 `-core.zip` 那个资产），`download` 下到 `updates/` 并按发布页声明的字节数核对，`inspect_package` 验结构，`apply_update` 只覆盖包内 `app/` 底下的程序文件（先备份、失败整批退回、清 `__pycache__`）。三道闸门写在模块开头：只动 `app/`、全量版要求的新 playwright 与自带的不一致就拒、程序目录只读就只留包不动文件。所有网络异常折成一句说明返回，不往外抛。 |
-| `core/version.py` | **程序版本号与发布坐标**。`APP_VERSION`（界面标题、更新比对、CI 打 tag 核对三处共用）、`RELEASE_REPO`（公开 release 仓，代码仓私有匿名读不到）、`TAG_PREFIX`，以及 `parse`/`is_newer`（脏版本号一律按"没新版"处理，不拿读不懂的数据让用户覆盖自己的程序）。 |
+| `core/update.py` | **检查更新与就地更新**。`fetch_latest`/`parse_release` 读本仓库（必须公开）`releases/latest` 里 `-core.zip` 那个资产，`download` 下到 `updates/` 并按发布页声明的字节数核对，`inspect_package` 验结构，`apply_update` 只覆盖包内 `app/` 底下的程序文件（先备份、失败整批退回、清 `__pycache__`）。三道闸门写在模块开头：只动 `app/`、全量版要求的新 playwright 与自带的不一致就拒、程序目录只读就只留包不动文件。所有网络异常折成一句说明返回，不往外抛。 |
+| `core/version.py` | **程序版本号与发布坐标**。`APP_VERSION`（界面标题、更新比对、CI 打 tag 核对三处共用）、`RELEASE_REPO`（发布所在的仓库，就是代码仓自己，所以这仓库得是公开的；CI 会拿它与 `github.repository` 对一次）、`TAG_PREFIX`，以及 `parse`/`is_newer`（脏版本号一律按"没新版"处理，不拿读不懂的数据让用户覆盖自己的程序）。 |
 | `core/theme.py` | **界面配色常量**。单独成模块供 `dialogs.py` 复用，避免反向 import `main_gui` 成环。 |
 | `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。子商户那一档另有 `supports_sub_merchants` + `switch_sub_merchant`/`current_sub_merchant`/`verifies_sub_merchant_identity`，默认全关（见 5.3）。 |
 | `core/submerchants.py` | **子商户清单与归属比对**（银联这类"主账号一次登录、切着导多份"）。清单存在工作空间 `sub_merchants.json`（键 = `平台key/商户名`，不放 settings.json：那个文件每次点勾都整体重写），坏文件回退成"按未配置处理"并把原因带出去。`clean_list` 拆分隔符 + 清洗 + 挡掉 `.`/`..`/纯点下划线名（这些会变成一级目录名）。`matches(expected, on_page)`：归一化后相等，或一方**独立出现**在另一方里（边界只认 ASCII 字母数字，所以 `8234` 不许蒙过 `8234000540`，而 `8234000540已激活` 算命中）；任何一侧为空都是"不匹配"。全角映射用逐对字典而不是 `zip` —— 长度对不齐会静默把数字翻译成别的数字。 |
@@ -620,7 +620,8 @@ liushui_export/
 
 ### 5.13 检查更新与就地更新（core/update.py、core/version.py）
 
-> 前提：更新包必须来自**匿名可读**的地方。代码仓 `yuhuizhaocom/liushui_export` 是私有的，实测匿名访问 `api.github.com/repos/.../releases/latest` 与发布页都是 404，而业务用户手上没有 GitHub 权限 —— 所以 CI 打 tag 时把同一份资产再发一份到 `version.RELEASE_REPO`（公开仓，需要一个对该仓 `contents:write` 的 `RELEASE_TOKEN` secret；没配就当场失败，不许默默只发私有仓，那样 CI 是绿的而所有人都查不到这一版）。
+> 前提：**这个仓库必须保持公开**。更新包发的就是它自己的 Release —— 私有仓的 `releases/latest` 与发布页匿名访问实测都是 404，而拿到绿色包的业务用户没有 GitHub 权限，转回私有等于所有人的「检查更新」永远查不到新版。（最初设计成"另开一个公开 release 仓 + `RELEASE_TOKEN`"，2026-09-28 定为单仓公开，CI 里那两步已删；`version.RELEASE_REPO` 由「核程序版本」那一步与 `github.repository` 对一次，搬仓/改名忘了同步代码会当场红。）
+> 转公开前有一件事必须先看：仓库历史会一起公开，任何一版提交里出现过的登录态/cookie/商户名都永久可翻，即使后来删了。
 > 只下 `-core.zip`（几 MB）而不是 `-full`（自带解释器+依赖+内核，上百 MB）：两个包的程序部分逐字相同（`build_portable.APP_ITEMS`），所以小包装得下"换代码"这件事，业务机器也下得动。
 
 | 成员 | 说明 |
@@ -1104,7 +1105,7 @@ python -m playwright install chromium
 48. **在 Tk 主线程里写文件的那一路不许做"有界重试"，且失败必须说出口**。`write_text_atomic` 默认对 Windows 的瞬时占用退避重试 8 次（累计约 1.12 秒）——后台线程（调度器写 `last_run`、子商户清单）等得起，界面等不起：全仓 6 个 `save_settings` 调用点都在变量 `trace_add` 与按钮回调里，实测文件被长期占住时**点一下勾冻 1.13 秒**。所以 `save_settings(..., ui_call=True)` 把重试压到 1 次、返回 bool，并由 `LiushuiApp._save_setting` 把失败转述到**界面日志窗**（`config` 不认识界面，只写得进文件日志；用户看的是这个窗口）。这几个 json 的读侧一律是 `except → 用默认值/返回空`，所以"写失败还静默"等于骗人。
 49. **「中止」必须贯穿到每一次等待里，而不只是商户边界**。第 14 条说"中止只在边界生效、不许中途掐浏览器"—— 而两次尝试之间的等待正是边界。`run_with_retry` 以前完全不看中止信号：按下「中止」后当前那一家仍会把 2 次重试跑满、中间还要睡 30+60=90 秒，界面上"正在中止…"就那么挂着几分钟。现在 `run_with_retry(..., aborted=self._aborted)` 两处都看（决定重试前看一眼；等待走 `_sleep_or_aborted`，分段睡、每片看一眼），批量循环与子商户循环都接上。同类要求适用于所有"工作线程等主线程答复"的地方（`_ask_user_confirmed` 已按此改成可打断的非模态窗）。
 50. **追加写的统计文件必须加锁；跨进程的重复实例必须问一句**。`record_stat` 无锁时实测同进程 10 线程各写 100 行只落 964 行、**0 个坏行** —— 整条静默消失，看板分母凭空变小，而 `load_stats` 对坏行是 except 跳过，所以谁也看不见（写它的线程不止一个：任务线程收尾与导出前预检那一路都落统计）。锁只挡同进程；跨进程那一层由 `core/instance.py` 的单实例守卫去问，口径与第 28 条一致（**只问不拦**：锁可能是上次崩溃留下的，拦死就等于让人永远开不了）。
-51. **就地更新只许换 `app/` 底下的程序文件，三道闸门一条都不许松**。`core/update.py` 是"只换代码不换依赖"的通道：① 只覆盖包内 `app/` 的成员，顶层启动器/README 属整包替换，本地多出来的文件（可能是用户自己加的平台脚本）一律不删；② 新代码要求的 playwright 与本包自带的不一致就必须拒 —— 内核目录名带版本，混版本直接起不来，换完用户得到的是一个双击没反应的包；③ 程序目录只读时不许覆盖，只把包留在 `updates/` 并给出解压位置。另外 `updates/` 必须待在**工作空间里而不在 `downloads` 树下**（第 8 条那张兜底扫描会把"本轮新出现的文件"认领成账单，几百 MB 的 zip 冒进去就是拿错人的对账单）；发布源必须是匿名可读的公开仓，代码仓私有实测 404，配不上 `RELEASE_TOKEN` 就让 CI 失败，不许"绿着但没人更新得到"。`tests/test_update.py` 逐条钉着（含"覆盖失败必须整批退回"和"半截暂存文件不许留在程序目录"）。
+51. **就地更新只许换 `app/` 底下的程序文件，三道闸门一条都不许松**。`core/update.py` 是"只换代码不换依赖"的通道：① 只覆盖包内 `app/` 的成员，顶层启动器/README 属整包替换，本地多出来的文件（可能是用户自己加的平台脚本）一律不删；② 新代码要求的 playwright 与本包自带的不一致就必须拒 —— 内核目录名带版本，混版本直接起不来，换完用户得到的是一个双击没反应的包；③ 程序目录只读时不许覆盖，只把包留在 `updates/` 并给出解压位置。另外 `updates/` 必须待在**工作空间里而不在 `downloads` 树下**（第 8 条那张兜底扫描会把"本轮新出现的文件"认领成账单，几百 MB 的 zip 冒进去就是拿错人的对账单）；发布源就是**代码仓自己的 Release，所以这仓库必须保持公开**（私有仓匿名访问实测 404，用户没有 GitHub 权限，转回私有等于所有人都更新不到）；转公开之前先扫一遍 git 历史 —— 登录态、cookie、商户名只要出现在任何一版提交里就永久可翻，光删当前文件没用。`tests/test_update.py` 逐条钉着（含"覆盖失败必须整批退回"和"半截暂存文件不许留在程序目录"）。
 
 ***
 

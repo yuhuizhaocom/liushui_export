@@ -45,6 +45,7 @@ def test_close_window_is_the_login_done_signal():
 
 @pytest.mark.parametrize("label", _bar_labels() + [
     "开始导出", "全选", "刷新商户", "子商户", "打开", "删", "清空屏", "复制日志",
+    "登录提示窗",
 ])
 def test_everything_on_the_screen_is_explained(label):
     assert label in _text(), "使用说明里没提到「%s」这个按钮" % label

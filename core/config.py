@@ -257,6 +257,8 @@ DEFAULT_SETTINGS = {
     "retry_interval_s": 30,          # 首次重试间隔秒(后续递增×2)
     "preflight_login_check": True,   # 导出前统一查登录: 失效的一次列出、集中重登(定时任务不查)
     "cleanup_keep_days": 365,        # 老日志/老汇总副本保留天数(0=不清理)
+    "show_login_hint": True,         # 首次登录时弹不弹那个"请登录"提示窗(窗里勾"不再弹出"也会改这里)
+    "login_hint_seconds": 20,        # 该提示窗自己倒计时几秒关闭(3-600; 关的是提示窗, 不是登录等待)
 }
 
 

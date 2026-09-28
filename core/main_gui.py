@@ -337,6 +337,7 @@ class LiushuiApp:
                                             ignored=self._ignored_profile_dirs)
         self.selection = self._load_selection()   # 上次勾选状态(重启后恢复)
         self._login_hint = None        # 首次登录的非模态提示窗(登录完关掉浏览器窗口即算完成)
+        self._login_hint_after = None  # 该窗口的倒计时定时器 id(关窗时要撤掉, 否则回调打在死控件上)
         self._abort = threading.Event()          # 中止请求: 在任务边界生效(见 _aborted)
 
         self._setup_window()
@@ -717,6 +718,29 @@ class LiushuiApp:
                        activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
         tk.Label(pre_row, text="(失效的一次列出, 集中登录后再开导)", bg=BG_PANEL,
                  fg="#95a5a6", font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
+
+        # 首次登录的提示窗(倒计时自己关 + 可勾"不再弹出", 见 _show_login_hint)
+        hint_row = tk.Frame(middle, bg=BG_PANEL)
+        hint_row.pack(fill=tk.X, pady=(2, 0))
+        self.login_hint_var = tk.BooleanVar(value=bool(self.settings.get(
+            "show_login_hint", DEFAULT_SETTINGS.get("show_login_hint", True))))
+        self.login_hint_var.trace_add("write", self._on_hint_setting)
+        tk.Checkbutton(hint_row, variable=self.login_hint_var, text="登录提示窗",
+                       bg=BG_PANEL, fg=FG_MUTED, font=("Microsoft YaHei", 9),
+                       activebackground=BG_PANEL).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(hint_row, text="自动关(秒):", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.hint_seconds = tk.Spinbox(hint_row, from_=3, to=600, increment=5, width=5,
+                                       font=("Microsoft YaHei", 9))
+        self.hint_seconds.delete(0, tk.END)
+        self.hint_seconds.insert(0, str(int(self.settings.get(
+            "login_hint_seconds", DEFAULT_SETTINGS.get("login_hint_seconds", 20)))))
+        self.hint_seconds.bind("<FocusOut>", lambda *_: self._on_hint_setting())
+        self.hint_seconds.bind("<Return>", lambda *_: self._on_hint_setting())
+        self.hint_seconds.pack(side=tk.LEFT)
+        tk.Label(hint_row, text="(勾掉就不再弹; 关的是提示窗, 不影响等登录)",
+                 bg=BG_PANEL, fg="#95a5a6", font=("Microsoft YaHei", 8)
+                 ).pack(side=tk.LEFT, padx=(6, 0))
 
         # 单步调试开关(脚本调试时开启,导出流程每步暂停弹"继续/中止")
         debug_row = tk.Frame(middle, bg=BG_PANEL)
@@ -1106,6 +1130,37 @@ class LiushuiApp:
         self.settings["cleanup_keep_days"] = days
         self._append_log(f"[设置] 日志/汇总副本保留 {days} 天"
                          f"{'(已关闭自动清理)' if days == 0 else ''},下次启动时生效")
+
+    def _on_hint_setting(self, *_):
+        """登录提示窗的开关与倒计时秒数, 改动即时保存(下次弹窗就用新值)。"""
+        enabled = bool(self.login_hint_var.get())
+        try:
+            seconds = int(str(self.hint_seconds.get()).strip())
+        except Exception:
+            seconds = int(DEFAULT_SETTINGS.get("login_hint_seconds", 20))
+        seconds = max(3, min(600, seconds))
+        self._save_setting(show_login_hint=enabled, login_hint_seconds=seconds)
+        self.settings["show_login_hint"] = enabled
+        self.settings["login_hint_seconds"] = seconds
+
+    def _hint_seconds(self):
+        """本次提示窗倒计时几秒: 设置里读不到合理数字就退回默认(20)。"""
+        try:
+            return max(3, min(600, int(self.settings.get("login_hint_seconds", 20))))
+        except Exception:
+            return 20
+
+    def _remember_no_hint(self, no_more):
+        """提示窗里勾/取消"不再弹出": 当场写盘, 后面的商户与下次启动都不再弹。
+
+        存的是 `show_login_hint`(=弹不弹), 跟窗里那个勾**相反** —— 设置面板上的
+        「登录提示窗」是正向的, 两处读写同一个键, 在哪儿改都能改回来。
+        """
+        show = not no_more
+        self.settings["show_login_hint"] = show
+        self._save_setting(show_login_hint=show)
+        self._append_log("已记住: 以后不再弹这个登录提示窗(设置里可改回来)"
+                         if no_more else "已记住: 以后还是弹这个登录提示窗")
 
     def __iter_merchants(self):
         """供保活复用的迭代: (platform_key, merchant)。
@@ -1755,17 +1810,24 @@ class LiushuiApp:
         """商户名清理(去除路径非法字符);空结果返回空串以便提示用户重填。"""
         return sanitize_name(name)
 
+    # 提示窗倒计时的心跳(毫秒); 秒数本身在设置里(login_hint_seconds)
+    LOGIN_HINT_TICK_MS = 1000
+
     def _show_login_hint(self, plat_name, merchant, guide):
         """主线程弹一个**不挡事**的提示窗: 登录完直接关掉浏览器窗口, 不用回来点确定。
 
         用 Toplevel 而不是 messagebox: 模态框又要把人拽回来点一下, 正是这次要去掉的
-        动作。窗口只提示, 不参与流程。
+        动作。窗口只提示, 不参与流程 —— 它自己倒计时关掉**不代表**登录完成了, "登完了"
+        的信号只有那个浏览器窗口被关掉(见 _wait_login_window_closed)。所以这里既做
+        倒计时自关(不留一扇浮在桌面上的窗), 又给一个"不再弹出"(老手不用每次看它)。
         """
+        if not self.settings.get("show_login_hint", True):
+            return
         try:
             win = tk.Toplevel(self.root)
             win.title("请登录")
             win.configure(bg=BG_PANEL)
-            win.geometry("440x190")
+            win.geometry("460x280")   # 比内容略高: 操作提示换行多一行时也不至于切掉
             win.attributes("-topmost", True)
             tk.Label(win, text=f"{plat_name} · {merchant}", bg=BG_PANEL, fg=FG_MAIN,
                      font=("Microsoft YaHei", 11, "bold")).pack(pady=(14, 2))
@@ -1775,9 +1837,44 @@ class LiushuiApp:
                      bg=BG_PANEL, fg=FG_MAIN, justify="left",
                      font=("Microsoft YaHei", 10)).pack(padx=16, pady=6)
             tk.Label(win, text=f"操作提示: {guide}", bg=BG_PANEL, fg=FG_MUTED,
-                     wraplength=400, justify="left",
-                     font=("Microsoft YaHei", 9)).pack(padx=16, pady=(0, 12))
+                     wraplength=420, justify="left",
+                     font=("Microsoft YaHei", 9)).pack(padx=16, pady=(0, 6))
+            left = tk.IntVar(value=self._hint_seconds())
+            countdown = tk.Label(win, text="", bg=BG_PANEL, fg=FG_MUTED,
+                                 font=("Microsoft YaHei", 9))
+            countdown.pack(padx=16, pady=(0, 2))
+            no_more = tk.BooleanVar(value=False)
+            tk.Checkbutton(win, text="以后不再弹出这个提示(设置里可改回来)",
+                           variable=no_more, bg=BG_PANEL, fg=FG_MUTED,
+                           activebackground=BG_PANEL, selectcolor=BG_PANEL,
+                           font=("Microsoft YaHei", 9),
+                           command=lambda: self._remember_no_hint(no_more.get())
+                           ).pack(padx=16, pady=(0, 10))
+
+            def alive():
+                """窗还活着吗 —— 用户可能自己按了右上角的 X, 那时 _login_hint 还指着它。"""
+                try:
+                    return self._login_hint is win and bool(win.winfo_exists())
+                except Exception:
+                    return False
+
+            def paint():
+                countdown.config(text="本提示 %d 秒后自动关闭(不影响登录)" % left.get())
+
+            def tick():
+                if not alive():
+                    return          # 已经关掉了(手工/自己按 X/收尾), 别再往死控件上写
+                n = left.get() - 1
+                if n <= 0:
+                    self._close_login_hint()
+                    return
+                left.set(n)
+                paint()
+                self._login_hint_after = win.after(self.LOGIN_HINT_TICK_MS, tick)
+
+            paint()
             self._login_hint = win
+            self._login_hint_after = win.after(self.LOGIN_HINT_TICK_MS, tick)
         except Exception as e:
             # 提示窗弹不出来不影响登录(浏览器窗口本身就是登录页), 但要说一声
             self._append_log(f"[提示] 登录提示窗没弹出来: {e}")
@@ -1787,6 +1884,13 @@ class LiushuiApp:
         self._login_hint = None
         if win is None:
             return
+        after = self._login_hint_after
+        self._login_hint_after = None
+        if after is not None:
+            try:
+                win.after_cancel(after)
+            except Exception:
+                pass
         try:
             win.destroy()
         except Exception:

@@ -116,6 +116,30 @@ def test_is_newer_compares_against_the_installed_version():
     assert ver.is_newer("vportable_0.0.10", "vportable_0.0.9") is True
 
 
+def test_both_tag_spellings_parse():
+    """0.0.7 起 tag 是 `v0.0.7`; 已经发出去的 0.0.1~0.0.6 还是 `vportable_0.0.x`。
+
+    发布页的 latest 可能仍是旧写法, 认不出来就等于"永远没有新版"。
+    """
+    assert ver.parse("v0.0.7") == (0, 0, 7)
+    assert ver.parse("vportable_0.0.6") == (0, 0, 6)
+    assert ver.parse("0.0.6") == (0, 0, 6)
+    assert up.is_newer(release(tag="v0.10.0"), local="0.9.9") is True
+    assert ver.is_newer("v0.10.0", "v0.9.9") is True
+
+
+def test_the_tag_ci_pushes_is_the_one_the_app_can_read():
+    """CI 用 `TAG_PREFIX + APP_VERSION` 拼要打的 tag, 程序再把它解析回来比版本。
+
+    两头用的是同一个常量, 但拼法/剥法只要有一边改了, 这条就红 —— 否则发出去的 tag
+    程序永远认不出, 而这在界面上只表现为"没更新"。
+    """
+    tag = ver.TAG_PREFIX + ver.APP_VERSION
+    assert ver.parse(ver.APP_VERSION) is not None
+    assert ver.parse(tag) == ver.parse(ver.APP_VERSION)
+    assert ver.APP_VERSION.replace(".", "").isdigit(), "APP_VERSION 只该是纯三段数字"
+
+
 # ===== 包的结构校验 =====
 
 def test_inspect_accepts_a_real_core_package(tmp_path):

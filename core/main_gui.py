@@ -42,7 +42,8 @@ from core.keepalive import KeepAliveService
 from core.theme import (BG_MAIN, BG_PANEL, BG_BUTTON, BG_BUTTON_HOVER,
                         BG_SUCCESS, BG_WARN, BG_ERROR, BG_LOG, FG_LOG,
                         FG_MAIN, FG_MUTED)
-from core.dialogs import show_log_history, show_stats_dashboard
+from core.dialogs import (show_log_history, show_stats_dashboard,
+                          show_help, build_help_text)
 from core.scheduler import pair_job_targets
 
 
@@ -1513,22 +1514,24 @@ class LiushuiApp:
             self.set_platform_status(plat.key, "error")
 
     def _action_help(self):
-        """弹出简要使用说明"""
-        messagebox.showinfo(
-            "使用说明",
-            "【使用步骤】\n\n"
-            "1. 添加商户: 点平台右侧的 [ + ] 输入商户名称\n"
-            "2. 首次登录: 勾选商户后点\"首次登录\",在弹出的浏览器里完成登录,\n"
-            "   然后【直接关掉这个浏览器窗口】就代表登完了(不用在页面里找按钮)\n"
-            "   每个商户只需登录一次,登录状态会自动保存\n"
-            "3. 导出流水: 选好日期,点\"开始导出\"并确认,等待完成\n"
-            "   开跑前会自动查一遍各商户还在不在登录态,失效的一次列出来问您\n"
-            "   跑的过程中可点\"中止\",它会把手上这一家做完再停,不会留下半截文件\n"
-            "4. 查看结果: 导出完成后自动打开汇总文件夹\n\n"
-            "【提示】\n"
-            "- 勾选框控制哪些平台/商户参与本次操作\n"
-            "- 可随时点\"检查登录状态\"确认是否已登录\n"
-            "- 导出文件在 downloads 目录,按 平台/商户/日期 存放")
+        """打开「使用说明」窗口。
+
+        以前这里是一整串 messagebox.showinfo 参数: 那种框不能滚动, 长了只看得见开头几行,
+        而界面上十来个按钮(检查更新/子商户/定时任务/录制→脚本/稳定性看板/工作空间…)
+        压根没写进去。文案抽到 `dialogs.build_help_text`(纯函数), 窗口只负责显示,
+        改流程时 tests/test_action_help_text.py 盯着文案别退回旧说法。
+        """
+        show_help(self.root,
+                  build_help_text(version=APP_VERSION, data_root=workspace.DATA_ROOT),
+                  on_open_manual=self._open_manual_doc)
+
+    def _open_manual_doc(self):
+        """打开随包的《使用说明.md》; 打不开就在日志里说清它在哪, 不许什么都不说。"""
+        path = os.path.join(workspace.ROOT_DIR, "使用说明.md")
+        try:
+            os.startfile(path)
+        except Exception as e:
+            self._append_log(f"[说明] 没能打开完整使用说明({str(e)[:60]}), 文件在: {path}")
 
     def _open_platform_manager(self):
         """打开平台管理弹窗(新增/编辑脚本)。"""

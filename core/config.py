@@ -160,6 +160,9 @@ def _derive(root):
         "BROWSER_DATA_DIR": os.path.join(root, "browser_data"),
         "LOG_DIR": os.path.join(root, "logs"),
         "RECORDINGS_DIR": os.path.join(root, "recordings"),
+        # 更新包的暂存与旧文件备份。**必须在 downloads 之外**: 兜底扫描认的是"本轮新出现
+        # 的文件", 几百 MB 的 zip 冒进账单树就会被认领成某家商户的对账单。
+        "UPDATE_DIR": os.path.join(root, "updates"),
         "SETTINGS_FILE": os.path.join(root, "settings.json"),
         "SCHEDULED_TASKS_FILE": os.path.join(root, "scheduled_tasks.json"),
         "SELECTION_FILE": os.path.join(root, "selection_state.json"),

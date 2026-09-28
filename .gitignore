@@ -13,6 +13,8 @@
 /scheduled_tasks.json
 /recordings/
 /selection_state.json
+# 更新包暂存与旧文件备份(core/config.UPDATE_DIR, 由 core/update.py 写)
+/updates/
 # 工作空间书签(记录"产出空间在哪", 每台机器不同)
 /workspace.json
 /.liushui_workspace.json

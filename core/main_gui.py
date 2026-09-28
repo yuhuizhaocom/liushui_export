@@ -31,6 +31,8 @@ from core.config import (DOWNLOAD_DIR, BROWSER_DATA_DIR, DEFAULT_SETTINGS,
                          write_json_atomic)
 from core import config as workspace        # 工作空间: 解析结果/更换入口都从这里走
 from core import submerchants               # 子商户清单与归属比对(银联这类一次登录导多份)
+from core import update as updater          # 检查更新/就地更新(只换程序文件)
+from core.version import APP_VERSION
 from core.logger import log, list_history_logs, LOG_DIR, record_stat, load_stats, summarize_stats
 from core import logger as logger_module    # LOGGER_NOTES: 日志目录退到临时目录时的说明
 from core.loader import discover_platforms, reload_platforms
@@ -362,6 +364,9 @@ class LiushuiApp:
         # 老日志/老汇总副本的清理: 后台跑一次, 不挡界面也不碰账单原件
         self._start_cleanup()
 
+        # 启动后悄悄查一次有没有新版: 只往日志写一行, 不弹窗、不挡导出(内网查不到是常态)
+        self._start_update_check()
+
     def _run_cleanup_once(self):
         """跑一次清理并把结果写日志。
 
@@ -384,7 +389,9 @@ class LiushuiApp:
         threading.Thread(target=self._run_cleanup_once, daemon=True).start()
 
     def _setup_window(self):
-        self.root.title("流水自动导出工具 v1.0")
+        # 版本号以前写死成 v1.0, 而发布用的其实是 vportable_0.0.x —— 用户报问题时看不出
+        # 自己手上是哪一版。现在跟着 core/version.APP_VERSION 走(CI 打 tag 时核一致)。
+        self.root.title(f"流水自动导出工具 v{APP_VERSION}")
         self.root.geometry("1100x700")
         self.root.minsize(900, 550)
         self.root.configure(bg=BG_MAIN)
@@ -735,6 +742,7 @@ class LiushuiApp:
         bar.grid_rowconfigure(2, weight=1)
         bar.grid_rowconfigure(3, weight=1)
         bar.grid_rowconfigure(4, weight=1)
+        bar.grid_rowconfigure(5, weight=1)
 
         others = [
             ("首次登录", self._action_login_all, BG_BUTTON, 0, 0),
@@ -747,6 +755,7 @@ class LiushuiApp:
             ("录制→脚本", self._open_recording_dialog, "#8e44ad", 3, 1),
             ("稳定性看板", self._open_stats_dialog, "#16a085", 4, 0),
             ("工作空间", self._action_workspace, "#34495e", 4, 1),
+            ("检查更新", self._action_check_update, "#7f8c8d", 5, 0),
         ]
         for t, cmd, col, r, c in others:
             tk.Button(bar, text=t, command=cmd, bg=col, fg="white",
@@ -764,7 +773,7 @@ class LiushuiApp:
                                    bg=BG_ERROR, fg="white",
                                    font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
                                    state=tk.DISABLED, cursor="hand2")
-        self.abort_btn.grid(row=2, column=2, rowspan=3, padx=3, pady=3, sticky="nsew")
+        self.abort_btn.grid(row=2, column=2, rowspan=4, padx=3, pady=3, sticky="nsew")
 
     def _request_abort(self):
         """请求中止正在跑的任务。
@@ -1293,6 +1302,99 @@ class LiushuiApp:
         path = os.path.abspath(DOWNLOAD_DIR)
         os.makedirs(path, exist_ok=True)
         os.startfile(path)
+
+    # ===== 检查更新(只换程序文件, 闸门都在 core/update.py) =====
+
+    def _action_check_update(self):
+        """「检查更新」: 先查, 确实有新版才问, 点头才动手。
+
+        查询这一步不占 running —— 网络慢 6 秒不该把导出挡在门外; 真要覆盖文件了才交给
+        _run_async, 那时导出与定时任务都会自动让路(同一时间只该有一件事在改程序目录)。
+        """
+        threading.Thread(target=self._update_check_worker, args=(True,), daemon=True).start()
+
+    def _start_update_check(self):
+        """启动后后台查一次: 只往日志写一行, 绝不弹窗 —— 内网机器每次启动弹一次是骚扰。"""
+        threading.Thread(target=self._update_check_worker, args=(False,), daemon=True).start()
+
+    def _update_check_worker(self, manual):
+        """子线程: 只碰网络, 所有弹窗都投递回主线程(在非主线程拉 Tk 窗口可能把界面吊住)。"""
+        try:
+            release, why = updater.fetch_latest()
+        except Exception as e:            # fetch_latest 自己已经折过异常, 这是第二道保险
+            self._append_log(f"[更新] 检查没跑成({str(e)[:60]}), 不影响使用")
+            if manual:                    # 用户点了按钮就得有回话, 不能只默默写日志
+                self._ui(lambda: messagebox.showwarning(
+                    "检查更新", "检查更新这一步自己出错了:\n\n%s\n\n程序一切照常。" % str(e)[:200]))
+            return
+        if release is None:
+            self._append_log(f"[更新] 没查到新版本({why[:70]}), 不影响继续使用")
+            if manual:
+                self._ui(lambda: messagebox.showwarning(
+                    "检查更新", "没能查到新版本:\n\n%s\n\n程序一切照常, 这一条只是问一句。" % why))
+            return
+        if not updater.is_newer(release):
+            self._append_log(f"[更新] 已是最新版({release.tag})")
+            if manual:
+                self._ui(lambda: messagebox.showinfo(
+                    "检查更新", "已经是最新版了(%s)。" % release.tag))
+            return
+        self._append_log(f"[更新] 发现新版本 {release.tag}, 当前 v{APP_VERSION}; "
+                         f"发布页 {release.page_url}")
+        if manual:
+            self._ui(lambda: self._ask_apply_update(release))
+        else:
+            self._append_log("[更新] 要升级就点「检查更新」: 只换程序文件, 账单与登录态都不碰")
+
+    def _ask_apply_update(self, release):
+        """主线程: 问一句。答"是"之后才开始改文件。"""
+        if self.running:
+            messagebox.showwarning("提示", "已有任务在跑, 等它结束再点「检查更新」。")
+            return
+        if not messagebox.askyesno(
+                "发现新版本",
+                "最新版 %s, 当前 v%s。\n\n要现在下载并替换程序文件吗?\n"
+                "  · 只换 core/ platforms/ tools/ 和说明文档, 账单、登录态、日志都不碰\n"
+                "  · 被替换的旧文件先备份到 更新目录/backup/\n"
+                "  · 换完要重启工具才生效\n\n发布页: %s"
+                % (release.tag, APP_VERSION, release.page_url)):
+            self._append_log("[更新] 用户选择暂不更新")
+            return
+        if not self._run_async(lambda: self._update_apply_worker(release)):
+            self._append_log("[更新] 刚好有任务在跑, 这次没更新")
+
+    def _update_apply_worker(self, release):
+        """任务线程: 下载 → 三道闸门 → 覆盖。每一步失败都保持原样并把话说清。"""
+        path, why = updater.download(release)
+        if not path:
+            self._notify_update_failed(why)
+            return
+        self._append_log(f"[更新] 核心包已下到 {path}")
+        ok, why = updater.dependency_gate(path)
+        if not ok:
+            self._park_package(path, why)
+            return
+        ok, why = updater.program_writable()
+        if not ok:
+            self._park_package(path, "程序目录不能写入(%s)" % why)
+            return
+        done, msg = updater.apply_update(path, log=self._append_log)
+        if not done:
+            self._notify_update_failed(msg)
+            return
+        self._append_log(f"[更新] {msg}")
+        self._ui(lambda: messagebox.showinfo(
+            "更新完成", msg + "\n\n现在关掉这个窗口再重开, 用的就是新版本。"))
+
+    def _notify_update_failed(self, msg):
+        self._append_log(f"[更新] {msg}")
+        self._ui(lambda: messagebox.showerror("更新没做成", msg + "\n\n现有程序一个字没改。"))
+
+    def _park_package(self, path, why):
+        """闸门没过: 一个字不改, 但把已经下好的包留在原地并说清在哪。"""
+        self._append_log(f"[更新] 没有更新: {why}(包留在 {path})")
+        self._ui(lambda: messagebox.showwarning(
+            "没有更新", "%s\n\n下载好的包留在:\n%s" % (why, path)))
 
     def _report_paths(self):
         """启动时把"东西存哪儿"和两处兜底一次说清。

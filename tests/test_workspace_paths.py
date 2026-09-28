@@ -20,6 +20,7 @@ import core.logger as logger_module
 
 MAPPING = {"downloads": "DOWNLOAD_DIR", "browser_data": "BROWSER_DATA_DIR",
            "logs": "LOG_DIR", "recordings": "RECORDINGS_DIR",
+           "updates": "UPDATE_DIR",
            "settings.json": "SETTINGS_FILE",
            "scheduled_tasks.json": "SCHEDULED_TASKS_FILE",
            "selection_state.json": "SELECTION_FILE"}
@@ -27,14 +28,15 @@ MAPPING = {"downloads": "DOWNLOAD_DIR", "browser_data": "BROWSER_DATA_DIR",
 
 @pytest.mark.parametrize("sub,const", sorted(MAPPING.items()))
 def test_every_path_hangs_off_the_data_root(sub, const):
-    """工作空间换到哪儿, 七个路径就都跟到哪儿 —— 一处算, 别处不许再自己拼。"""
+    """工作空间换到哪儿, 这些路径就都跟到哪儿 —— 一处算, 别处不许再自己拼。"""
     d = cfg._derive("D:/流水数据")
     assert os.path.normpath(d[const]) == os.path.normpath(os.path.join("D:/流水数据", sub))
 
 
 def test_derived_names_cover_exactly_the_public_constants():
     assert set(cfg._derive("x")) == {"DATA_ROOT", "DOWNLOAD_DIR", "BROWSER_DATA_DIR",
-                                     "LOG_DIR", "RECORDINGS_DIR", "SETTINGS_FILE",
+                                     "LOG_DIR", "RECORDINGS_DIR", "UPDATE_DIR",
+                                     "SETTINGS_FILE",
                                      "SCHEDULED_TASKS_FILE", "SELECTION_FILE",
                                      "SUB_MERCHANTS_FILE"}
 

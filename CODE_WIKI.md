@@ -627,7 +627,7 @@ liushui_export/
 | 成员 | 说明 |
 | --- | --- |
 | `version.APP_VERSION` | 全仓唯一的版本出处（标题、远端比对、CI 核 tag）。以前版本只活在 tag 里，界面标题写死"v1.0"而实际发到 `vportable_0.0.6`，用户报问题时报不出自己那一版。 |
-| `version.parse` / `is_newer` | 剥 `vportable_` 前缀取数字段，补零后比较（`0.0.10 > 0.0.9`）。任一边走不出数字 → `is_newer` 返回 False：不拿读不懂的数据让用户去覆盖自己的程序。 |
+| `version.parse` / `is_newer` | 剥前缀取数字段，补零后比较（`0.0.10 > 0.0.9`）。前缀现在是 `TAG_PREFIX = "v"`（0.0.7 起 tag 直接叫 `v0.0.7`），但 `LEGACY_TAG_PREFIXES` 里留着 `vportable_`：0.0.1~0.0.6 发出去的就是那种写法，发布页的 latest 可能还是它，认不出来就等于"永远没有新版"。任一边走不出数字 → `is_newer` 返回 False：不拿读不懂的数据让用户去覆盖自己的程序。CI 拼 tag 也用的这两个常量，`tests/test_update.py` 有一条把"CI 拼出来的 tag"再解析回来对一遍。 |
 | `fetch_latest(timeout=6, opener=None)` | 查 `releases/latest` → `(Release|None, 原因)`。HTTP 错误、连不上、返回不是 JSON 全部折成第二项返回，**不抛**；匿名限额撞到 403 也只当"这次没查到"。`opener` 是给测试注入口的（CI 离线）。 |
 | `parse_release(payload)` | 只认名字以 `-core.zip` 结尾的资产；挑错成全量版就等于"重下整个包"。没有核心包时把资产个数与前三个名字带进原因，方便看是发错了还是仓没同步。 |
 | `download(release, ...)` | 下到 `updates/`（`config.UPDATE_DIR`，**在 downloads 之外**：兜底扫描会把"本轮新出现的文件"认领成账单，几百 MB 的 zip 冒进去就是事故）。发布页写了 size 就逐字节核对，对不上删掉重来，不许留半成品。 |

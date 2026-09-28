@@ -1,7 +1,8 @@
 """检查更新与就地更新: 只换程序文件, 不碰依赖、内核、账单、登录态。
 
-发布链: 代码仓打 tag `vportable_<版本>` → CI 出两个 zip → 资产同时发到**公开的 release 仓**
-(version.RELEASE_REPO)。走公开仓是前提: 代码仓私有, 匿名读不到它的 Release(实测 404)。
+发布链: 代码仓打 tag `vportable_<版本>` → CI 出两个 zip → 资产发到这仓库自己的 Release
+(version.RELEASE_REPO 就是代码仓)。所以**这仓库必须保持公开**: 私有仓的 Release 匿名访问
+实测 404, 而拿到绿色包的业务用户手里没有 GitHub 权限 —— 转回私有等于所有人的更新都查不到。
 
 只下核心版 zip 的理由: 全量版上百 MB(自带解释器+依赖+内核), 业务机器上下不动, 而两个包的
 程序部分完全一样(build_portable 的 APP_ITEMS), 所以几 MB 的核心包就够把程序文件换掉。

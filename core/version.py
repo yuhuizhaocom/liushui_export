@@ -3,8 +3,7 @@
 只用标准库、单独成模块, 为的是三处都能廉价读它: 界面标题、「检查更新」(core/update.py)、
 以及 CI 打 tag 时核"tag 与常量是否同一个版本"。以前版本只活在 `vportable_0.0.6` 这种 tag 里,
 代码里一处都没有, 用户问"手上这份是哪版"没人答得出。
-公开 release 仓与代码仓分开是必要的: 代码仓私有, 匿名读不到它的 Release(实测 api 与网页都
-是 404), 而业务用户手里没有 GitHub 权限 —— 更新包必须放在匿名可下载的地方。
+发布坐标见下面的 RELEASE_REPO: 用代码仓自己的 Releases, 前提是这个仓库是**公开的**。
 """
 
 APP_VERSION = "0.0.6"
@@ -12,8 +11,10 @@ APP_VERSION = "0.0.6"
 # tag 的前缀。历史上带 "portable" 是为了区分"绿色包"和其他 tag, 解析时要剥掉。
 TAG_PREFIX = "vportable_"
 
-# 只放成品 zip 的公开仓库(代码仓保持私有)。改名要连 CI 里那一步一起改。
-RELEASE_REPO = "yuhuizhaocom/liushui-export-releases"
+# 「检查更新」的发布坐标就是**代码仓自己的 Releases**。
+# 前提是这仓库保持公开: 私有仓的 Release 匿名访问实测 404, 而拿到绿色包的业务用户
+# 手里没有 GitHub 权限 —— 仓库一旦转回私有, 所有人的「检查更新」就永远查不到新版。
+RELEASE_REPO = "yuhuizhaocom/liushui_export"
 
 
 def parse(text):

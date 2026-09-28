@@ -53,17 +53,15 @@ jobs:
 
       # 版本号只写在 core/version.APP_VERSION 一处: 界面标题、程序里比对远端版本、这一步,
       # 三处都从它取。tag 与常量不一致时"检查更新"要么永远查不到这一版, 要么把它当成回退。
+      # 顺带核 RELEASE_REPO: 更新包发的就是这个仓自己的 Release, 改名/搬仓要一起改代码。
       - name: 核程序版本(tag 必须等于 vportable_ + APP_VERSION)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           TAG_NAME: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          python -c "import os,sys;from core import version;print('APP_VERSION=',version.APP_VERSION,' TAG=',os.environ['TAG_NAME'],' RELEASE_REPO=',version.RELEASE_REPO);sys.exit(0 if os.environ['TAG_NAME']=='vportable_'+version.APP_VERSION else 1)"
-          if ($LASTEXITCODE -ne 0) { throw "tag 与 core/version.APP_VERSION 不一致: 先把常量改对再打 tag, 否则用户那边「检查更新」查不到这一版(或版本号对不上)" }
-          # 公开仓的名字交给后面的发布步骤 —— 两处各写一份迟早会分叉, 程序就会去查一个空仓
-          $repo = (python -c "from core import version;print(version.RELEASE_REPO)").Trim()
-          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "RELEASE_REPO=$repo" + [Environment]::NewLine)
+          python -c "import os,sys;from core import version;print('APP_VERSION=',version.APP_VERSION,' TAG=',os.environ['TAG_NAME'],' RELEASE_REPO=',version.RELEASE_REPO,' 本次=',os.environ['GITHUB_REPOSITORY']);sys.exit(0 if os.environ['TAG_NAME']=='vportable_'+version.APP_VERSION and version.RELEASE_REPO==os.environ['GITHUB_REPOSITORY'] else 1)"
+          if ($LASTEXITCODE -ne 0) { throw "tag 与 core/version.APP_VERSION 不一致, 或 version.RELEASE_REPO 不是本次运行的仓库: 用户那边「检查更新」会查到一个不存在/不对的地方" }
 
       - name: 组装两个版本的程序目录(白名单复制 + 各自的启动器与说明)
         run: |
@@ -169,31 +167,3 @@ jobs:
               内网装不上时看包里的 `README-核心版.txt`(可以只拷内核目录 + 设
               `PLAYWRIGHT_BROWSERS_PATH`, 或者直接改用全量版)。
             ${{ github.event.inputs.note }}
-
-      # 「检查更新」在程序里查的是**公开仓**的那份资产: 代码仓私有, 匿名读 Release 实测 404,
-      # 而业务用户手上没有 GitHub 权限。没配 secret 就直接失败, 不许默默只发私有仓 ——
-      # 那样 CI 是绿的, 而所有人的「检查更新」永远查不到这一版。
-      - name: 公开 release 仓的 token 配了没有
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        shell: pwsh
-        run: |
-          if (-not $env:RELEASE_TOKEN) {
-            throw "仓库 secrets 里缺 RELEASE_TOKEN(一个对公开仓 $env:RELEASE_REPO 有 contents:write 的 fine-grained token), 这一版发不到「检查更新」查的地方"
-          }
-
-      - name: 同一份资产再发到公开 release 仓
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.RELEASE_TOKEN }}
-          repository: ${{ env.RELEASE_REPO }}
-          tag_name: ${{ github.ref_name }}
-          make_latest: true
-          files: |
-            dist/${{ env.PKG_NAME }}-full.zip
-            dist/${{ env.PKG_NAME }}-core.zip
-          body: |
-            程序版本 v${{ github.ref_name }}。工具里「检查更新」下的就是这里的 `-core.zip`
-            (只换程序文件, 不动依赖/内核/账单/登录态); 第一次装请用 `-full`。

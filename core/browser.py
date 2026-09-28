@@ -159,15 +159,17 @@ class BrowserManager:
                 self.context = self.playwright.chromium.launch_persistent_context(
                     user_data_dir=self._profile_dir,
                     headless=self.headless,
-                    viewport=None,   # 跟随窗口尺寸
+                    # 有头让页面跟着窗口走: viewport=None 会被绑定当"没传"丢掉, 留下 1280x720 固定视口只画左上角
+                    # 无头没有窗口可跟, no_viewport=True 反而退到 800x600
+                    no_viewport=not self.headless,
                     locale="zh-CN",
                     accept_downloads=True,
                     downloads_path=os.path.abspath(DOWNLOAD_DIR),
                     args=[
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
-                        "--start-maximized",   # 最大化窗口启动(替代 --start-fullscreen,避免内容只显示左上角)
-                        "--window-size=1920,1080",  # 兜底窗口尺寸,确保 viewport 足够大
+                        # 别加回 --window-size: 实测它会把 --start-maximized 顶掉(退回 normal)
+                        "--start-maximized",
                         "--disable-features=Translate",
                     ],
                 )

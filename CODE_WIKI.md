@@ -117,12 +117,13 @@ liushui_export/
 ├── 启动工具.vbs             # 免控制台启动脚本（pythonw，五档找 Python；装依赖交给程序的体检，见 14.2）
 ├── 使用说明.md              # 面向最终用户的使用文档
 ├── 脚本编写指南.md          # 面向开发者的平台插件编写指南
-├── core/                    # ★ 核心框架包（18 个模块 + __init__，见 2 章分层图）
-│   ├── main_gui.py          # 2769 行 · 界面 + 批任务编排
-│   ├── browser.py           # 1624 行 · BrowserManager
+├── core/                    # ★ 核心框架包（20 个模块 + __init__，见 2 章分层图）
+│   ├── main_gui.py          # 2871 行 · 界面 + 批任务编排
+│   ├── browser.py           # 1626 行 · BrowserManager
 │   ├── scheduler.py         # 671 行 · cron 与定时任务
 │   ├── platform_admin.py    # 336 行 · 平台管理与脚本调试
 │   ├── platform_base.py     # 289 行 · 平台基类与导出骨架
+│   ├── update.py            # 344 行 · 检查更新与就地更新（三道闸门）
 │   ├── exporters.py         # 231 行 · SmartExporter
 │   ├── deps.py              # 219 行 · 启动前依赖三档体检
 │   ├── logger.py            # 210 行 · 日志与统计（统计行加锁）
@@ -134,7 +135,8 @@ liushui_export/
 │   ├── instance.py          # 107 行 · 单实例守卫（只问不拦）
 │   ├── crashguard.py        # 119 行 · 崩溃落文件
 │   ├── keepalive.py         # 105 行 · 登录保活巡检
-│   ├── config.py            # 373 行 · 路径 / 设置 / 原子读写
+│   ├── config.py            # 376 行 · 路径 / 设置 / 原子读写
+│   ├── version.py           # 51 行 · 程序版本号与发布坐标
 │   └── theme.py             # 17 行 · 配色常量
 ├── platforms/               # ★ 平台插件目录（11 个平台，每个一个文件夹）
 │   ├── youzan/ wechatpay/ alipay/ pinduoduo/ jingdong/ douyin/
@@ -145,10 +147,11 @@ liushui_export/
 │   └── build_portable.py    # 170 行 · 绿色包白名单组装 + 成品扫描/自检
 ├── packaging/               # 绿色包的启动器与随包说明（run-portable.vbs / .bat / README）
 ├── .github/workflows/build-portable.yml   # Actions 出包：自带 Python + playwright + Chromium
-├── tests/                   # 38 个文件约 5900 行，410 项 pytest（离线，不碰真浏览器）
+├── tests/                   # 58 个文件约 9884 行，661 项 pytest（离线，不碰真浏览器）
 ├── downloads/               # 运行时创建：账单归档 + 汇总副本 + 待确认/
 ├── browser_data/            # 运行时创建：<平台key>/<商户名>/ 每商户一个 profile
 ├── recordings/              # 「打开」手工测试窗口的点击录制 jsonl（已 gitignore）
+├── updates/                 # 运行时创建：更新包暂存 + 被替换文件的备份（已 gitignore）
 ├── logs/                    # 运行时创建：run_*.log + stats.jsonl + crash_*.txt
 └── docs/superpowers/        # 历史设计/计划文档（plans/ 与 specs/）
 ```
@@ -165,6 +168,8 @@ liushui_export/
 | `core/loader.py`         | **平台加载器**。扫描 `platforms/` 自动发现并实例化所有平台，返回 `{key: 平台实例}` 字典：注册模块内**所有**带 key 的 `PlatformBase` 子类（用 `__module__` 排除从别处 import 进来的），key 重复/模块里没有平台类/导入失败都会写日志（导入失败以前只 print，pythonw 下界面完全看不到）。`reload_platforms()` 供平台管理改完脚本后免重启生效，需同时清 `sys.modules`、importlib 的 stat 缓存和磁盘上的 `.pyc`。                                                                                                           |
 | `core/outputs.py` | **导出文件汇总**。`find_output_files`（认 `平台/日期`、`平台/商户/日期`、`平台/商户/子商户/日期` 三种结构，日期目录**最多下探两层**、找到就不再往下所以 `历史/` 不会被重复计数；跳过 `.crdownload/.tmp/.part`）、`copy_to_summary_dir`（复制到 `downloads/开始_结束_时间戳/`，无文件返回 None 因此不再打开文件夹；`summary_name` 处理撞名：两个子商户的原始文件名一模一样时加"上一级非日期目录名"前缀，绝不静默覆盖）、`sanitize_name`（路径非法字符清理，商户名与 profile 目录共用）。纯文件操作，可脱离界面测试。 |
 | `core/dialogs.py` | **查看类对话框**。`show_log_history(root)` 历史日志窗口、`show_stats_dashboard(app)` 稳定性看板；只读根窗口/状态栏，与导出流程无关。 |
+| `core/update.py` | **检查更新与就地更新**。`fetch_latest`/`parse_release` 读公开 release 仓的 `releases/latest`（只认 `-core.zip` 那个资产），`download` 下到 `updates/` 并按发布页声明的字节数核对，`inspect_package` 验结构，`apply_update` 只覆盖包内 `app/` 底下的程序文件（先备份、失败整批退回、清 `__pycache__`）。三道闸门写在模块开头：只动 `app/`、全量版要求的新 playwright 与自带的不一致就拒、程序目录只读就只留包不动文件。所有网络异常折成一句说明返回，不往外抛。 |
+| `core/version.py` | **程序版本号与发布坐标**。`APP_VERSION`（界面标题、更新比对、CI 打 tag 核对三处共用）、`RELEASE_REPO`（公开 release 仓，代码仓私有匿名读不到）、`TAG_PREFIX`，以及 `parse`/`is_newer`（脏版本号一律按"没新版"处理，不拿读不懂的数据让用户覆盖自己的程序）。 |
 | `core/theme.py` | **界面配色常量**。单独成模块供 `dialogs.py` 复用，避免反向 import `main_gui` 成环。 |
 | `core/platform_base.py`  | **平台抽象基类**。定义平台元信息（`key/name/login_url/export_url/guide/enabled`）与接口约定（`login()`、`export()`），默认 `login()` 打开登录页，默认 `export()` 走 `SmartExporter`；另提供通用导出骨架 `open_export_page/set_date_range/trigger_export/download_export_file` + `run_standard_flow`，平台只覆盖有差异的钩子。子商户那一档另有 `supports_sub_merchants` + `switch_sub_merchant`/`current_sub_merchant`/`verifies_sub_merchant_identity`，默认全关（见 5.3）。 |
 | `core/submerchants.py` | **子商户清单与归属比对**（银联这类"主账号一次登录、切着导多份"）。清单存在工作空间 `sub_merchants.json`（键 = `平台key/商户名`，不放 settings.json：那个文件每次点勾都整体重写），坏文件回退成"按未配置处理"并把原因带出去。`clean_list` 拆分隔符 + 清洗 + 挡掉 `.`/`..`/纯点下划线名（这些会变成一级目录名）。`matches(expected, on_page)`：归一化后相等，或一方**独立出现**在另一方里（边界只认 ASCII 字母数字，所以 `8234` 不许蒙过 `8234000540`，而 `8234000540已激活` 算命中）；任何一侧为空都是"不匹配"。全角映射用逐对字典而不是 `zip` —— 长度对不齐会静默把数字翻译成别的数字。 |
@@ -224,6 +229,7 @@ liushui_export/
 | `_action_export_all()` | 校验后弹出任务确认框（平台·商户明细 + 日期，最多列 12 项），确认后**在主线程取好日期、单步开关与"导出前检查登录"开关**再启动 `_do_export(tasks, start, end, step_debug, preflight)`。这是"工作线程不回读界面"契约最典型的落实点。 |
 | `_action_check_status()` | 启动线程执行 `_do_check(tasks)`，逐个商户调用平台自身的 `check_login` 判断登录态（与导出前预检共用 `_probe_login` 这条探测路径）。日期校验用 `show_warning=False`：只规范化不打扰。 |
 | `_action_open_folder()` | `makedirs(exist_ok=True)` + `os.startfile` 打开 `downloads/`（Windows 专有，无 try）。 |
+| `_action_check_update()` → `_update_check_worker(manual)` → `_ask_apply_update` → `_update_apply_worker` | 「检查更新」：按钮起一个线程查远端（**不占 `running`**），有新版才投递回主线程问一句，点头才 `_run_async` 跑下载+覆盖（导出/定时任务这时让路）。启动时 `_start_update_check()` 走同一个 worker 但 `manual=False`：只往日志写"发现新版本"，一个字都不弹。全链路的弹窗都经 `_ui` 回主线程，异常一律折成日志行（见 5.13）。 |
 | `_action_open_merchant(key, merchant)` → `_open_merchant_browser` | 商户行「打开」= 手工测试兼录制：`force_visible=True` 起浏览器 → **`enable_action_trace()`** 开始把点击/输入录成 `recordings/<平台>_<商户>_<时间>.jsonl` → 导航 `export_url` → 每 2 秒轮询页面标题。三条退出路径：点「中止」、超过 `MERCHANT_PROBE_TIMEOUT_S`(30 分钟)、页面被关掉。窗口开着期间 `running` 一直为真（导出被挡、定时任务被推迟），所以必须能中止且不能无限挂着。 |
 | `_request_abort()` | 「中止本次任务」按钮：置 `_abort` 事件并记日志。只在**商户边界**生效（`_preflight_login_check`/`_execute_export_tasks`/`_do_login`/`_do_check`/`_open_merchant_browser` 每轮开头查 `_aborted()`），不会中途掐浏览器留下半截下载；`running` 为假时静默忽略；按钮由 `_run_async` 启用、`_thread_wrapper` 结束时置灰。 |
 | `_action_help()` | 弹简化的使用说明。文案与现流程一致：登录以**关掉浏览器窗口**为完成标志（不是点『确定』），并提了导出前的登录预检与「中止」。`tests/test_action_help_text.py` 钉着这几句，改回旧说法即红。 |
@@ -612,6 +618,24 @@ liushui_export/
 | `show_stats_dashboard(app)` | 上半 Treeview 是 `summarize_stats()`（全量读）按平台成功率，<60 红 / <85 橙 / 其余绿；下半是 `load_stats(limit=200)` 的最近明细。依赖注入面只有两点：`app.root`（剪贴板/父窗）与 `app._set_status`——测试就按这两点造假对象。刷新会重读一遍，注意一次刷新读两遍全量。 |
 | 线程要求 | 两个函数都直接建控件、`grab_set`、读写剪贴板 → **必须主线程调用**（入口是界面按钮）。 |
 
+### 5.13 检查更新与就地更新（core/update.py、core/version.py）
+
+> 前提：更新包必须来自**匿名可读**的地方。代码仓 `yuhuizhaocom/liushui_export` 是私有的，实测匿名访问 `api.github.com/repos/.../releases/latest` 与发布页都是 404，而业务用户手上没有 GitHub 权限 —— 所以 CI 打 tag 时把同一份资产再发一份到 `version.RELEASE_REPO`（公开仓，需要一个对该仓 `contents:write` 的 `RELEASE_TOKEN` secret；没配就当场失败，不许默默只发私有仓，那样 CI 是绿的而所有人都查不到这一版）。
+> 只下 `-core.zip`（几 MB）而不是 `-full`（自带解释器+依赖+内核，上百 MB）：两个包的程序部分逐字相同（`build_portable.APP_ITEMS`），所以小包装得下"换代码"这件事，业务机器也下得动。
+
+| 成员 | 说明 |
+| --- | --- |
+| `version.APP_VERSION` | 全仓唯一的版本出处（标题、远端比对、CI 核 tag）。以前版本只活在 tag 里，界面标题写死"v1.0"而实际发到 `vportable_0.0.6`，用户报问题时报不出自己那一版。 |
+| `version.parse` / `is_newer` | 剥 `vportable_` 前缀取数字段，补零后比较（`0.0.10 > 0.0.9`）。任一边走不出数字 → `is_newer` 返回 False：不拿读不懂的数据让用户去覆盖自己的程序。 |
+| `fetch_latest(timeout=6, opener=None)` | 查 `releases/latest` → `(Release|None, 原因)`。HTTP 错误、连不上、返回不是 JSON 全部折成第二项返回，**不抛**；匿名限额撞到 403 也只当"这次没查到"。`opener` 是给测试注入口的（CI 离线）。 |
+| `parse_release(payload)` | 只认名字以 `-core.zip` 结尾的资产；挑错成全量版就等于"重下整个包"。没有核心包时把资产个数与前三个名字带进原因，方便看是发错了还是仓没同步。 |
+| `download(release, ...)` | 下到 `updates/`（`config.UPDATE_DIR`，**在 downloads 之外**：兜底扫描会把"本轮新出现的文件"认领成账单，几百 MB 的 zip 冒进去就是事故）。发布页写了 size 就逐字节核对，对不上删掉重来，不许留半成品。 |
+| `inspect_package(zip)` | 结构门：不是 zip / 缺 `app/core/browser.py` / 里面混着 `python`、`site-packages`、`runtime`（前两段都要看，因为 `python/` 在顶层而依赖内核在 `app/` 下）一律拒。条目名分隔符两种都认（`Compress-Archive` 历史上两种都产出过）。只返回 `app/` 底下的成员——顶层启动器与 README 属于整包替换。 |
+| `dependency_gate(zip)` | 读包内 `app/core/deps.py` 的 `REQUIRED_PLAYWRIGHT_VERSION`，与本包自带的比（`deps.installed_version()`）。不一致就拒：内核目录名带版本，混版本直接起不来（CI 那句"三处版本必须一致"同一条）。核心版没有自带依赖，不拦，交给启动时的体检引导安装；连自己也读不出也不拦（这条线不能比业务更苛刻）。 |
+| `program_writable()` | 走 `config._probe_writable`。只读程序目录（U 盘/光碟/受限目录）是真支持的场景，此时**只把包留在 `updates/`** 并给出解压位置。 |
+| `apply_update(zip, log, ...)` | 逐个备份→写临时文件→`os.replace`；任何一步失败：已换的复原、新版本才有的新文件删掉、半截暂存文件删掉（暂存名沿用 `*.tmp-<pid>-<序号>`，开发时程序目录就是仓库根，别冒进 git status）。成功后清 `app/**/__pycache__`。全程**不删本地多出来的文件**（那可能是用户自己加的平台脚本）。返回"重启后生效"，不自动重启。 |
+| 界面接线（`_action_check_update` 等） | 启动后 `_start_update_check()` 静默查一次，只写日志；点按钮才问。网络那一趟**不占 `running`**（慢 6 秒不该挡导出），真要改文件才 `_run_async`，那时导出与定时任务自动让路。所有弹窗经 `_ui` 投回主线程执行（子线程直接拉 Tk 窗口会把界面吊住，见 crashguard 那条）。`_update_check_worker` 自己还包了一层 try：组件炸了也只写一行日志。 |
+
 ***
 
 ## 6. 依赖关系
@@ -986,7 +1010,7 @@ python -m playwright install chromium
 | `packaging/` + `.github/workflows/build-portable.yml` | — | 两个版本的启动器与说明（`run-portable.*` / `run-core.*`，纯 ASCII vbs + 可看错的 bat）和出包流水线，见 14.2 |
 | `tools/recording_to_script.py` | 272 行 | 录制 JSONL → 脚本骨架生成器：输出基类钩子形状（`set_date_range`/`trigger_export` 覆盖 + `run_standard_flow`），目标文件已存在时默认拒绝覆盖（`--force` 才写） |
 | `platforms/*/export.py` | 11 个平台共 1053 行 | 平台导出脚本（微信支付 202 行最重，京东 98 / 拼多多 95 / 视频号 134 / 有赞 104，六个骨架平台各 56-64 行）。**6 个用 `run_standard_flow` 骨架**（快手、支付宝、天猫、抖音、小红书、银联）；京东/拼多多用 `wait_for` 驱动、视频号与微信支付日期控件特殊、有赞走 URL 带日期参数，这 5 个保留逐步写法（强套骨架会改变操作）。 |
-| `tests/` | 55 个文件约 9469 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（**630 项**）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」。**2026-09-26 本轮新增**：兜底扫描不认领 `历史/`（含"真下载仍要认领"的反向钉）、多 sheet xlsx 数行、定时任务编辑与 30 秒重载的竞态（真 Tk）、任务文件写不进盘的内存兜底与出声、cron 反向区间与永不成立的表达式、`wait_user` 的四种回话与"没人应答≠已确认"、归档失败/旧件被占用时两份文件都保留。**廿四轮巩固**：`snapshots/` 与图片不进兜底候选（含一条"名单必须等于那四个类常量"的结构钉）、同名同 cron 的两条任务各自跑、同秒两份另存/两份历史归档都在、归不进去的落 `待确认/`（含"校验判否的照旧删"反向钉）、界面那一路写盘只试一次并转述到日志窗、非模态确认窗（按钮文案/不抢 grab/超时与中止都收窗/主窗口 topmost 不被碰）、中止能掐断重试（含批量与子商户两条接线）、统计并发写一行不丢 + 单实例守卫的接管与"只问不拦"、`.gitignore` 与暂存命名必须同步、下载等待时长只有一个来源（假时钟量 + 源码扫描）。 |
+| `tests/` | 58 个文件约 9884 行（含 `conftest.py` 的 CI 依赖自举） | pytest 测试（**661 项**）：日志与统计尾部读、加载器、保活、平台管理、重试、调度、导出结果落库、界面线程模型、平台调用序列与骨架迁移、有赞日期、录制生成器、文件汇总与原子写、对话框构造、商户测试窗口、文字点击的精确性与歧义提醒、崩溃兜底与启动器找 Python 的五档顺序、商户增删改与查重、平台勾选联动、日期区间校验、过期文件清理、首次登录"关窗口即完成"的等待与核实、关浏览器前保存登录态（含"更空的一份不覆盖"守卫与原子写）、导出前登录预检（一次弹窗/集中重登后按下标剔除/没能核实不拦人/定时任务不预检）、下载归位与单次归档、日期未填入即停手、下载文件命名（前缀+原始名/扩展名原样/幂等/子商户档）与成品格式门、工作空间解析与打包白名单、CI 里测试依赖从包内借（conftest 的挂载顺序）、依赖三档体检与修复命令、核心版启动器找 Python 的三档与商店占位桩、两个版本的成品结构、启动前依赖弹窗的三种走法（缺包可退、缺内核放行、版本不对只问）、子商户清单与归属比对、一次登录切着导多份的循环与「归属没确认就停手」。**2026-09-26 本轮新增**：兜底扫描不认领 `历史/`（含"真下载仍要认领"的反向钉）、多 sheet xlsx 数行、定时任务编辑与 30 秒重载的竞态（真 Tk）、任务文件写不进盘的内存兜底与出声、cron 反向区间与永不成立的表达式、`wait_user` 的四种回话与"没人应答≠已确认"、归档失败/旧件被占用时两份文件都保留。**廿四轮巩固**：`snapshots/` 与图片不进兜底候选（含一条"名单必须等于那四个类常量"的结构钉）、同名同 cron 的两条任务各自跑、同秒两份另存/两份历史归档都在、归不进去的落 `待确认/`（含"校验判否的照旧删"反向钉）、界面那一路写盘只试一次并转述到日志窗、非模态确认窗（按钮文案/不抢 grab/超时与中止都收窗/主窗口 topmost 不被碰）、中止能掐断重试（含批量与子商户两条接线）、统计并发写一行不丢 + 单实例守卫的接管与"只问不拦"、`.gitignore` 与暂存命名必须同步、下载等待时长只有一个来源（假时钟量 + 源码扫描）。**本轮（浏览器窗口与就地更新）**：有头 `no_viewport` / 无头留默认视口 / `--window-size` 不许混进来（断言的是真正发给 Playwright 的参数，被绑定丢掉的那个 `None` 不会出现在里面）、更新的解析与闸门（只认 `-core.zip`、缺探针/混解释器/混依赖/混内核都拒、Compress-Archive 两种分隔符都认、发布页声明的字节数对不上就丢掉、全量版要求的新 playwright 与自带的不一致就拒、核心版不拦、只读程序目录只留包）、覆盖失败整批退回且新版本才有的新文件被收走且半截暂存文件不许留在程序目录、`updates/` 不在 `downloads` 树下且与 `.gitignore` 同步、脏版本号一律按"没新版"、更新组件自己抛异常时启动那一路静默而手动那一路必须有回话。 |
 | `start.bat` / `启动工具.vbs` | 40 / 124 行 | 源码版的启动脚本（vbs 五档找 Python；**必须保持纯 ASCII**，见 13 章）。它**不再**自己检查/安装依赖 —— 那个判断只在 `core/deps.py` + `check_dependencies()`（见 12 章第 29 条） |
 | `requirements-dev.txt` | — | 开发依赖（pytest，已装入 `.venv`；`python -m pytest -q` 或全局 `py -m pytest -q` 均可，全套约 4.5 秒） |
 | `使用说明.md` / `脚本编写指南.md`  | —             | 用户文档 / 开发文档                     |
@@ -1080,6 +1104,7 @@ python -m playwright install chromium
 48. **在 Tk 主线程里写文件的那一路不许做"有界重试"，且失败必须说出口**。`write_text_atomic` 默认对 Windows 的瞬时占用退避重试 8 次（累计约 1.12 秒）——后台线程（调度器写 `last_run`、子商户清单）等得起，界面等不起：全仓 6 个 `save_settings` 调用点都在变量 `trace_add` 与按钮回调里，实测文件被长期占住时**点一下勾冻 1.13 秒**。所以 `save_settings(..., ui_call=True)` 把重试压到 1 次、返回 bool，并由 `LiushuiApp._save_setting` 把失败转述到**界面日志窗**（`config` 不认识界面，只写得进文件日志；用户看的是这个窗口）。这几个 json 的读侧一律是 `except → 用默认值/返回空`，所以"写失败还静默"等于骗人。
 49. **「中止」必须贯穿到每一次等待里，而不只是商户边界**。第 14 条说"中止只在边界生效、不许中途掐浏览器"—— 而两次尝试之间的等待正是边界。`run_with_retry` 以前完全不看中止信号：按下「中止」后当前那一家仍会把 2 次重试跑满、中间还要睡 30+60=90 秒，界面上"正在中止…"就那么挂着几分钟。现在 `run_with_retry(..., aborted=self._aborted)` 两处都看（决定重试前看一眼；等待走 `_sleep_or_aborted`，分段睡、每片看一眼），批量循环与子商户循环都接上。同类要求适用于所有"工作线程等主线程答复"的地方（`_ask_user_confirmed` 已按此改成可打断的非模态窗）。
 50. **追加写的统计文件必须加锁；跨进程的重复实例必须问一句**。`record_stat` 无锁时实测同进程 10 线程各写 100 行只落 964 行、**0 个坏行** —— 整条静默消失，看板分母凭空变小，而 `load_stats` 对坏行是 except 跳过，所以谁也看不见（写它的线程不止一个：任务线程收尾与导出前预检那一路都落统计）。锁只挡同进程；跨进程那一层由 `core/instance.py` 的单实例守卫去问，口径与第 28 条一致（**只问不拦**：锁可能是上次崩溃留下的，拦死就等于让人永远开不了）。
+51. **就地更新只许换 `app/` 底下的程序文件，三道闸门一条都不许松**。`core/update.py` 是"只换代码不换依赖"的通道：① 只覆盖包内 `app/` 的成员，顶层启动器/README 属整包替换，本地多出来的文件（可能是用户自己加的平台脚本）一律不删；② 新代码要求的 playwright 与本包自带的不一致就必须拒 —— 内核目录名带版本，混版本直接起不来，换完用户得到的是一个双击没反应的包；③ 程序目录只读时不许覆盖，只把包留在 `updates/` 并给出解压位置。另外 `updates/` 必须待在**工作空间里而不在 `downloads` 树下**（第 8 条那张兜底扫描会把"本轮新出现的文件"认领成账单，几百 MB 的 zip 冒进去就是拿错人的对账单）；发布源必须是匿名可读的公开仓，代码仓私有实测 404，配不上 `RELEASE_TOKEN` 就让 CI 失败，不许"绿着但没人更新得到"。`tests/test_update.py` 逐条钉着（含"覆盖失败必须整批退回"和"半截暂存文件不许留在程序目录"）。
 
 ***
 
